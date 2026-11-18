@@ -1322,6 +1322,10 @@ manager that connects the computer holds it and sends it once the computer is ba
 - **Known gap** (#10702): a runtime Agent's row leaves the list when its node shuts down cleanly, or after the manager
   restarts while its computer is away; its held messages then have no row to show on until it is listed again. They
   are still sent.
+- **Limits**: held messages stay with the manager that held them: moving the computer to another manager (or one
+  computer absorbed into another) while some are held leaves them unsent there. A message the computer refused does
+  not hold back the later ones, so a Retry of it arrives after them. Two messages to one Agent sent at the same moment
+  as the computer comes back, or while the manager cannot read its database, may go out in either order.
 - **Not yet held**: starting a new Agent on an offline computer (#10674) and dispatching a to-do to one (#10675).
 
 ## Availability metrics (#4924)
