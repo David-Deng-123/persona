@@ -1293,10 +1293,12 @@ manager that connects the computer holds it and sends it once the computer is ba
 (`server/internal/devices/held.go`):
 
 - **Held only when nothing was written.** The hub marks the owner's message from a full device (a person's, not an
-  extension's or the hub token's) to an Agent it lists, with a `client_msg_id` and none of a to-do, a fresh to-do
-  start's first message or a launcher switch, as one that may be held (`NodeCall.hold`). The devices manager holds it
-  when the call provably wrote nothing to the node (not connected, closed or suspended before the write), or when older messages of the same Agent are held still waiting, being sent or with
-  an unclear outcome (it never overtakes them). It keeps the call exactly as the hub sent it, who sent it, the
+  extension's, a pairing code's or the hub token's) whose app declares `agent_message_hold` (client_hello or
+  `X-Persona-Features`: the web today; an app that does not draw held messages keeps today's failure) to an Agent it
+  lists, with a `client_msg_id` and none of a to-do, a fresh to-do start's first message or a launcher switch, as one
+  that may be held (`NodeCall.hold`). The devices manager holds it when the call provably wrote nothing to the node
+  (not connected, closed or suspended before the write), or when older messages of the same Agent are held still
+  waiting, being sent or with an unclear outcome (it never overtakes them). It keeps the call exactly as the hub sent it, who sent it, the
   submission and the share authority with it, in its Postgres (table `held_operations`, kind `message`), and answers
   `held`; the hub answers the app 202 `{"delivered":"later","undelivered":{…}}`, as for a Persona chat, and records the
   send as `later` (a retry of the id is answered the same and sends nothing). An older manager ignores the mark, and a
@@ -1305,7 +1307,8 @@ manager that connects the computer holds it and sends it once the computer is ba
   line to show in `error`: "Will send when <computer> is back", "Sending…", "Waits behind the message above", or why it
   was not sent, with Delete, and Retry once it failed. Every client that draws `undelivered` shows them; the web sends
   Retry and Delete to `…/sessions/{mid}/{sid}/held/{msg}`, and older apps' calls to the assistant's routes reach them
-  too. The web's message box on such an Agent stays open and says "<computer> is offline. Sends when it's back."
+  too. Only a person's own full device may (the hub's `X-Persona-Person` on the relayed request): a Retry sends the
+  message with its sender's provenance again. An Agent with held messages cannot be deleted until they are (409). The web's message box on such an Agent stays open and says "<computer> is offline. Sends when it's back."
 - **Sent when the computer and the Agent are back, once.** A held message goes while its computer's node is connected
   and its current session list has the Agent (a runtime Agent comes back a moment after the node; a node connected for
   two minutes without it gets the message anyway, and its answer decides). Each Agent's messages go oldest first, under
@@ -1327,7 +1330,9 @@ manager that connects the computer holds it and sends it once the computer is ba
 - **Known gap** (#10702): a runtime Agent's row leaves the list when its node shuts down cleanly, or after the manager
   restarts while its computer is away; its held messages then have no row to show on until it is listed again. They
   are still sent.
-- **Limits**: held messages stay with the manager that held them: moving the computer to another manager (or one
+- **Limits**: a held message is sent with the provenance it was taken with, even if that device was signed out
+  meanwhile (#10708); the owner sees it on every device and can delete it. Held messages stay with the manager that
+  held them: moving the computer to another manager (or one
   computer absorbed into another) while some are held leaves them unsent there. A message the computer refused does
   not hold back the later ones, so a Retry of it arrives after them. Two messages to one Agent sent at the same moment
   as the computer comes back, or while the manager cannot read its database, may go out in either order.
