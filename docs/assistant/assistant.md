@@ -1285,6 +1285,34 @@ operation then read as accepted and the bubble waited for the transcript and wen
   the message goes into its relay queue and is tried again under the same `once_id`. A conversation that failed to
   take a relayed message is tried again after `relayRetryGap` (30 s), not on every session list.
 
+### Messages to an Agent whose computer is away (#10661)
+
+A laptop connected through Persona Link is often closed. A message to one of its Agents (Claude Code, Codex…; not a
+Persona chat, which keeps its own as above) used to fail with "your computer is offline" and nothing was kept. Now the
+manager that connects the computer holds it and sends it once the computer is back
+(`server/internal/devices/held.go`):
+
+- **Held only when nothing was written.** The hub marks an owner's message with a `client_msg_id` (not one carrying a
+  to-do, a fresh to-do start's first message or a launcher switch) as one that may be held (`NodeCall.hold`). The
+  devices manager holds it when the computer's node is not connected, so nothing reached it, or when older held
+  messages of the same Agent are still waiting (it never overtakes them). It keeps the call exactly as the hub sent it,
+  who sent it and the share authority with it, in its Postgres (table `held_operations`, kind `message`), and answers
+  `held`; the hub answers the app 202 `{"delivered":"later","undelivered":{…}}`, as for a Persona chat. An older manager
+  ignores the mark and the app gets the failure as before.
+- **Shown everywhere.** The row's `undelivered` lists held messages with `computer` (the computer's name) and the whole
+  line to show in `error`: "Will send when <computer> is back", with Delete. Every client that draws `undelivered`
+  shows them; Retry and Delete go to `…/sessions/{mid}/{sid}/held/{msg}`.
+- **Sent at once when the computer is back, once.** When the node's new connection is configured and listed, the held
+  messages go, oldest first for each Agent, under their own `client_msg_id`. A message is marked as being sent before
+  the call; a call that proves nothing was written (the node dropped again before it) leaves it waiting.
+- **Never sent twice by itself.** A try whose outcome is unknown (the connection dropped during it, no answer in time,
+  the node said it may have typed it, the manager stopped during it) is not tried again: it fails with "May have
+  arrived before the connection dropped. Check the chat, then retry or delete", and the Agent's later held messages wait
+  behind it until the owner picks Retry or Delete. A node that refused it (nothing typed) fails it with its reason.
+- **Gives up after a day.** A message still held 24 hours after it was taken fails with "Not sent: <computer> was away
+  for 24 hours"; Retry starts a new day, Delete drops it. Delete is refused while that message is being sent.
+- **Not yet held**: starting a new Agent on an offline computer (#10674) and dispatching a to-do to one (#10675).
+
 ## Availability metrics (#4924)
 
 Step M1 of `docs/design/proposals/main-chat-availability.md`: four numbers that say whether the main chat stays
