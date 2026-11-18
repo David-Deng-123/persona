@@ -11,5 +11,6 @@
   "not_found": "这条消息已经不在等待发送了。",
   "read_only": "这台设备不能修改等待发送的消息",
   "store_failed": "现在没法修改这条消息，请稍后再试。",
-  "not_prepared": "Persona 没能准备好这条消息"
+  "not_prepared": "Persona 没能准备好这条消息",
+  "ahead": "这个 Agent 还有更早的消息在等待发送，请等它们发出后再发这条。"
 }

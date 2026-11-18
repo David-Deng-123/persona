@@ -661,7 +661,7 @@ func (d *Devices) callNode(ctx context.Context, p devicewire.NodeCall) (json.Raw
 	if m == nil {
 		return nil, &rpc.Error{Code: devicewire.CodeNoDevice, Message: fmt.Sprintf("no machine %q", p.MachineID)}
 	}
-	held := d.heldCallOf(m, p) // the owner's message to an Agent, which may wait for its computer (held.go)
+	held := d.heldCallOf(ctx, m, p) // the owner's message to an Agent, kept in order or held for its computer (held.go)
 	if held != nil {
 		if err := d.holdBehind(ctx, held); err != nil {
 			return nil, err
@@ -726,7 +726,7 @@ func (d *Devices) callNode(ctx context.Context, p devicewire.NodeCall) (json.Raw
 		m.recordModeSet(p.Actor, modeSID, modeFrom, modeTo, out)
 	}
 	d.observeCreationCall(p, params, out, preparation, err)
-	if err != nil && held != nil && heldMayHold(err) {
+	if err != nil && held != nil && held.hold && heldMayHold(err) {
 		// Nothing was written: held until the node is back. Its share receipt waits for that delivery.
 		if herr := d.hold(ctx, held); herr != nil {
 			return nil, herr

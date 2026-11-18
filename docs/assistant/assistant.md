@@ -1319,10 +1319,11 @@ manager that connects the computer holds it and sends it once the computer is ba
   the node said it may have typed it, the manager stopped during it) is not tried again: it fails with "May have
   arrived before the connection dropped. Check the chat, then retry or delete", and the Agent's later held messages wait
   behind it until the owner picks Retry or Delete. Once per connection that lists the Agent, the manager reads its
-  latest turns: the message there under its `client_msg_id` (never matched by its words) did arrive, leaves the row,
-  and the next ones go. A node that refused it (nothing typed), or a message that could not be made ready to send
-  before the node was asked, fails with the reason and the next one goes; once the node took a message it counts as
-  delivered, whatever came after. A message the owner is retrying or deleting holds the later ones back meanwhile.
+  latest turns: a line there that the node tied to its `client_msg_id` (the node ties a typed line to its message by
+  its words) shows it did arrive: it leaves the row, and the next ones go. A node that refused it (nothing typed), or
+  a message that could not be made ready to send before the node was asked, fails with the reason and the next one
+  goes; once the node took a message it counts as delivered, whatever came after. A message the owner is retrying or
+  deleting holds the later ones back meanwhile.
 - **Gives up after a day.** A message still waiting for its computer 24 hours after it was held fails with "Not sent:
   <computer> was away for 24 hours"; Retry starts a new day, Delete drops it. Delete is refused while that message is
   being sent. One held behind a message that may have arrived waits for the owner instead: it does not expire, and it
