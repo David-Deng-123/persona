@@ -24,14 +24,16 @@ import (
 
 // holdManager is the devices manager of machine "box", whose computer is away: a session.send with Hold is held
 // (CodeHeld, as internal/devices held.go answers), any other one is refused machine_offline as before. ignoresHold
-// plays a manager from before holding, holdsAll a wrong one that answers held to any send. calls are the node calls
-// it got, relayed the apps' requests the hub relayed to it.
+// plays a manager from before holding, holdsAll a wrong one that answers held to any send; heldAhead: older messages
+// of the session are held, so an ordered send without Hold is refused held_ahead, nothing typed. calls are the node
+// calls it got, relayed the apps' requests the hub relayed to it.
 type holdManager struct {
 	mu          sync.Mutex
 	calls       []devicewire.NodeCall
 	relayed     []assistantwire.HTTPRequest
 	ignoresHold bool
 	holdsAll    bool
+	heldAhead   bool
 }
 
 func (k *holdManager) sends() []devicewire.NodeCall {
@@ -90,10 +92,14 @@ func holdHub(t *testing.T, row proto.Session) (*Hub, *Machine, *holdManager) {
 		}
 		k.mu.Lock()
 		k.calls = append(k.calls, c)
-		ignores, all := k.ignoresHold, k.holdsAll
+		ignores, all, ahead := k.ignoresHold, k.holdsAll, k.heldAhead
 		k.mu.Unlock()
 		if c.Method != "session.send" {
 			return map[string]any{}, nil
+		}
+		if ahead && c.Ordered && c.Hold == nil {
+			return nil, &rpc.Error{Code: "held_ahead", Message: "Earlier messages to this Agent are waiting to be sent.",
+				Data: json.RawMessage(`{"delivered":"none"}`)}
 		}
 		if (c.Hold == nil && !all) || ignores {
 			return nil, &rpc.Error{Code: devicewire.CodeMachineOffline, Message: "Studio Mac is offline"}
@@ -169,8 +175,9 @@ func TestAgentMessageHeldWhileTheComputerIsAway(t *testing.T) {
 		t.Fatalf("answer: %d %s", w.Code, w.Body)
 	}
 	sends := k.sends()
-	if len(sends) != 1 || sends[0].Hold == nil || sends[0].Hold.Lang != "ja" || sends[0].Caller == nil || sends[0].MachineID != "box" {
-		t.Fatalf("node calls %+v, want one holdable session.send in ja with its caller", sends)
+	if len(sends) != 1 || sends[0].Hold == nil || sends[0].Hold.Lang != "ja" || !sends[0].Ordered || sends[0].Caller == nil ||
+		sends[0].MachineID != "box" {
+		t.Fatalf("node calls %+v, want one holdable, ordered session.send in ja with its caller", sends)
 	}
 	var params map[string]any
 	if err := json.Unmarshal(sends[0].Params, &params); err != nil || params["text"] != "run the tests" ||
@@ -205,7 +212,8 @@ func TestAgentMessageHeldWhileTheComputerIsAway(t *testing.T) {
 // Only a person's plain message to an Agent the hub lists may be held. A message without an id cannot go once later; a
 // to-do's hand-off, an Agent's first prompt and a launcher switch are decided now; an assistant conversation keeps its
 // own (keepUndelivered); a session the hub does not list may be one; an extension's, the hub token's or an answer-only
-// device's message is no owner's bubble a full device could Retry or Delete. None carries Hold, and each fails as before.
+// device's message is no owner's bubble a full device could Retry or Delete. None carries Hold or Ordered, and each
+// fails as before.
 func TestOnlyAPlainAgentMessageIsHoldable(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -240,8 +248,8 @@ func TestOnlyAPlainAgentMessageIsHoldable(t *testing.T) {
 			}
 			w := sendAsWho(h, m, who, tc.sid, "en", tc.body)
 			sends := k.sends()
-			if len(sends) != 1 || sends[0].Hold != nil {
-				t.Fatalf("node calls %+v, want one session.send without Hold", sends)
+			if len(sends) != 1 || sends[0].Hold != nil || sends[0].Ordered {
+				t.Fatalf("node calls %+v, want one session.send without Hold or Ordered", sends)
 			}
 			if w.Code < http.StatusBadRequest {
 				t.Fatalf("answer %d %s, want the failure as before", w.Code, w.Body)
@@ -265,7 +273,8 @@ func TestHoldableSendToAnOlderManagerFailsAsBefore(t *testing.T) {
 	}
 }
 
-// Hold goes on a session.send only: any other call under the same context goes as before.
+// Hold and Ordered go on a session.send only: any other call under the same context goes as before. withHold's send
+// carries both, withOrdered's Ordered alone, an unmarked one neither.
 func TestHoldOnlyOnSessionSend(t *testing.T) {
 	h, _, k := holdHub(t, agentRow)
 	ctx := withHold(context.Background(), "en")
@@ -278,14 +287,17 @@ func TestHoldOnlyOnSessionSend(t *testing.T) {
 	if err := node.Call(context.Background(), "session.send", map[string]any{"session_id": "s1"}, nil); err == nil {
 		t.Fatal("an unmarked send was held")
 	}
+	if err := node.Call(withOrdered(context.Background()), "session.send", map[string]any{"session_id": "s1"}, nil); err == nil {
+		t.Fatal("an ordered send was held")
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if len(k.calls) != 4 {
+	if len(k.calls) != 5 {
 		t.Fatalf("calls %+v", k.calls)
 	}
 	for i, c := range k.calls {
-		if (c.Hold != nil) != (i == 2) {
-			t.Fatalf("call %d (%s) carried Hold %+v", i, c.Method, c.Hold)
+		if (c.Hold != nil) != (i == 2) || c.Ordered != (i == 2 || i == 4) {
+			t.Fatalf("call %d (%s) carried Hold %+v, Ordered %t", i, c.Method, c.Hold, c.Ordered)
 		}
 	}
 }
@@ -318,8 +330,8 @@ func TestHoldOnlyForAClientThatDrawsIt(t *testing.T) {
 			id := strings.ReplaceAll(tc.name, " ", "-")
 			w := sendFrom(h, m, ownerPhone, tc.client, tc.features, "s1", "en", fmt.Sprintf(body, id))
 			sends := k.sends()
-			if len(sends) != 1 || (sends[0].Hold != nil) != tc.held {
-				t.Fatalf("node calls %+v, want one session.send, held %t", sends, tc.held)
+			if len(sends) != 1 || (sends[0].Hold != nil) != tc.held || !sends[0].Ordered {
+				t.Fatalf("node calls %+v, want one ordered session.send, held %t", sends, tc.held)
 			}
 			if held := w.Code == http.StatusAccepted && strings.Contains(w.Body.String(), `"delivered":"later"`); held != tc.held {
 				t.Fatalf("answer %d %s, held %t", w.Code, w.Body, tc.held)
@@ -345,8 +357,8 @@ func TestHeldAnswerToASendThatDidNotAskIsARefusal(t *testing.T) {
 	k.mu.Unlock()
 	c := sendSubscriber(h, "box", "s1")
 	w := sendFrom(h, m, ownerPhone, "android/1.0", "", "s1", "en", `{"text":"hi","client_msg_id":"plain-1"}`)
-	if sends := k.sends(); len(sends) != 1 || sends[0].Hold != nil {
-		t.Fatalf("node calls %+v, want one session.send without Hold", sends)
+	if sends := k.sends(); len(sends) != 1 || sends[0].Hold != nil || !sends[0].Ordered {
+		t.Fatalf("node calls %+v, want one ordered session.send without Hold", sends)
 	}
 	if w.Code == http.StatusAccepted || w.Code < http.StatusBadRequest || strings.Contains(w.Body.String(), `"delivered":"later"`) {
 		t.Fatalf("answer %d %s, want a refusal", w.Code, w.Body)
@@ -439,5 +451,47 @@ func TestDeletingAnAgentWithHeldMessagesIsRefused(t *testing.T) {
 		if w := del(sid, "en"); w.Code != http.StatusOK {
 			t.Fatalf("delete %s: %d %s", sid, w.Code, w.Body)
 		}
+	}
+}
+
+// A person's message from an app that does not draw held messages never overtakes the ones held for its Agent: it goes
+// ordered (without Hold), and the manager's held_ahead refusal, nothing typed, reaches the app as an ordinary refusal:
+// the send record forgotten, the chat told it failed, and the app's retry of the id goes to the manager again.
+func TestOrderedSendBehindHeldMessagesIsRefused(t *testing.T) {
+	h, m, k := holdHub(t, agentRow)
+	k.mu.Lock()
+	k.heldAhead = true
+	k.mu.Unlock()
+	c := sendSubscriber(h, "box", "s1")
+	w := sendFrom(h, m, ownerPhone, "android/1.0", "", "s1", "en", `{"text":"one more thing","client_msg_id":"after-1"}`)
+	if sends := k.sends(); len(sends) != 1 || sends[0].Hold != nil || !sends[0].Ordered {
+		t.Fatalf("node calls %+v, want one ordered session.send without Hold", sends)
+	}
+	var out struct {
+		Code      string `json:"code"`
+		Delivered string `json:"delivered"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || w.Code != http.StatusConflict || out.Code != "held_ahead" ||
+		out.Delivered != "none" {
+		t.Fatalf("answer %d %s, want the held_ahead refusal", w.Code, w.Body)
+	}
+	if st, _ := h.store.ClaimSend(context.Background(), "after-1", "box", "s1"); st != "" {
+		t.Fatalf("send record %q: a retry could not send it", st)
+	}
+	_ = h.store.SettleSend(context.Background(), "after-1", "") // the claim just made to look
+	if event := nextSendState(t, c); event.State != proto.MessageSendProcessing {
+		t.Fatalf("first state %+v", event)
+	}
+	if event := nextSendState(t, c); event.State != proto.MessageSendFailed {
+		t.Fatalf("final state %+v, want failed", event)
+	}
+	k.mu.Lock()
+	k.heldAhead = false
+	k.mu.Unlock()
+	if again := sendFrom(h, m, ownerPhone, "android/1.0", "", "s1", "en", `{"text":"one more thing","client_msg_id":"after-1"}`); again.Code == http.StatusConflict {
+		t.Fatalf("retry: %d %s", again.Code, again.Body)
+	}
+	if n := len(k.sends()); n != 2 {
+		t.Fatalf("the retry reached the manager %d times in all, want twice", n)
 	}
 }
