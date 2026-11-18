@@ -236,13 +236,20 @@ func (d *Devices) heldCallOf(m *Machine, p devicewire.NodeCall) *heldCall {
 	return &heldCall{machine: m.cfg.ID, session: ids.SessionID, id: ids.ID, lang: i18n.Lang(p.Hold.Lang), call: call}
 }
 
-// heldNotWritten: err says the call wrote nothing to the node (it was not connected, it closed before the write,
-// the wait for it or for the writer ran out first). Only such a call may be held, or sent again by itself. It takes
-// in all that Call codes machine_offline (the hub's 503 node_unreachable, delivered "none"), and a hop further on
-// saying so.
+// heldNotWritten: err proves the call wrote nothing to the node. Only such a call may be held, or sent again by
+// itself; anything less sure is taken as one that may have arrived. What proves it:
+//   - errOffline: callOnce found no connection, or one already closed, before the call;
+//   - rpc.ErrNotSent: marked only where nothing was written yet (the call's wait for the connection, for the writer or
+//     the reload ending first; the connection closing while the call waited to write);
+//   - rpc.ErrSuspended: refused before the call was registered;
+//   - a hop further on answering machine_offline (it never went out there).
+//
+// Everything Call codes machine_offline (the hub's 503 node_unreachable, delivered "none") is one of these: on this
+// path rpc.ErrClosed comes only as NotSent(ErrClosed) or as ErrDropped. Not taken: a bare ErrClosed (a wrapper that
+// lost ErrDropped's identity would make a possible delivery look unwritten), and rpc.ErrNotWritten alone, which a
+// writer's own context error after part of a frame went out (websocket.NetConn) also yields.
 func heldNotWritten(err error) bool {
-	if errors.Is(err, errOffline) || errors.Is(err, rpc.ErrNotSent) || errors.Is(err, rpc.ErrNotWritten) ||
-		errors.Is(err, rpc.ErrSuspended) || errors.Is(err, rpc.ErrClosed) && !errors.Is(err, rpc.ErrDropped) {
+	if errors.Is(err, errOffline) || errors.Is(err, rpc.ErrNotSent) || errors.Is(err, rpc.ErrSuspended) {
 		return true
 	}
 	var re *rpc.Error
