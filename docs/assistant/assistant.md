@@ -1295,8 +1295,7 @@ manager that connects the computer holds it and sends it once the computer is ba
 - **Held only when nothing was written.** The hub marks the owner's message from a full device (a person's, not an
   extension's or the hub token's) to an Agent it lists, with a `client_msg_id` and none of a to-do, a fresh to-do
   start's first message or a launcher switch, as one that may be held (`NodeCall.hold`). The devices manager holds it
-  when the call wrote nothing to the node (not connected, closed or suspended before the write: the same errors its
-  reload retry treats as not sent), or when older messages of the same Agent are held still waiting, being sent or with
+  when the call provably wrote nothing to the node (not connected, closed or suspended before the write), or when older messages of the same Agent are held still waiting, being sent or with
   an unclear outcome (it never overtakes them). It keeps the call exactly as the hub sent it, who sent it, the
   submission and the share authority with it, in its Postgres (table `held_operations`, kind `message`), and answers
   `held`; the hub answers the app 202 `{"delivered":"later","undelivered":{…}}`, as for a Persona chat, and records the

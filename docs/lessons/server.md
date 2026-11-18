@@ -2720,9 +2720,11 @@ manager strips both from every call a manager makes (`devices/owner_input.go`), 
 own `session.send`: keep the hub's `devicewire.NodeCall` as it came (caller, submission, share authority) and replay it
 through the devices manager's own call path (`devices/held.go`).
 
-Only an error the rpc layer says wrote nothing (`errOffline`, `rpc.ErrNotSent`, `ErrNotWritten`, `ErrSuspended`,
-`ErrClosed` that is not `ErrDropped`: the set the reload retry in `devices/reload.go` already relies on) may lead to an
-automatic second try. Anything else, a deadline included, may have typed it: ask the owner instead.
+Only an error that proves nothing was written (`errOffline`, `rpc.ErrNotSent`, `rpc.ErrSuspended`, a hop's
+`machine_offline`) may lead to an automatic second try. `rpc.ErrNotWritten` alone does not: `Peer.Call` gives it to any
+write error that matches the call's ending context, and a WebSocket writer reports its own context's end after part
+of a frame went out. A bare `ErrClosed` proves nothing either once a wrapper may have lost `ErrDropped`. Anything else,
+a deadline included, may have typed it: ask the owner instead.
 
 Sending the moment the node's connection is configured and listed is too early for a runtime Agent: the runtime
 reconnects to the new node's socket a moment later, and the node answers "no such session". Wait for the session in
