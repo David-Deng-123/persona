@@ -53,6 +53,9 @@ var (
 	heldTick        = 15 * time.Second // how often the held messages are looked at without anything waking them
 	heldSendTimeout = 5 * time.Minute  // one try (an Agent resumed to take it can take minutes)
 	heldStoreWait   = 5 * time.Second  // one write to the store
+	// heldListWait: a message waits for its session in the node's list this long into a connection (an Agent of a
+	// runtime comes back a moment after its node), then goes anyway and the node's answer decides.
+	heldListWait = 2 * time.Minute
 )
 
 // codeHeldNotKept: an eligible message that had to wait behind held ones could not be kept (the store failed);
@@ -234,10 +237,16 @@ func (d *Devices) heldCallOf(m *Machine, p devicewire.NodeCall) *heldCall {
 }
 
 // heldNotWritten: err says the call wrote nothing to the node (it was not connected, it closed before the write,
-// the wait for it or for the writer ran out first). Only such a call may be held, or sent again by itself.
+// the wait for it or for the writer ran out first). Only such a call may be held, or sent again by itself. It takes
+// in all that Call codes machine_offline (the hub's 503 node_unreachable, delivered "none"), and a hop further on
+// saying so.
 func heldNotWritten(err error) bool {
-	return errors.Is(err, errOffline) || errors.Is(err, rpc.ErrNotSent) || errors.Is(err, rpc.ErrNotWritten) ||
-		errors.Is(err, rpc.ErrSuspended) || errors.Is(err, rpc.ErrClosed) && !errors.Is(err, rpc.ErrDropped)
+	if errors.Is(err, errOffline) || errors.Is(err, rpc.ErrNotSent) || errors.Is(err, rpc.ErrNotWritten) ||
+		errors.Is(err, rpc.ErrSuspended) || errors.Is(err, rpc.ErrClosed) && !errors.Is(err, rpc.ErrDropped) {
+		return true
+	}
+	var re *rpc.Error
+	return errors.As(err, &re) && re.Code == devicewire.CodeMachineOffline
 }
 
 // heldMayHold: a call that failed with err is held. Not when its caller went away (cancelled): nobody waits for the
@@ -402,22 +411,35 @@ func (r *heldRow) wire(lang i18n.Lang, computer string, behind bool) proto.Undel
 
 // ---- sending ----
 
-// heldWake starts sending machine's held messages that can go now: one delivery per session at a time, the sessions
-// apart. Called when its node is back (configured and listed), on a Retry, a new held message, and every heldTick.
+// heldWake starts sending machine's held messages that can go now (heldReady): one delivery per session at a time,
+// the sessions apart. Called when its node's session list changes (a new connection's first list included), on a
+// Retry, a new held message, and every heldTick.
 func (d *Devices) heldWake(machine string) {
 	h := &d.held
 	h.mu.Lock()
 	ctx := h.ctx
-	if !h.loaded || ctx == nil || ctx.Err() != nil {
+	if !h.loaded || ctx == nil || ctx.Err() != nil || len(h.rows[machine]) == 0 {
 		h.mu.Unlock()
 		return
 	}
-	var start []string
+	var due []string
 	for _, r := range h.rows[machine] {
-		key := machine + "/" + r.SessionID
-		if !h.sending[key] && h.nextLocked(machine, r.SessionID) != nil {
+		if !h.sending[machine+"/"+r.SessionID] && !slices.Contains(due, r.SessionID) && h.nextLocked(machine, r.SessionID) != nil {
+			due = append(due, r.SessionID)
+		}
+	}
+	h.mu.Unlock()
+	m := d.machineByID(machine)
+	if m == nil {
+		return
+	}
+	due = slices.DeleteFunc(due, func(session string) bool { return !m.heldReady(session) }) // not under h.mu
+	var start []string
+	h.mu.Lock()
+	for _, session := range due {
+		if key := machine + "/" + session; !h.sending[key] {
 			h.sending[key] = true
-			start = append(start, r.SessionID)
+			start = append(start, session)
 		}
 	}
 	h.mu.Unlock()
@@ -430,8 +452,34 @@ func (d *Devices) heldWake(machine string) {
 	}
 }
 
-// heldConnected: machine's node is configured and listed: what was held for it goes now.
-func (d *Devices) heldConnected(machine string) { d.heldWake(machine) }
+// heldListed: machine's session list changed: a held message whose session it lists now goes. A new connection's
+// first list is accepted once its node is configured: what was held while it was away goes then.
+func (d *Devices) heldListed(machine string) { d.heldWake(machine) }
+
+// heldReady: a held message to session may go to m now: its node is connected and its current list has the session
+// (whatever its status: the node resumes a stopped one), or the connection is heldListWait old without it, and the
+// node's answer decides. Right after the handshake an Agent of a runtime is not back yet: sent then, the message
+// would be refused for a session that is there a second later.
+func (m *Machine) heldReady(session string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.peer == nil {
+		return false
+	}
+	select {
+	case <-m.peer.Done():
+		return false
+	default:
+	}
+	if m.sessionsListed {
+		for i := range m.sessions { // by index: a range value copies every (large) session it passes
+			if m.sessions[i].SessionID == session {
+				return true
+			}
+		}
+	}
+	return !m.connectedAt.IsZero() && time.Since(m.connectedAt) >= heldListWait
+}
 
 // nextLocked is the session's next message to send: its first waiting one, unless one before it is being sent or may
 // have arrived (it waits behind those), or the owner is changing it. h.mu is held.
@@ -466,22 +514,23 @@ func (h *heldBook) dropLocked(machine string, seq int64) {
 	}
 }
 
-// heldSend sends the session's held messages in order while they go, its computer is reachable and ctx lasts.
+// heldSend sends the session's held messages in order while they go, it is ready on its computer (heldReady) and
+// ctx lasts.
 func (d *Devices) heldSend(ctx context.Context, machine, session string) {
 	h := &d.held
 	st := d.heldStore()
 	key := machine + "/" + session
 	for {
 		m := d.machineByID(machine)
-		reachable := m != nil && m.reachable()
+		ready := m != nil && m.heldReady(session)
 		now := h.clock()
 		h.mu.Lock()
 		r := h.nextLocked(machine, session)
-		if r == nil || !reachable || ctx.Err() != nil {
+		if r == nil || !ready || ctx.Err() != nil {
 			delete(h.sending, key) // decided with the rows locked: one held after this goes with the next wake
 			h.mu.Unlock()
-			if r != nil && m != nil && !reachable && ctx.Err() == nil && m.reachable() {
-				d.heldWake(machine) // back meanwhile: its wake found this delivery still running
+			if r != nil && m != nil && !ready && ctx.Err() == nil && m.heldReady(session) {
+				d.heldWake(machine) // ready meanwhile: its wake found this delivery still running
 			}
 			return
 		}
@@ -595,8 +644,6 @@ func heldOutcomeOf(err error) (heldOutcome, string) {
 	case re.Code == "" && (re.Message == rpc.ErrClosed.Error() || re.Message == context.DeadlineExceeded.Error() ||
 		re.Message == context.Canceled.Error()):
 		return heldUnclear, "" // a hop further on relayed its own drop or wait
-	case re.Code == devicewire.CodeMachineOffline:
-		return heldNotSent, "" // a hop further on: it never went out
 	}
 	return heldRefused, textfmt.Clip(textfmt.OneLine(cmp.Or(re.Message, re.Code)), 300)
 }

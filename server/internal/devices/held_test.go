@@ -173,8 +173,33 @@ type heldNode struct {
 	mu     sync.Mutex
 	sends  []map[string]any
 	conn   net.Conn
+	peer   *rpc.Peer
 	gate   chan struct{}
 	answer func(params map[string]any) (any, error)
+	listed []string // the sessions it lists; nil: s1 and s2
+}
+
+// list has the node list these sessions from now on and say so (sessions.changed).
+func (n *heldNode) list(ids ...string) {
+	n.mu.Lock()
+	n.listed = ids
+	p := n.peer
+	n.mu.Unlock()
+	_ = p.Notify("sessions.changed", map[string]any{"sessions": n.sessions()})
+}
+
+func (n *heldNode) sessions() []proto.Session {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	ids := n.listed
+	if ids == nil {
+		ids = []string{"s1", "s2"}
+	}
+	var out []proto.Session
+	for _, id := range ids {
+		out = append(out, proto.Session{SessionID: id, Status: proto.StatusIdle})
+	}
+	return out
 }
 
 func (n *heldNode) dial(context.Context) (net.Conn, error) {
@@ -185,7 +210,7 @@ func (n *heldNode) dial(context.Context) (net.Conn, error) {
 		case "node.info":
 			return proto.NodeInfo{Hostname: "box", OS: "linux", Arch: "amd64", Home: "/home/me", Version: "test"}, nil
 		case "sessions.list":
-			return map[string]any{"sessions": []proto.Session{{SessionID: "s1"}, {SessionID: "s2"}}}, nil
+			return map[string]any{"sessions": n.sessions()}, nil
 		case "session.send":
 			var m map[string]any
 			_ = json.Unmarshal(params, &m)
@@ -204,7 +229,7 @@ func (n *heldNode) dial(context.Context) (net.Conn, error) {
 		return map[string]any{}, nil
 	}
 	n.mu.Lock()
-	n.conn = nodeSide
+	n.conn, n.peer = nodeSide, p
 	n.mu.Unlock()
 	go func() { _ = p.Serve(context.Background(), nodeSide); nodeSide.Close() }()
 	return managerSide, nil
@@ -686,6 +711,8 @@ func TestHeldOutcomeOf(t *testing.T) {
 		{rpc.NotSent(context.DeadlineExceeded), heldNotSent, ""},
 		{rpc.ErrSuspended, heldNotSent, ""},
 		{&rpc.Error{Code: devicewire.CodeMachineOffline, Message: "away"}, heldNotSent, ""},
+		{wireError(fmt.Errorf("mac: %w", apierr.ErrOffline)), heldNotSent, ""},
+		{wireError(rpc.NotSent(rpc.ErrClosed)), heldNotSent, ""},
 		{rpc.ErrDropped, heldUnclear, ""},
 		{fmt.Errorf("mac: %w", rpc.ErrDropped), heldUnclear, ""},
 		{context.DeadlineExceeded, heldUnclear, ""},
@@ -705,7 +732,8 @@ func TestHeldOutcomeOf(t *testing.T) {
 	}
 	// Held at the send only when nothing was written and somebody waits for the answer.
 	for err, want := range map[error]bool{apierr.ErrOffline: true, rpc.NotSent(context.DeadlineExceeded): true,
-		rpc.NotSent(context.Canceled): false, rpc.ErrDropped: false, context.DeadlineExceeded: false, refusal: false} {
+		&rpc.Error{Code: devicewire.CodeMachineOffline}: true,
+		rpc.NotSent(context.Canceled):                   false, rpc.ErrDropped: false, context.DeadlineExceeded: false, refusal: false} {
 		if heldMayHold(err) != want {
 			t.Errorf("heldMayHold(%v) = %v", err, !want)
 		}
@@ -760,5 +788,69 @@ func TestHeldNeedsTheStore(t *testing.T) {
 	out, err := d.Call(ctx, heldSend("mac", "s1", "a", "a"))
 	if held := heldAnswerOf(t, out, err); held.ID != "a" || len(st.all()) != 1 {
 		t.Fatalf("held %+v, %d stored", held, len(st.all()))
+	}
+}
+
+// Right after the handshake an Agent of a runtime is not listed yet (it comes back a moment after its node): a
+// message held for it waits, through any wake, until the node lists its session, then goes at once, once.
+func TestHeldWaitsForItsSessionToBeListed(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour) // no tick: the list arriving wakes it
+	n := &heldNode{listed: []string{"s2"}}
+	up := make(chan struct{})
+	m := laterMachine(t, d, "mac", "Studio Mac", n, up)
+	out, err := d.Call(context.Background(), heldSend("mac", "s1", "a", "a"))
+	heldAnswerOf(t, out, err)
+	close(up)
+	eventually(t, 5*time.Second, "connected and listed", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.peer != nil && m.sessionsListed
+	})
+	d.heldWake("mac")                  // what a tick does
+	time.Sleep(300 * time.Millisecond) // and the connection's wake
+	if got := n.sent(); len(got) != 0 {
+		t.Fatalf("sent before its session was listed: %v", got)
+	}
+	if rows := st.all(); len(rows) != 1 || rows[0].State != db.HeldWaiting || rows[0].Attempts != 0 {
+		t.Fatalf("stored %+v", rows)
+	}
+	n.list("s1", "s2")
+	eventually(t, 5*time.Second, "a sent", func() bool { return len(st.all()) == 0 })
+	time.Sleep(200 * time.Millisecond)
+	if got := n.sent(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("sent %v", got)
+	}
+}
+
+// A session still not listed heldListWait into the connection: the message goes anyway, and the node's answer decides
+// (its refusal fails it with its words).
+func TestHeldGoesAnywayAfterTheListWait(t *testing.T) {
+	old := heldListWait
+	heldListWait = 300 * time.Millisecond
+	t.Cleanup(func() { heldListWait = old })
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, 20*time.Millisecond)
+	n := &heldNode{listed: []string{"s2"}, answer: func(map[string]any) (any, error) {
+		return nil, &rpc.Error{Code: "session_not_found", Message: "no such session", Data: json.RawMessage(`{"delivered":"none"}`)}
+	}}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	out, err := d.Call(context.Background(), heldSend("mac", "s1", "a", "a"))
+	heldAnswerOf(t, out, err)
+	start := time.Now()
+	close(up)
+	eventually(t, 5*time.Second, "a refused", func() bool {
+		rows := st.all()
+		return len(rows) == 1 && rows[0].State == db.HeldFailed
+	})
+	if waited := time.Since(start); waited < heldListWait {
+		t.Fatalf("sent after %s, before the list wait", waited)
+	}
+	if got := n.sent(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("sent %v", got)
+	}
+	if list := d.HeldMessages("mac", i18n.En)["s1"]; len(list) != 1 || list[0].Error != "Not sent: no such session" {
+		t.Fatalf("row %+v", list)
 	}
 }
