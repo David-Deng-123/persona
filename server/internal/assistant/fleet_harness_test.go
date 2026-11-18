@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/nwverse/persona/server/internal/i18n"
 	"net/http"
 	"slices"
 	"sort"
@@ -572,3 +573,7 @@ func (d *fleetDevs) watch(id, session string, on bool) {
 	}
 	d.watched[[2]string{id, session}] = on
 }
+
+func (d *fleetDevs) HeldMessages(string, i18n.Lang) map[string][]proto.UndeliveredMessage { return nil }
+func (d *fleetDevs) HeldRetry(context.Context, string, string) (bool, error)              { return false, nil }
+func (d *fleetDevs) HeldDelete(context.Context, string, string) (bool, error)             { return false, nil }
