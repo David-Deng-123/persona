@@ -353,6 +353,11 @@ type NodeCall struct {
 	// this call as it came (caller and submission with it) and sends it once the node is back, answering CodeHeld
 	// instead of machine_offline. Nil from an older hub and on every other call; an older manager ignores it.
 	Hold *Hold `json:"hold,omitempty"`
+	// Ordered (session.send only, #10661): the owner's message to an Agent from a person's device, which must not go
+	// ahead of messages held for that Agent. Set whether or not Hold is: a message from an app that does not draw held
+	// messages (no Hold) is refused, nothing written, while older ones of its session are held, instead of overtaking
+	// them (codeHeldAhead, delivered none). Nil from an older hub; an older manager ignores it.
+	Ordered bool `json:"ordered,omitempty"`
 }
 
 // Hold is NodeCall.Hold.
