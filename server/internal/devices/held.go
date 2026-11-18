@@ -42,6 +42,7 @@ import (
 // heldStore keeps the held messages (db.DB); a store without it holds none: a send fails as before.
 type heldStore interface {
 	HoldOperation(ctx context.Context, op db.HeldOperation) (db.HeldOperation, bool, error)
+	HeldOperationOf(ctx context.Context, kind, machine, session, opID string) (db.HeldOperation, bool, error)
 	HeldOperations(ctx context.Context, kind string) ([]db.HeldOperation, error)
 	RecoverHeldOperations(ctx context.Context, kind string) (int64, error)
 	ClaimHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
@@ -335,11 +336,21 @@ func (d *Devices) hold(ctx context.Context, c *heldCall) error {
 	now := h.clock().UTC()
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
-	op, fresh, err := d.heldStore().HoldOperation(sctx, db.HeldOperation{Kind: db.HeldKindMessage, OpID: c.id, MachineID: c.machine,
+	st := d.heldStore()
+	op, fresh, err := st.HoldOperation(sctx, db.HeldOperation{Kind: db.HeldKindMessage, OpID: c.id, MachineID: c.machine,
 		SessionID: c.session, Call: raw, Lang: string(c.lang), SentAt: now, HeldAt: now})
 	if err != nil {
-		d.logf("[%s] %s: a message could not be held: %v", c.machine, c.session, err)
-		return nil
+		// It may be kept all the same (the answer lost after the commit): one look by its key decides, else a row the
+		// app was told failed would go after the next start, maybe after the owner sent it again.
+		lctx, lcancel := heldStoreCtx(ctx)
+		kept, found, lerr := st.HeldOperationOf(lctx, db.HeldKindMessage, c.machine, c.session, c.id)
+		lcancel()
+		if lerr != nil || !found {
+			d.logf("[%s] %s: a message could not be held: %v", c.machine, c.session, err)
+			return nil
+		}
+		d.logf("[%s] %s: a message was held, though its store said %v", c.machine, c.session, err)
+		op, fresh = kept, true
 	}
 	h.mu.Lock()
 	rows := h.rows[op.MachineID]
@@ -925,6 +936,7 @@ func (d *Devices) heldExpire(ctx context.Context) {
 	}
 	for machine := range changed {
 		d.heldChanged(machine)
+		d.heldWake(machine) // the ones an expired message held back go now
 	}
 }
 
@@ -979,6 +991,10 @@ func (d *Devices) heldRetry(ctx context.Context, machine, sid, msg string) (bool
 		ok, err = d.heldStore().RetryHeldOperation(sctx, r.Seq, now)
 		cancel()
 	}
+	held := true
+	if err == nil && !ok { // the store has it otherwise (only a failed one is retried)
+		held, err = d.heldMirror(ctx, r)
+	}
 	h.mu.Lock()
 	row := h.rowLocked(r.MachineID, r.Seq)
 	if row != nil {
@@ -987,16 +1003,17 @@ func (d *Devices) heldRetry(ctx context.Context, machine, sid, msg string) (bool
 	switch {
 	case err != nil:
 		h.mu.Unlock()
-		d.logf("[%s] %s: a held message's retry not kept: %v", r.MachineID, sid, err)
-		return true, errHeldStore
-	case !ok: // gone from the store meanwhile
-		h.dropLocked(r.MachineID, r.Seq)
-	case row != nil && row.State != db.HeldWaiting:
+		if !errors.Is(err, errHeldSendingNow) {
+			d.logf("[%s] %s: a held message's retry not kept: %v", r.MachineID, sid, err)
+			err = errHeldStore
+		}
+		return true, err
+	case ok && row != nil && row.State != db.HeldWaiting:
 		row.State, row.Failure, row.Error, row.HeldAt = db.HeldWaiting, "", "", now
 	}
 	h.mu.Unlock()
 	d.heldChanged(r.MachineID)
-	if !ok {
+	if !held {
 		return false, nil
 	}
 	d.logf("[%s] %s: a held message retried by the owner", r.MachineID, sid)
@@ -1016,21 +1033,57 @@ func (d *Devices) heldDelete(ctx context.Context, machine, sid, msg string) (boo
 	}
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
-	_, err = d.heldStore().DeleteHeldOperation(sctx, r.Seq)
+	ok, err := d.heldStore().DeleteHeldOperation(sctx, r.Seq) // never one being sent
+	if err == nil && !ok {
+		var held bool
+		if held, err = d.heldMirror(ctx, r); err == nil && held {
+			err = errHeldSendingNow // the store has it, and not waiting or failed: being sent
+		}
+	}
 	h.mu.Lock()
 	if err != nil {
 		if row := h.rowLocked(r.MachineID, r.Seq); row != nil {
 			row.busy = false
 		}
 		h.mu.Unlock()
-		d.logf("[%s] %s: a held message's delete not kept: %v", r.MachineID, sid, err)
-		return true, errHeldStore
+		if !errors.Is(err, errHeldSendingNow) {
+			d.logf("[%s] %s: a held message's delete not kept: %v", r.MachineID, sid, err)
+			err = errHeldStore
+		}
+		return true, err
 	}
 	h.dropLocked(r.MachineID, r.Seq)
 	h.mu.Unlock()
 	d.heldUnshare(sctx, r)
 	d.logf("[%s] %s: a held message deleted by the owner", r.MachineID, sid)
 	d.heldChanged(r.MachineID)
+	d.heldWake(r.MachineID) // the ones it held back go now
+	return true, nil
+}
+
+// heldMirror takes into memory what the store has of r after it did not take the owner's change: gone, it is
+// dropped (held false); waiting or failed, so it is here too; being sent (by another manager on the same database, in
+// a switch-over), errHeldSendingNow, and it is left as it is here (a restart shows it unclear).
+func (d *Devices) heldMirror(ctx context.Context, r *heldRow) (bool, error) {
+	sctx, cancel := heldStoreCtx(ctx)
+	defer cancel()
+	op, found, err := d.heldStore().HeldOperationOf(sctx, r.Kind, r.MachineID, r.SessionID, r.OpID)
+	if err != nil {
+		return true, err
+	}
+	h := &d.held
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch {
+	case !found:
+		h.dropLocked(r.MachineID, r.Seq)
+		return false, nil
+	case op.State == db.HeldSending:
+		return true, errHeldSendingNow
+	}
+	if row := h.rowLocked(r.MachineID, r.Seq); row != nil {
+		row.State, row.Failure, row.Error, row.HeldAt = op.State, op.Failure, op.Error, op.HeldAt
+	}
 	return true, nil
 }
 
@@ -1081,11 +1134,13 @@ func (d *Devices) deleteHeld(w http.ResponseWriter, r *http.Request, m *Machine)
 	d.heldRoute(w, r, m, d.heldDelete)
 }
 
-// heldRoute serves the owner's change of a held message from a full device: 404 when there is no such message, 409
-// while it is being sent.
+// heldRoute serves the owner's change of a held message from a person's full device: 404 when there is no such message,
+// 409 while it is being sent.
 func (d *Devices) heldRoute(w http.ResponseWriter, r *http.Request, m *Machine,
 	act func(ctx context.Context, machine, sid, msg string) (bool, error)) {
-	if r.Header.Get(assistantwire.RoleHeader) != "full" {
+	// A Retry sends it again with its sender's provenance: only a person's own full device may (not the hub's token, not
+	// a pairing code), as the hub says.
+	if r.Header.Get(assistantwire.RoleHeader) != "full" || r.Header.Get(assistantwire.PersonHeader) != "1" {
 		writeErrCode(w, http.StatusForbidden, proto.CodeReadOnly, i18n.Err("devices-held.read_only"))
 		return
 	}
