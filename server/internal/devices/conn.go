@@ -422,6 +422,8 @@ func (m *Machine) serve(ctx context.Context, c *nodeConn) error {
 	}
 	close(listed)
 	m.firstTried() // configured and listed: the calls that waited for it go now
+	// And the owner's messages held while it was away (held.go).
+	m.d.heldConnected(m.cfg.ID)
 	if updates {
 		// A queued update goes on, and a node back on another build is given the one it should run (deploy_rpc.go,
 		// deploy.go). Which build that is may take the release site (packages.go): looked up off this path, so the

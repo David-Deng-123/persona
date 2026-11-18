@@ -94,6 +94,9 @@ type Options struct {
 	// TailcatKey is the identity file the computers reached over tailcat trust (tunnel.LoadOrCreateHubKey); "": this
 	// machine's data directory's (tunnel.HubKeyPath).
 	TailcatKey string
+	// HeldChanged: what is held for a machine's Agents changed (held.go): its rows are published again, with
+	// HeldMessages' read anew (the assistant's publishSessions). nil: nobody draws them.
+	HeldChanged func(machine string)
 }
 
 // Devices is every computer the manager carries.
@@ -102,6 +105,7 @@ type Devices struct {
 	logf func(format string, args ...any)
 
 	transfers transfers // computer to computer file transfers running or just over (transfer.go)
+	held      heldBook  // the owner's messages held for Agents whose computer is away (held.go)
 
 	mu    sync.Mutex
 	cfg   devicewire.Config
@@ -230,6 +234,9 @@ func (d *Devices) Run(ctx context.Context) error {
 	go d.usageLoop(mctx)
 	d.workers.Add(1)
 	go func() { defer d.workers.Done(); d.runShareIngestion(mctx) }()
+	// The messages held while their computers were away (held.go).
+	d.workers.Add(1)
+	go func() { defer d.workers.Done(); d.heldLoop(mctx) }()
 	go d.usageGW.run(ctx) // the account-pool gateways (usagegateways.go)
 	// The hub's hand-over, or after ownListWait the manager's own list (ownlist.go) until it comes.
 	wait := time.NewTimer(d.ownWait)
@@ -633,8 +640,17 @@ func (d *Devices) forward(machine, event string, params any) {
 }
 
 // Call is devices.call: a call to a machine's node, coded for the hub (no_device, machine_offline, node_closed;
-// the node's own coded errors as they are).
+// the node's own coded errors as they are; held for a session.send that may be, held.go).
 func (d *Devices) Call(ctx context.Context, p devicewire.NodeCall) (json.RawMessage, error) {
+	out, err := d.callNode(ctx, p)
+	if err != nil {
+		return nil, wireError(err)
+	}
+	return out, nil
+}
+
+// callNode is Call with its errors as they are: a held message's delivery tells what wrote nothing apart (held.go).
+func (d *Devices) callNode(ctx context.Context, p devicewire.NodeCall) (json.RawMessage, error) {
 	if reservedOwnerControl(p.Method) {
 		return nil, errReservedOwnerControl
 	}
@@ -644,6 +660,12 @@ func (d *Devices) Call(ctx context.Context, p devicewire.NodeCall) (json.RawMess
 	m := d.machineByID(p.MachineID)
 	if m == nil {
 		return nil, &rpc.Error{Code: devicewire.CodeNoDevice, Message: fmt.Sprintf("no machine %q", p.MachineID)}
+	}
+	held := d.heldCallOf(m, p) // the owner's message to an Agent, which may wait for its computer (held.go)
+	if held != nil {
+		if err, ok := d.holdBehind(ctx, held); ok {
+			return nil, err
+		}
 	}
 	if p.TimeoutMS > 0 {
 		var cancel context.CancelFunc
@@ -685,7 +707,7 @@ func (d *Devices) Call(ctx context.Context, p devicewire.NodeCall) (json.RawMess
 	params, receipt, preparation, prepareErr = d.prepareShareCall(ctx, p, params)
 	if prepareErr != nil {
 		d.observeCreationCall(p, nil, nil, preparation, prepareErr)
-		return nil, wireError(prepareErr)
+		return nil, prepareErr
 	}
 	if refusesHandoff(p.Method, params) { // and on what actually goes (prepareShareCall re-marshals it)
 		return nil, errHandoffRefused
@@ -701,10 +723,18 @@ func (d *Devices) Call(ctx context.Context, p devicewire.NodeCall) (json.RawMess
 		m.recordModeSet(p.Actor, modeSID, modeFrom, modeTo, out)
 	}
 	d.observeCreationCall(p, params, out, preparation, err)
-	d.finishShareCall(ctx, p, receipt, out, err)
+	if err != nil && held != nil && heldMayHold(err) {
+		// Nothing was written: held until the node is back. Its share receipt waits for that delivery.
+		if herr, ok := d.hold(ctx, held); ok {
+			return nil, herr
+		}
+	}
+	if heldSettles(ctx, err) {
+		d.finishShareCall(ctx, p, receipt, out, err)
+	}
 	m.noteOpened(p.Method, params, err)
 	if err != nil {
-		return nil, wireError(err)
+		return nil, err
 	}
 	if p.Method == "sessions.list" { // the hub had the node list them again (its agent filters): the manager's list
 		var list struct {

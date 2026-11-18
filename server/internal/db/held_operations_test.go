@@ -1,0 +1,147 @@
+package db
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+// openHeld is open with held_operations empty (open does not clear it).
+func openHeld(t *testing.T) *DB {
+	t.Helper()
+	d := open(t)
+	if _, err := d.pool.Exec(context.Background(), `DELETE FROM held_operations`); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// A held operation is kept once per kind, machine, session and op id, waiting, its call as it came; the list comes
+// back in the order they were held.
+func TestHeldOperationsKeptOnce(t *testing.T) {
+	d, ctx := openHeld(t), context.Background()
+	at := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	call := json.RawMessage(`{"machine_id":"mac","method":"session.send","params":{"session_id":"s1","client_msg_id":"m1","text":"hi"},"caller":{"kind":"device"}}`)
+	op := HeldOperation{Kind: HeldKindMessage, OpID: "m1", MachineID: "mac", SessionID: "s1", Call: call, Lang: "en", SentAt: at}
+	first, fresh, err := d.HoldOperation(ctx, op)
+	if err != nil || !fresh {
+		t.Fatalf("hold: %+v %v %v", first, fresh, err)
+	}
+	if first.Seq == 0 || first.State != HeldWaiting || first.Failure != "" || !first.SentAt.Equal(at) || !first.HeldAt.Equal(at) ||
+		!first.TriedAt.IsZero() || first.Attempts != 0 || first.Lang != "en" {
+		t.Fatalf("held %+v", first)
+	}
+	if !jsonEqual(t, string(first.Call), string(call)) {
+		t.Fatalf("call %s, want %s", first.Call, call)
+	}
+	again, fresh, err := d.HoldOperation(ctx, op)
+	if err != nil || fresh || again.Seq != first.Seq {
+		t.Fatalf("again: %+v %v %v", again, fresh, err)
+	}
+	second, _, err := d.HoldOperation(ctx, HeldOperation{Kind: HeldKindMessage, OpID: "m1", MachineID: "mac", SessionID: "s2", Call: call})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops, err := d.HeldOperations(ctx, HeldKindMessage)
+	if err != nil || len(ops) != 2 || ops[0].Seq != first.Seq || ops[1].Seq != second.Seq || ops[1].Seq <= ops[0].Seq {
+		t.Fatalf("list %+v %v", ops, err)
+	}
+	if other, err := d.HeldOperations(ctx, "start"); err != nil || len(other) != 0 {
+		t.Fatalf("another kind: %+v %v", other, err)
+	}
+}
+
+// A try is claimed only from waiting; its outcome moves it only from being sent; Retry waits again with a new day;
+// Delete drops it (only from the states given, when any); a restart fails as unclear what was left being sent.
+func TestHeldOperationStates(t *testing.T) {
+	d, ctx := openHeld(t), context.Background()
+	at := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	hold := func(id string) int64 {
+		t.Helper()
+		op, _, err := d.HoldOperation(ctx, HeldOperation{Kind: HeldKindMessage, OpID: id, MachineID: "mac", SessionID: "s1",
+			Call: json.RawMessage(`{}`), SentAt: at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return op.Seq
+	}
+	get := func(seq int64) HeldOperation {
+		t.Helper()
+		ops, err := d.HeldOperations(ctx, HeldKindMessage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, op := range ops {
+			if op.Seq == seq {
+				return op
+			}
+		}
+		return HeldOperation{}
+	}
+	a, b, c := hold("a"), hold("b"), hold("c")
+
+	tried := at.Add(time.Minute)
+	if ok, err := d.ClaimHeldOperation(ctx, a, tried); !ok || err != nil {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	if ok, _ := d.ClaimHeldOperation(ctx, a, tried); ok {
+		t.Fatal("claimed twice")
+	}
+	if op := get(a); op.State != HeldSending || !op.TriedAt.Equal(tried) || op.Attempts != 1 {
+		t.Fatalf("claimed %+v", op)
+	}
+	if ok, _ := d.SettleHeldOperation(ctx, b, HeldSending, HeldFailed, HeldRefused, "no"); ok {
+		t.Fatal("settled one not being sent")
+	}
+	if ok, err := d.SettleHeldOperation(ctx, a, HeldSending, HeldFailed, HeldRefused, "a draft is in the way"); !ok || err != nil {
+		t.Fatalf("settle: %v %v", ok, err)
+	}
+	if op := get(a); op.State != HeldFailed || op.Failure != HeldRefused || op.Error != "a draft is in the way" {
+		t.Fatalf("settled %+v", op)
+	}
+	again := at.Add(time.Hour)
+	if ok, err := d.RetryHeldOperation(ctx, a, again); !ok || err != nil {
+		t.Fatalf("retry: %v %v", ok, err)
+	}
+	if op := get(a); op.State != HeldWaiting || op.Failure != "" || op.Error != "" || !op.HeldAt.Equal(again) || !op.SentAt.Equal(at) ||
+		op.Attempts != 1 {
+		t.Fatalf("retried %+v", op)
+	}
+
+	// b being sent when the manager stopped: unclear at the next start; c waiting stays.
+	if ok, _ := d.ClaimHeldOperation(ctx, b, tried); !ok {
+		t.Fatal("claim b")
+	}
+	if n, err := d.RecoverHeldOperations(ctx, HeldKindMessage); n != 1 || err != nil {
+		t.Fatalf("recover: %d %v", n, err)
+	}
+	if op := get(b); op.State != HeldFailed || op.Failure != HeldUnclear {
+		t.Fatalf("recovered %+v", op)
+	}
+	if op := get(c); op.State != HeldWaiting {
+		t.Fatalf("c %+v", op)
+	}
+
+	if ok, _ := d.DeleteHeldOperation(ctx, c, HeldSending); ok {
+		t.Fatal("deleted a waiting one as sent")
+	}
+	if ok, err := d.DeleteHeldOperation(ctx, c); !ok || err != nil {
+		t.Fatalf("delete: %v %v", ok, err)
+	}
+	if ok, _ := d.DeleteHeldOperation(ctx, c); ok {
+		t.Fatal("deleted twice")
+	}
+	if ok, _ := d.RetryHeldOperation(ctx, c, again); ok {
+		t.Fatal("retried a deleted one")
+	}
+	if ok, _ := d.ClaimHeldOperation(ctx, a, tried); !ok {
+		t.Fatal("claim a again")
+	}
+	if ok, err := d.DeleteHeldOperation(ctx, a, HeldSending); !ok || err != nil {
+		t.Fatalf("delete sent: %v %v", ok, err)
+	}
+	if ops, _ := d.HeldOperations(ctx, HeldKindMessage); len(ops) != 1 || ops[0].Seq != b {
+		t.Fatalf("left %+v", ops)
+	}
+}
