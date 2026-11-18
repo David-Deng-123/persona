@@ -123,6 +123,16 @@ func TestHeldOperationStates(t *testing.T) {
 		t.Fatalf("c %+v", op)
 	}
 
+	renewed := at.Add(2 * time.Hour)
+	if ok, err := d.RenewHeldOperation(ctx, c, renewed); !ok || err != nil {
+		t.Fatalf("renew: %v %v", ok, err)
+	}
+	if op := get(c); op.State != HeldWaiting || !op.HeldAt.Equal(renewed) || !op.SentAt.Equal(at) {
+		t.Fatalf("renewed %+v", op)
+	}
+	if ok, _ := d.RenewHeldOperation(ctx, b, renewed); ok {
+		t.Fatal("renewed one that is not waiting")
+	}
 	if ok, _ := d.DeleteHeldOperation(ctx, c, HeldSending); ok {
 		t.Fatal("deleted a waiting one as sent")
 	}

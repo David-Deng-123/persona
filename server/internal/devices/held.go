@@ -13,8 +13,11 @@ package devices
 // Only a try known to have written nothing goes again by itself (the node not connected, closed before the write).
 // A try whose outcome is unknown (the connection dropped with it out, its time ran out, the node said delivered
 // "unknown", the manager stopped during it) never does: it fails as unclear, and the later ones of its session wait
-// behind it until the owner retries or deletes it. A node's refusal (nothing typed) fails it as refused, with the
-// node's words; a message still waiting a day after it was held fails as expired. Retry and Delete are the owner's
+// behind it until the owner retries or deletes it, or its transcript, read once per connection, shows it under its
+// client_msg_id (it did arrive: it leaves the rows). A delivery is judged on the node's call alone: refused when the
+// node refused it or it was never asked (its preparation here failed), with why; delivered once the node took it.
+// A message still waiting for its computer a day after it was held fails as expired (not one behind a message that may
+// have arrived: that one waits for the owner). Retry and Delete are the owner's
 // (POST …/held/{msg}/retry, DELETE …/held/{msg}; the assistant's undelivered routes end here for older apps).
 
 import (
@@ -44,6 +47,7 @@ type heldStore interface {
 	ClaimHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
 	SettleHeldOperation(ctx context.Context, seq int64, from, state, failure, reason string) (bool, error)
 	RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
+	RenewHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
 	DeleteHeldOperation(ctx context.Context, seq int64, states ...string) (bool, error)
 }
 
@@ -56,6 +60,13 @@ var (
 	// heldListWait: a message waits for its session in the node's list this long into a connection (an Agent of a
 	// runtime comes back a moment after its node), then goes anyway and the node's answer decides.
 	heldListWait = 2 * time.Minute
+	// heldLoadBackoff: after the store could not be read, it is not asked again this long (a send goes as before
+	// meanwhile, without waiting on it).
+	heldLoadBackoff = 5 * time.Second
+	// heldBlockedRenew: a message held behind one that may have arrived waits for the owner, not for its computer: its
+	// wait starts again this often, so it has nearly a whole day once the owner decides.
+	heldBlockedRenew = time.Hour
+	heldCheckWait    = 20 * time.Second // reading a session's latest turns for a message that may have arrived
 )
 
 // codeHeldNotKept: an eligible message that had to wait behind held ones could not be kept (the store failed);
@@ -71,8 +82,12 @@ type heldRow struct {
 	db.HeldOperation
 	text   string
 	images int
-	// busy: the owner's Retry or Delete is writing it now; the delivery leaves it until that is done.
+	// busy: the owner's Retry or Delete, or its expiry, is writing it now; it and the later ones of its session wait
+	// until that is done.
 	busy bool
+	// checked: the connection (its start) on which the session's transcript was read for this one, which may have
+	// arrived: one read per connection.
+	checked time.Time
 }
 
 func newHeldRow(op db.HeldOperation) *heldRow {
@@ -92,11 +107,15 @@ func newHeldRow(op db.HeldOperation) *heldRow {
 // unclear: a try of it may have arrived; the later ones of its session wait behind it.
 func (r *heldRow) unclear() bool { return r.State == db.HeldFailed && r.Failure == db.HeldUnclear }
 
+// expired: it has waited a whole day; heldExpire fails it, nothing sends it.
+func (r *heldRow) expired(now time.Time) bool { return now.Sub(r.HeldAt) >= heldExpiry }
+
 // heldBook is the held messages, read from the store once and kept in step with it.
 type heldBook struct {
 	loadMu sync.Mutex // one load at a time
 	mu     sync.Mutex
 	loaded bool
+	failed time.Time             // when the last load failed (heldLoadBackoff)
 	ctx    context.Context       // the deliveries' (heldLoop's); nil before it runs
 	rows   map[string][]*heldRow // by machine, in the order they were held
 	// sending: the sessions (machine + "/" + session) a delivery runs in: one at a time each.
@@ -125,11 +144,15 @@ func heldStoreCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 // while they cannot be read (nothing is held then: a send fails as before).
 func (d *Devices) heldLoad(ctx context.Context) bool {
 	h := &d.held
-	h.mu.Lock()
-	loaded := h.loaded
-	h.mu.Unlock()
-	if loaded {
-		return true
+	// Read, or failed a moment ago (every holdable send asks: they must not wait on a store that is down, one after
+	// another).
+	settled := func() (bool, bool) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.loaded, h.loaded || !h.failed.IsZero() && time.Since(h.failed) < heldLoadBackoff
+	}
+	if loaded, done := settled(); done {
+		return loaded
 	}
 	st := d.heldStore()
 	if st == nil {
@@ -137,25 +160,27 @@ func (d *Devices) heldLoad(ctx context.Context) bool {
 	}
 	h.loadMu.Lock()
 	defer h.loadMu.Unlock()
-	h.mu.Lock()
-	loaded = h.loaded
-	h.mu.Unlock()
-	if loaded {
-		return true
+	if loaded, done := settled(); done {
+		return loaded
+	}
+	fail := func(err error) bool {
+		d.logf("held messages: %v", err)
+		h.mu.Lock()
+		h.failed = time.Now()
+		h.mu.Unlock()
+		return false
 	}
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
 	// Nothing of this manager's is being sent before the load: every row left sending is a stopped manager's.
 	if n, err := st.RecoverHeldOperations(sctx, db.HeldKindMessage); err != nil {
-		d.logf("held messages: %v", err)
-		return false
+		return fail(err)
 	} else if n > 0 {
 		d.logf("held messages: %d left being sent by a stopped manager, marked unclear", n)
 	}
 	ops, err := st.HeldOperations(sctx, db.HeldKindMessage)
 	if err != nil {
-		d.logf("held messages: %v", err)
-		return false
+		return fail(err)
 	}
 	rows := map[string][]*heldRow{}
 	for _, op := range ops {
@@ -334,15 +359,26 @@ func (d *Devices) hold(ctx context.Context, c *heldCall) error {
 
 // heldAnswer is CodeHeld with held message id as its row shows it.
 func (d *Devices) heldAnswer(machine, session, id string, lang i18n.Lang) error {
-	var msg proto.UndeliveredMessage
-	for _, m := range d.HeldMessages(machine, lang)[session] {
-		if m.ID == id {
-			msg = m
+	h := &d.held
+	var row heldRow
+	found, behind := false, false
+	h.mu.Lock()
+	for _, r := range h.rows[machine] {
+		if r.SessionID != session {
+			continue
 		}
+		if r.OpID == id {
+			row, found = *r, true
+			break
+		}
+		behind = behind || r.unclear()
 	}
-	if msg.ID == "" { // gone meanwhile (sent, deleted): it is no longer the app's to wait for
-		msg = proto.UndeliveredMessage{ID: id, State: proto.UndeliveredWaiting, Computer: d.heldComputer(machine),
-			Error: i18n.T(lang, "devices-held.waiting", i18n.Args{"name": d.heldComputer(machine)})}
+	h.mu.Unlock()
+	name := d.heldComputer(machine)
+	msg := proto.UndeliveredMessage{ID: id, State: proto.UndeliveredWaiting, Computer: name, // gone meanwhile (sent, deleted)
+		Error: i18n.T(lang, "devices-held.waiting", i18n.Args{"name": name})}
+	if found {
+		msg = row.wire(lang, name, behind)
 	}
 	data, _ := json.Marshal(devicewire.HeldAnswer{Delivered: "later", Undelivered: &msg})
 	return &rpc.Error{Code: devicewire.CodeHeld, Message: msg.Error, Data: data}
@@ -418,9 +454,40 @@ func (r *heldRow) wire(lang i18n.Lang, computer string, behind bool) proto.Undel
 
 // ---- sending ----
 
-// heldWake starts sending machine's held messages that can go now (heldReady): one delivery per session at a time,
-// the sessions apart. Called when its node's session list changes (a new connection's first list once its node is
-// configured: what was held while it was away goes then), on a Retry, a new held message, and every heldTick.
+// heldHead is what leads a session's held messages (headLocked).
+type heldHead int
+
+const (
+	heldHeadNone    heldHead = iota // nothing to do now: none waits, or one ahead is being sent or changed
+	heldHeadSend                    // the next one to send
+	heldHeadUnclear                 // one that may have arrived holds the rest back
+)
+
+// headLocked is what leads the session's held messages: the first that goes next or holds the rest back. One being
+// sent, or the owner's (Retry, Delete) or the expiry's to change now, holds the later ones back whatever its state
+// (heldHeadNone); one that may have arrived too (heldHeadUnclear); a refused or expired one does not. h.mu is held.
+func (h *heldBook) headLocked(machine, session string) (*heldRow, heldHead) {
+	for _, r := range h.rows[machine] {
+		if r.SessionID != session {
+			continue
+		}
+		switch {
+		case r.busy, r.State == db.HeldSending:
+			return r, heldHeadNone
+		case r.unclear():
+			return r, heldHeadUnclear
+		case r.State == db.HeldWaiting:
+			return r, heldHeadSend
+		}
+	}
+	return nil, heldHeadNone
+}
+
+// heldWake starts on machine what its held messages can do now: per session, sending the next one (heldOn says the
+// node takes it), or reading the transcript once on this connection for one that may have arrived (heldLanded); one
+// at a time per session, the sessions apart. Called when its node's session list changes (a new connection's first
+// list once its node is configured: what was held while it was away goes then), on a Retry, a new held message, and
+// every heldTick.
 func (d *Devices) heldWake(machine string) {
 	h := &d.held
 	h.mu.Lock()
@@ -429,27 +496,51 @@ func (d *Devices) heldWake(machine string) {
 		h.mu.Unlock()
 		return
 	}
-	var due []string
+	type due struct {
+		session string
+		unclear bool
+		checked time.Time
+	}
+	var sessions []string
 	for _, r := range h.rows[machine] {
-		if !h.sending[machine+"/"+r.SessionID] && !slices.Contains(due, r.SessionID) && h.nextLocked(machine, r.SessionID) != nil {
-			due = append(due, r.SessionID)
+		if !slices.Contains(sessions, r.SessionID) {
+			sessions = append(sessions, r.SessionID)
+		}
+	}
+	now := h.clock()
+	var dues []due
+	for _, session := range sessions {
+		if h.sending[machine+"/"+session] {
+			continue
+		}
+		switch r, head := h.headLocked(machine, session); {
+		case head == heldHeadSend && !r.expired(now):
+			dues = append(dues, due{session: session})
+		case head == heldHeadUnclear:
+			dues = append(dues, due{session: session, unclear: true, checked: r.checked})
 		}
 	}
 	h.mu.Unlock()
-	if len(due) == 0 { // only failed ones, or every session's delivery runs: nothing to look up
+	if len(dues) == 0 { // only failed ones, or every session's delivery runs: nothing to look up
 		return
 	}
 	m := d.machineByID(machine)
 	if m == nil {
 		return
 	}
-	due = slices.DeleteFunc(due, func(session string) bool { return !m.heldReady(session) }) // not under h.mu
+	dues = slices.DeleteFunc(dues, func(e due) bool { // not under h.mu
+		listed, ready := m.heldOn(e.session)
+		if e.unclear {
+			return listed.IsZero() || listed.Equal(e.checked)
+		}
+		return !ready
+	})
 	var start []string
 	h.mu.Lock()
-	for _, session := range due {
-		if key := machine + "/" + session; !h.sending[key] {
+	for _, e := range dues {
+		if key := machine + "/" + e.session; !h.sending[key] {
 			h.sending[key] = true
-			start = append(start, session)
+			start = append(start, e.session)
 		}
 	}
 	h.mu.Unlock()
@@ -462,46 +553,30 @@ func (d *Devices) heldWake(machine string) {
 	}
 }
 
-// heldReady: a held message to session may go to m now: its node is connected and its current list has the session
-// (whatever its status: the node resumes a stopped one), or the connection is heldListWait old without it, and the
-// node's answer decides. Right after the handshake an Agent of a runtime is not back yet: sent then, the message
-// would be refused for a session that is there a second later.
-func (m *Machine) heldReady(session string) bool {
+// heldOn is what m's node offers a held message to session now. listed: the start of the connection whose current
+// list has the session, whatever its status (the node resumes a stopped one); zero when not connected or not listed.
+// ready: a message may go: listed, or heldListWait into the connection without it, and the node's answer decides.
+// Right after the handshake an Agent of a runtime is not back yet: sent then, the message would be refused for a
+// session that is there a second later.
+func (m *Machine) heldOn(session string) (listed time.Time, ready bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.peer == nil {
-		return false
+		return time.Time{}, false
 	}
 	select {
 	case <-m.peer.Done():
-		return false
+		return time.Time{}, false
 	default:
 	}
 	if m.sessionsListed {
 		for i := range m.sessions { // by index: a range value copies every (large) session it passes
 			if m.sessions[i].SessionID == session {
-				return true
+				return m.connectedAt, true
 			}
 		}
 	}
-	return !m.connectedAt.IsZero() && time.Since(m.connectedAt) >= heldListWait
-}
-
-// nextLocked is the session's next message to send: its first waiting one, unless one before it is being sent or may
-// have arrived (it waits behind those), or the owner is changing it. h.mu is held.
-func (h *heldBook) nextLocked(machine, session string) *heldRow {
-	for _, r := range h.rows[machine] {
-		if r.SessionID != session {
-			continue
-		}
-		switch {
-		case r.State == db.HeldSending, r.unclear(), r.State == db.HeldWaiting && r.busy:
-			return nil
-		case r.State == db.HeldWaiting:
-			return r
-		}
-	}
-	return nil
+	return time.Time{}, !m.connectedAt.IsZero() && time.Since(m.connectedAt) >= heldListWait
 }
 
 func (h *heldBook) rowLocked(machine string, seq int64) *heldRow {
@@ -520,40 +595,54 @@ func (h *heldBook) dropLocked(machine string, seq int64) {
 	}
 }
 
-// heldSend sends the session's held messages in order while they go, it is ready on its computer (heldReady) and
-// ctx lasts.
+// heldSend does what the session's held messages can do, in order, while ctx lasts: sends each next one while the node
+// takes them (heldOn), and reads the transcript once per connection for one that may have arrived (heldLanded). An
+// expired one is left to heldExpire.
 func (d *Devices) heldSend(ctx context.Context, machine, session string) {
 	h := &d.held
 	st := d.heldStore()
 	key := machine + "/" + session
 	for {
 		m := d.machineByID(machine)
-		ready := m != nil && m.heldReady(session)
+		var listed time.Time
+		ready := false
+		if m != nil {
+			listed, ready = m.heldOn(session)
+		}
 		now := h.clock()
 		h.mu.Lock()
-		r := h.nextLocked(machine, session)
-		if r == nil || !ready || ctx.Err() != nil {
-			delete(h.sending, key) // decided with the rows locked: one held after this goes with the next wake
+		r, head := h.headLocked(machine, session)
+		act := heldHeadNone
+		switch {
+		case ctx.Err() != nil:
+		case head == heldHeadSend && ready && !r.expired(now):
+			act = heldHeadSend
+		case head == heldHeadUnclear && !listed.IsZero() && !listed.Equal(r.checked):
+			act, r.checked = heldHeadUnclear, listed // read once on this connection, whatever comes of it
+		}
+		if act == heldHeadNone {
+			delete(h.sending, key) // decided with the rows locked: what comes after this goes with the next wake
 			h.mu.Unlock()
-			if r != nil && m != nil && !ready && ctx.Err() == nil && m.heldReady(session) {
-				d.heldWake(machine) // ready meanwhile: its wake found this delivery still running
+			if m != nil && head != heldHeadNone && ctx.Err() == nil {
+				if l, ok := m.heldOn(session); ok != ready || !l.Equal(listed) {
+					d.heldWake(machine) // its node changed meanwhile: its wake found this delivery still running
+				}
 			}
 			return
 		}
-		seq, call, lang, expired := r.Seq, r.Call, r.Lang, now.Sub(r.HeldAt) >= heldExpiry
-		if !expired {
-			r.State = db.HeldSending // from now on Delete answers that it is being sent
-		}
-		h.mu.Unlock()
-		if expired {
-			if !d.heldExpireRow(ctx, machine, seq) {
-				h.mu.Lock()
-				delete(h.sending, key)
-				h.mu.Unlock()
-				return // the store did not take it: the next look tries again
+		seq, id, call, lang := r.Seq, r.OpID, r.Call, r.Lang
+		if act == heldHeadUnclear {
+			h.mu.Unlock()
+			if d.heldLanded(ctx, m, machine, session, seq, id) {
+				continue // it did arrive: the next ones go
 			}
-			continue
+			h.mu.Lock()
+			delete(h.sending, key)
+			h.mu.Unlock()
+			return
 		}
+		r.State = db.HeldSending // from now on Delete answers that it is being sent
+		h.mu.Unlock()
 		sctx, cancel := heldStoreCtx(ctx)
 		claimed, err := st.ClaimHeldOperation(sctx, seq, now)
 		cancel()
@@ -580,7 +669,7 @@ func (d *Devices) heldSend(ctx context.Context, machine, session string) {
 		}
 		h.mu.Unlock()
 		d.heldChanged(machine)
-		outcome, reason := heldOutcomeOf(d.heldDeliver(ctx, call, lang))
+		outcome, reason := d.heldDeliver(ctx, call, lang)
 		if !d.heldSettle(ctx, machine, session, seq, outcome, reason) {
 			h.mu.Lock()
 			delete(h.sending, key)
@@ -590,23 +679,88 @@ func (d *Devices) heldSend(ctx context.Context, machine, session string) {
 	}
 }
 
-// heldDeliveryKey marks a held message's delivery in its context: its share receipt is settled only by an outcome
-// that is final (callNode).
+// heldLanded reads the session's latest turns for message id (seq), which may have arrived: there under its
+// client_msg_id (never by its words), it did arrive and leaves the rows as sent. False when it is not there or the
+// turns could not be read: it stays for the owner, and the later ones wait behind it. Nothing is sent.
+func (d *Devices) heldLanded(ctx context.Context, m *Machine, machine, session string, seq int64, id string) bool {
+	if m == nil {
+		return false
+	}
+	cctx, cancel := context.WithTimeout(ctx, heldCheckWait)
+	var res struct {
+		Items []proto.Item `json:"items"`
+	}
+	err := m.call(cctx, "session.items", map[string]any{"session_id": session, "turns": 3, "lazy_images": true}, &res)
+	cancel()
+	if err != nil {
+		d.logf("[%s] %s: a held message that may have arrived: its transcript could not be read: %v", machine, session, err)
+		return false
+	}
+	if !slices.ContainsFunc(res.Items, func(it proto.Item) bool { return it.Role == "user" && it.ClientMsgID == id }) {
+		d.logf("[%s] %s: a held message that may have arrived is not in its transcript: left to the owner", machine, session)
+		return false
+	}
+	sctx, scancel := heldStoreCtx(ctx)
+	defer scancel()
+	ok, err := d.heldStore().DeleteHeldOperation(sctx, seq, db.HeldFailed)
+	if err != nil || !ok { // gone, or the owner's Retry took it meanwhile: theirs
+		d.logf("[%s] %s: a held message that arrived stays (%v)", machine, session, err)
+		return false
+	}
+	h := &d.held
+	h.mu.Lock()
+	h.dropLocked(machine, seq)
+	h.mu.Unlock()
+	d.logf("[%s] %s: a held message that may have arrived is in its transcript: taken as sent", machine, session)
+	d.heldChanged(machine)
+	return true
+}
+
+// heldTry is a held message's delivery, in its context (heldDeliveryKey): callNode notes whether it called the node
+// and what that call answered, so the outcome is judged on the node's call alone.
+type heldTry struct {
+	called bool
+	err    error
+}
+
+// heldDeliveryKey marks a held message's delivery in its context (a *heldTry): its share receipt is settled only by an
+// outcome that is final (callNode).
 type heldDeliveryKey struct{}
 
-// heldDeliver sends held call raw as the hub sent it (its caller, submission and share authority with it), its
-// errors as they are.
-func (d *Devices) heldDeliver(ctx context.Context, raw json.RawMessage, lang string) error {
+// heldDeliver sends held call raw as the hub sent it (its caller, submission and share authority with it), and says
+// what came of it, judged on the node's call alone: stopped before the node was asked (its preparation here failed),
+// nothing was written and it is refused, with why; the node took it, it was delivered whatever came after.
+func (d *Devices) heldDeliver(ctx context.Context, raw json.RawMessage, lang string) (heldOutcome, string) {
+	l := i18n.Lang(lang)
 	var p devicewire.NodeCall
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return err
+		return heldRefused, heldReason(l, err)
 	}
 	p.Hold = nil // never held again by its own delivery
 	cctx, cancel := context.WithTimeout(ctx, heldSendTimeout)
 	defer cancel()
-	cctx = i18n.With(context.WithValue(cctx, heldDeliveryKey{}, true), i18n.Lang(lang))
+	try := &heldTry{}
+	cctx = i18n.With(context.WithValue(cctx, heldDeliveryKey{}, try), l)
 	_, err := d.callNode(cctx, p)
-	return err
+	switch {
+	case !try.called && ctx.Err() != nil:
+		return heldNotSent, "" // the manager stopping before the node was asked: it waits again
+	case !try.called:
+		return heldRefused, heldReason(l, err)
+	case try.err == nil:
+		return heldDelivered, "" // the node took it (an answer too large to pass on comes after)
+	}
+	return heldOutcomeOf(try.err)
+}
+
+// heldReason is why a held message was refused, in words: the node's (or the manager's coded) message, else that it
+// could not be made ready here.
+func heldReason(l i18n.Lang, err error) string {
+	var re *rpc.Error
+	if errors.As(err, &re) && cmp.Or(re.Message, re.Code) != "" {
+		return textfmt.Clip(textfmt.OneLine(cmp.Or(re.Message, re.Code)), 300)
+	}
+	return i18n.T(l, "devices-held.not_prepared")
 }
 
 // heldSettles: a call's share receipt is settled now (finishShareCall), which is always but for a held message's
@@ -628,7 +782,7 @@ const (
 	heldUnclear               // it may have arrived: never sent again by itself
 )
 
-// heldOutcomeOf is what a delivery that ended with err did, and the node's words for a refusal.
+// heldOutcomeOf is what a node call that ended with err did, and the node's words for a refusal.
 func heldOutcomeOf(err error) (heldOutcome, string) {
 	if err == nil {
 		return heldDelivered, ""
@@ -705,63 +859,73 @@ func (d *Devices) heldSettle(ctx context.Context, machine, session string, seq i
 	return false
 }
 
-// heldExpire fails every message that has waited heldExpiry for its computer.
+// heldExpire, the one place a message expires, fails each that has waited heldExpiry for its computer. One held
+// behind a message that may have arrived waits for the owner, not for its computer: it never expires there, and its
+// wait starts again every heldBlockedRenew, so it has nearly a day once the owner decides.
 func (d *Devices) heldExpire(ctx context.Context) {
 	h := &d.held
 	now := h.clock()
 	type due struct {
 		machine string
 		seq     int64
+		renew   bool
 	}
-	var out []due
+	var dues []due
 	h.mu.Lock()
 	for machine, rows := range h.rows {
+		behind := map[string]bool{}
 		for _, r := range rows {
-			if r.State == db.HeldWaiting && now.Sub(r.HeldAt) >= heldExpiry {
-				out = append(out, due{machine, r.Seq})
+			switch {
+			case r.unclear():
+				behind[r.SessionID] = true
+			case r.State != db.HeldWaiting || r.busy:
+			case behind[r.SessionID] && now.Sub(r.HeldAt) >= heldBlockedRenew:
+				r.busy = true // neither sent nor changed by the owner meanwhile
+				dues = append(dues, due{machine, r.Seq, true})
+			case !behind[r.SessionID] && r.expired(now):
+				r.busy = true
+				dues = append(dues, due{machine, r.Seq, false})
 			}
 		}
 	}
 	h.mu.Unlock()
-	for _, e := range out {
-		d.heldExpireRow(ctx, e.machine, e.seq)
-	}
-}
-
-// heldExpireRow fails waiting message seq as expired; false when the store did not take it (the next look tries
-// again). A message no longer waiting, or the owner's to change now, is left as it is.
-func (d *Devices) heldExpireRow(ctx context.Context, machine string, seq int64) bool {
-	h := &d.held
-	h.mu.Lock()
-	r := h.rowLocked(machine, seq)
-	if r == nil || r.State != db.HeldWaiting || r.busy {
+	changed := map[string]bool{}
+	for _, e := range dues {
+		sctx, cancel := heldStoreCtx(ctx)
+		var ok bool
+		var err error
+		if e.renew {
+			ok, err = d.heldStore().RenewHeldOperation(sctx, e.seq, now)
+		} else {
+			ok, err = d.heldStore().SettleHeldOperation(sctx, e.seq, db.HeldWaiting, db.HeldFailed, db.HeldExpired, "")
+		}
+		cancel()
+		h.mu.Lock()
+		if r := h.rowLocked(e.machine, e.seq); r != nil {
+			r.busy = false
+			switch {
+			case err != nil: // the next look tries again
+			case ok && e.renew:
+				r.HeldAt = now
+			case ok:
+				r.State, r.Failure, r.Error = db.HeldFailed, db.HeldExpired, ""
+				changed[e.machine] = true
+			case !e.renew: // the store has it otherwise: left to the owner
+				r.State, r.Failure, r.Error = db.HeldFailed, db.HeldUnclear, ""
+				changed[e.machine] = true
+			}
+		}
 		h.mu.Unlock()
-		return true
-	}
-	r.busy = true // neither sent nor changed by the owner meanwhile
-	h.mu.Unlock()
-	sctx, cancel := heldStoreCtx(ctx)
-	defer cancel()
-	ok, err := d.heldStore().SettleHeldOperation(sctx, seq, db.HeldWaiting, db.HeldFailed, db.HeldExpired, "")
-	h.mu.Lock()
-	if r := h.rowLocked(machine, seq); r != nil {
-		r.busy = false
 		switch {
 		case err != nil:
-		case ok:
-			r.State, r.Failure, r.Error = db.HeldFailed, db.HeldExpired, ""
-		default: // the store has it otherwise: left to the owner
-			r.State, r.Failure, r.Error = db.HeldFailed, db.HeldUnclear, ""
+			d.logf("[%s] a held message's wait not kept: %v", e.machine, err)
+		case ok && !e.renew:
+			d.logf("[%s] a held message expired: its computer was away for %s", e.machine, heldExpiry)
 		}
 	}
-	h.mu.Unlock()
-	if err != nil {
-		d.logf("[%s] a held message's day is over, not kept: %v", machine, err)
-		return false
+	for machine := range changed {
+		d.heldChanged(machine)
 	}
-	d.logf("[%s] a held message expired: its computer was away for %s", machine, heldExpiry)
-	d.heldChanged(machine)
-	return true
 }
 
 // ---- the owner's Retry and Delete ----

@@ -127,6 +127,13 @@ func (d *DB) RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (b
 	return tag.RowsAffected() == 1, err
 }
 
+// RenewHeldOperation starts waiting operation seq's wait again from at: one held behind a message that may have
+// arrived waits for the owner, not for its computer. False when it is not waiting.
+func (d *DB) RenewHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error) {
+	tag, err := d.pool.Exec(ctx, `UPDATE held_operations SET held_at = $2 WHERE seq = $1 AND state = 'waiting'`, seq, at.UTC())
+	return tag.RowsAffected() == 1, err
+}
+
 // DeleteHeldOperation drops operation seq, only while in one of states when any are given. False when no such row
 // was there.
 func (d *DB) DeleteHeldOperation(ctx context.Context, seq int64, states ...string) (bool, error) {

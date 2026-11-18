@@ -10,5 +10,6 @@
   "not_kept": "Earlier messages are still waiting to be sent, and this one couldn't be saved. Try again in a moment.",
   "not_found": "This message is no longer waiting to be sent.",
   "read_only": "This device can't change messages waiting to be sent.",
-  "store_failed": "Couldn't change this message right now. Try again in a moment."
+  "store_failed": "Couldn't change this message right now. Try again in a moment.",
+  "not_prepared": "Persona couldn't get it ready to send"
 }
