@@ -15,6 +15,7 @@ import (
 	"github.com/nwverse/persona/server/internal/apierr"
 	"github.com/nwverse/persona/server/internal/assistantwire"
 	"github.com/nwverse/persona/server/internal/channel"
+	"github.com/nwverse/persona/server/internal/devicewire"
 	"github.com/nwverse/persona/server/internal/i18n"
 	"github.com/nwverse/persona/server/internal/proto"
 	"github.com/nwverse/persona/server/internal/rpc"
@@ -326,6 +327,12 @@ func (h *Hub) sendMessageOnce(w http.ResponseWriter, r *http.Request, m *Machine
 		callErr(w, &rpc.Error{Code: "codex_send_guard", Message: i18n.T(l, "hub-send.guard_need_id"), Data: json.RawMessage(`{"delivered":"none"}`)})
 		return
 	}
+	if apply, _ := p["apply_switch"].(bool); id != "" && known && !assistantConv && todoID == "" && !fresh && !apply {
+		// The owner's message to an Agent the hub lists: while its computer is away the manager may hold it and send it
+		// once the computer is back (#10661), answering held instead of offline (deliverOnce). Not a to-do's hand-off, an
+		// Agent's first prompt or a launcher switch: those are decided now, not replayed later.
+		ctx = withHold(ctx, l)
+	}
 	modelSent := func(status int) { // the picked model ran: the manager may remember it
 		if status == http.StatusOK && picked != "" {
 			launcher, _ := p["launcher"].(string)
@@ -440,6 +447,11 @@ func (h *Hub) deliverOnce(ctx context.Context, m *Machine, p map[string]any) (in
 			out = json.RawMessage("{}")
 		}
 		return http.StatusOK, append(out, '\n'), outcome
+	case rpcCodeOf(err) == devicewire.CodeHeld:
+		// The machine's manager holds it until the computer is back (withHold, #10661): nothing was typed, it goes by
+		// itself, and a retry of the id is answered as kept (sendLater).
+		status, body := heldBody(err)
+		return status, body, sendLater
 	case outcome == sendUnknown && !hasDelivered(err):
 		l := h.contextLang(ctx)
 		status, body := callErrBytes(l, unknownDelivery(l, "hub-send.lost_during"))
@@ -584,6 +596,35 @@ func laterBody(kept *proto.UndeliveredMessage) (int, []byte) {
 	}
 	b, _ := json.Marshal(out)
 	return http.StatusAccepted, append(b, '\n')
+}
+
+// holdKey marks a send whose message the machine's manager may hold while the computer is away (#10661).
+type holdKey struct{}
+
+// withHold marks ctx's session.send as one the manager may hold, its answer worded in l: busNode.Call puts
+// devicewire.NodeCall.Hold on it.
+func withHold(ctx context.Context, l i18n.Lang) context.Context {
+	return context.WithValue(ctx, holdKey{}, l)
+}
+
+// holdOf is the NodeCall.Hold of ctx's session.send: nil unless withHold marked it.
+func holdOf(ctx context.Context) *devicewire.Hold {
+	l, ok := ctx.Value(holdKey{}).(i18n.Lang)
+	if !ok {
+		return nil
+	}
+	return &devicewire.Hold{Lang: string(l)}
+}
+
+// heldBody is the answer to a message the machine's manager holds (devicewire.CodeHeld): laterBody with the held
+// message as its row shows it.
+func heldBody(err error) (int, []byte) {
+	var held devicewire.HeldAnswer
+	var re *rpc.Error
+	if errors.As(err, &re) {
+		_ = json.Unmarshal(re.Data, &held)
+	}
+	return laterBody(held.Undelivered)
 }
 
 func rpcCodeOf(err error) string {

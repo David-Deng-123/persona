@@ -50,6 +50,9 @@ func (b *busNode) Call(ctx context.Context, method string, params, out any) erro
 	if method == "session.modes" { // the manager records who changed a mode (#10297)
 		p.Actor = modesActor(ctx)
 	}
+	if method == "session.send" { // the owner's message to an Agent, which its manager may hold (send.go withHold, #10661)
+		p.Hold = holdOf(ctx)
+	}
 	if devicewire.IsSessionStart(method) || method == "session.send" {
 		attachNodeCaller(ctx, &p)
 		if p.Caller != nil && p.Caller.OwnerSubject != "" {
