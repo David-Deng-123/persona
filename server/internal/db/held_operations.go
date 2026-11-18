@@ -82,9 +82,21 @@ func (d *DB) HoldOperation(ctx context.Context, op HeldOperation) (HeldOperation
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return HeldOperation{}, false, err
 	}
-	held, err = scanHeld(d.pool.QueryRow(ctx, `SELECT `+heldColumns+` FROM held_operations
-		WHERE kind = $1 AND machine_id = $2 AND session_id = $3 AND op_id = $4`, op.Kind, op.MachineID, op.SessionID, op.OpID))
+	held, found, err := d.HeldOperationOf(ctx, op.Kind, op.MachineID, op.SessionID, op.OpID)
+	if err == nil && !found {
+		err = pgx.ErrNoRows // dropped between the two statements
+	}
 	return held, false, err
+}
+
+// HeldOperationOf is the held operation of kind for machine, session and op id; false when there is none.
+func (d *DB) HeldOperationOf(ctx context.Context, kind, machine, session, opID string) (HeldOperation, bool, error) {
+	held, err := scanHeld(d.pool.QueryRow(ctx, `SELECT `+heldColumns+` FROM held_operations
+		WHERE kind = $1 AND machine_id = $2 AND session_id = $3 AND op_id = $4`, kind, machine, session, opID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return HeldOperation{}, false, nil
+	}
+	return held, err == nil, err
 }
 
 // HeldOperations are every held operation of kind, in the order they were held.
@@ -120,20 +132,30 @@ func (d *DB) SettleHeldOperation(ctx context.Context, seq int64, from, state, fa
 	return tag.RowsAffected() == 1, err
 }
 
-// RetryHeldOperation is the owner's Retry on operation seq: waiting again, a new wait from at. False when it is gone.
+// RetryHeldOperation is the owner's Retry on failed operation seq: waiting again, a new wait from at. False when it is
+// not failed (gone, waiting, or being sent: another manager on the same database in a switch-over may be sending it,
+// and it must not be made to wait again and go twice).
 func (d *DB) RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error) {
 	tag, err := d.pool.Exec(ctx, `UPDATE held_operations SET state = 'waiting', failure = '', error = '', held_at = $2
-		WHERE seq = $1`, seq, at.UTC())
+		WHERE seq = $1 AND state = 'failed'`, seq, at.UTC())
 	return tag.RowsAffected() == 1, err
 }
 
-// DeleteHeldOperation drops operation seq, only while in one of states when any are given. False when no such row
-// was there.
+// RenewHeldOperation starts waiting operation seq's wait again from at: one held behind a message that may have
+// arrived waits for the owner, not for its computer. False when it is not waiting.
+func (d *DB) RenewHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error) {
+	tag, err := d.pool.Exec(ctx, `UPDATE held_operations SET held_at = $2 WHERE seq = $1 AND state = 'waiting'`, seq, at.UTC())
+	return tag.RowsAffected() == 1, err
+}
+
+// DeleteHeldOperation drops operation seq, only while in one of states when any are given, else only while it is not
+// being sent (the owner's Delete: another manager on the same database in a switch-over may be sending it). False when
+// no such row was there.
 func (d *DB) DeleteHeldOperation(ctx context.Context, seq int64, states ...string) (bool, error) {
 	var tag pgconn.CommandTag
 	var err error
 	if len(states) == 0 {
-		tag, err = d.pool.Exec(ctx, `DELETE FROM held_operations WHERE seq = $1`, seq)
+		tag, err = d.pool.Exec(ctx, `DELETE FROM held_operations WHERE seq = $1 AND state <> 'sending'`, seq)
 	} else {
 		tag, err = d.pool.Exec(ctx, `DELETE FROM held_operations WHERE seq = $1 AND state = ANY($2)`, seq, states)
 	}

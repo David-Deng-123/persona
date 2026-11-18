@@ -109,10 +109,30 @@ func TestHeldOperationStates(t *testing.T) {
 		t.Fatalf("retried %+v", op)
 	}
 
-	// b being sent when the manager stopped: unclear at the next start; c waiting stays.
+	// b being sent (by another manager on the same database, in a switch-over): the owner's Retry and Delete leave it,
+	// and so does a Retry of one that waits.
 	if ok, _ := d.ClaimHeldOperation(ctx, b, tried); !ok {
 		t.Fatal("claim b")
 	}
+	if ok, err := d.RetryHeldOperation(ctx, b, again); ok || err != nil {
+		t.Fatalf("retried one being sent: %v %v", ok, err)
+	}
+	if ok, err := d.DeleteHeldOperation(ctx, b); ok || err != nil {
+		t.Fatalf("deleted one being sent: %v %v", ok, err)
+	}
+	if op := get(b); op.State != HeldSending {
+		t.Fatalf("b %+v", op)
+	}
+	if ok, _ := d.RetryHeldOperation(ctx, c, again); ok {
+		t.Fatal("retried a waiting one")
+	}
+	if op, found, err := d.HeldOperationOf(ctx, HeldKindMessage, "mac", "s1", "b"); !found || err != nil || op.Seq != b || op.State != HeldSending {
+		t.Fatalf("b by its key: %+v %v %v", op, found, err)
+	}
+	if _, found, err := d.HeldOperationOf(ctx, HeldKindMessage, "mac", "s2", "b"); found || err != nil {
+		t.Fatalf("another session's b: %v %v", found, err)
+	}
+	// b being sent when the manager stopped: unclear at the next start; c waiting stays.
 	if n, err := d.RecoverHeldOperations(ctx, HeldKindMessage); n != 1 || err != nil {
 		t.Fatalf("recover: %d %v", n, err)
 	}
@@ -123,6 +143,16 @@ func TestHeldOperationStates(t *testing.T) {
 		t.Fatalf("c %+v", op)
 	}
 
+	renewed := at.Add(2 * time.Hour)
+	if ok, err := d.RenewHeldOperation(ctx, c, renewed); !ok || err != nil {
+		t.Fatalf("renew: %v %v", ok, err)
+	}
+	if op := get(c); op.State != HeldWaiting || !op.HeldAt.Equal(renewed) || !op.SentAt.Equal(at) {
+		t.Fatalf("renewed %+v", op)
+	}
+	if ok, _ := d.RenewHeldOperation(ctx, b, renewed); ok {
+		t.Fatal("renewed one that is not waiting")
+	}
 	if ok, _ := d.DeleteHeldOperation(ctx, c, HeldSending); ok {
 		t.Fatal("deleted a waiting one as sent")
 	}

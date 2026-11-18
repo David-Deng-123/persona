@@ -615,8 +615,8 @@ func (d *Devices) BusUp() {
 // maxForward bounds one node message passed on to the hub: the bus takes 64 MiB a line, the wrapper included, and a
 // line it cannot take would drop the whole connection. The node's own lines have the same limit, so this only cuts
 // the last bytes; what is big on purpose (downloads, uploads, node updates, a port's bytes) comes in pieces of 1 MiB
-// at most.
-const maxForward = 60 << 20
+// at most. A var so tests change it.
+var maxForward = 60 << 20
 
 var errTooLarge = &rpc.Error{Code: "too_large", Message: "the node's answer is too large to pass on"}
 
@@ -719,6 +719,9 @@ func (d *Devices) callNode(ctx context.Context, p devicewire.NodeCall) (json.Raw
 	modeSID, modeFrom, modeTo, recordMode := m.modeSetFrom(p, params) // the record of mode changes (mode_changes.go)
 	var out json.RawMessage
 	err := m.callWithSnapshot(ctx, p.Method, params, &out, snapshot)
+	if try, ok := ctx.Value(heldDeliveryKey{}).(*heldTry); ok {
+		try.called, try.err = true, err // a held delivery is judged on this call alone (held.go)
+	}
 	if recordMode && err == nil {
 		m.recordModeSet(p.Actor, modeSID, modeFrom, modeTo, out)
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nwverse/persona/server/internal/apierr"
+	"github.com/nwverse/persona/server/internal/assistantwire"
 	"github.com/nwverse/persona/server/internal/db"
 	"github.com/nwverse/persona/server/internal/devicewire"
 	"github.com/nwverse/persona/server/internal/i18n"
@@ -29,6 +31,13 @@ type heldMem struct {
 	seq  int64
 	rows map[int64]db.HeldOperation
 	fail error // every held_operations call fails with it, when set
+	// loads counts the loads (RecoverHeldOperations); retryGate, when set, holds a Retry's write until it is closed,
+	// and retrying is told when one waits there.
+	loads     int
+	retryGate chan struct{}
+	retrying  chan struct{}
+	// holdErr fails a hold, nothing kept; committedErr fails one that was kept (its answer lost after the commit).
+	holdErr, committedErr error
 }
 
 func newHeldMem() *heldMem {
@@ -41,6 +50,13 @@ func (s *heldMem) HoldOperation(_ context.Context, op db.HeldOperation) (db.Held
 	if s.fail != nil {
 		return db.HeldOperation{}, false, s.fail
 	}
+	if s.holdErr != nil {
+		return db.HeldOperation{}, false, s.holdErr
+	}
+	if s.committedErr != nil {
+		defer func() { s.seq++; op.Seq, op.State = s.seq, db.HeldWaiting; s.rows[op.Seq] = op }()
+		return db.HeldOperation{}, false, s.committedErr
+	}
 	for _, r := range s.rows {
 		if r.Kind == op.Kind && r.MachineID == op.MachineID && r.SessionID == op.SessionID && r.OpID == op.OpID {
 			return r, false, nil
@@ -51,6 +67,20 @@ func (s *heldMem) HoldOperation(_ context.Context, op db.HeldOperation) (db.Held
 	op.Call = slices.Clone(op.Call)
 	s.rows[op.Seq] = op
 	return op, true, nil
+}
+
+func (s *heldMem) HeldOperationOf(_ context.Context, kind, machine, session, opID string) (db.HeldOperation, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail != nil {
+		return db.HeldOperation{}, false, s.fail
+	}
+	for _, r := range s.rows {
+		if r.Kind == kind && r.MachineID == machine && r.SessionID == session && r.OpID == opID {
+			return r, true, nil
+		}
+	}
+	return db.HeldOperation{}, false, nil
 }
 
 func (s *heldMem) HeldOperations(_ context.Context, kind string) ([]db.HeldOperation, error) {
@@ -72,6 +102,7 @@ func (s *heldMem) HeldOperations(_ context.Context, kind string) ([]db.HeldOpera
 func (s *heldMem) RecoverHeldOperations(_ context.Context, kind string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.loads++
 	if s.fail != nil {
 		return 0, s.fail
 	}
@@ -118,17 +149,45 @@ func (s *heldMem) SettleHeldOperation(_ context.Context, seq int64, from, state,
 
 func (s *heldMem) RetryHeldOperation(_ context.Context, seq int64, at time.Time) (bool, error) {
 	s.mu.Lock()
+	gate, retrying := s.retryGate, s.retrying
+	s.mu.Unlock()
+	if gate != nil {
+		retrying <- struct{}{}
+		<-gate
+	}
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fail != nil {
 		return false, s.fail
 	}
 	r, ok := s.rows[seq]
-	if !ok {
+	if !ok || r.State != db.HeldFailed {
 		return false, nil
 	}
 	r.State, r.Failure, r.Error, r.HeldAt = db.HeldWaiting, "", "", at
 	s.rows[seq] = r
 	return true, nil
+}
+
+func (s *heldMem) RenewHeldOperation(_ context.Context, seq int64, at time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail != nil {
+		return false, s.fail
+	}
+	r, ok := s.rows[seq]
+	if !ok || r.State != db.HeldWaiting {
+		return false, nil
+	}
+	r.HeldAt = at
+	s.rows[seq] = r
+	return true, nil
+}
+
+func (s *heldMem) loadCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loads
 }
 
 func (s *heldMem) DeleteHeldOperation(_ context.Context, seq int64, states ...string) (bool, error) {
@@ -138,7 +197,7 @@ func (s *heldMem) DeleteHeldOperation(_ context.Context, seq int64, states ...st
 		return false, s.fail
 	}
 	r, ok := s.rows[seq]
-	if !ok || len(states) > 0 && !slices.Contains(states, r.State) {
+	if !ok || len(states) > 0 && !slices.Contains(states, r.State) || len(states) == 0 && r.State == db.HeldSending {
 		return false, nil
 	}
 	delete(s.rows, seq)
@@ -177,6 +236,15 @@ type heldNode struct {
 	gate   chan struct{}
 	answer func(params map[string]any) (any, error)
 	listed []string // the sessions it lists; nil: s1 and s2
+	// items are what session.items answers, by session; reads counts those calls.
+	items map[string][]proto.Item
+	reads int
+}
+
+func (n *heldNode) itemReads() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.reads
 }
 
 // list has the node list these sessions from now on and say so (sessions.changed).
@@ -211,6 +279,16 @@ func (n *heldNode) dial(context.Context) (net.Conn, error) {
 			return proto.NodeInfo{Hostname: "box", OS: "linux", Arch: "amd64", Home: "/home/me", Version: "test"}, nil
 		case "sessions.list":
 			return map[string]any{"sessions": n.sessions()}, nil
+		case "session.items":
+			var q struct {
+				SessionID string `json:"session_id"`
+			}
+			_ = json.Unmarshal(params, &q)
+			n.mu.Lock()
+			n.reads++
+			items := n.items[q.SessionID]
+			n.mu.Unlock()
+			return map[string]any{"items": items}, nil
 		case "session.send":
 			var m map[string]any
 			_ = json.Unmarshal(params, &m)
@@ -258,10 +336,17 @@ func (n *heldNode) drop() {
 // published counts the rows' republications per machine.
 func heldDevices(t *testing.T, st *heldMem, tick time.Duration) (*Devices, *published) {
 	t.Helper()
+	return heldDevicesAt(t, st, tick, nil)
+}
+
+// heldDevicesAt is heldDevices on clock now (nil: the time), set before its loop first looks.
+func heldDevicesAt(t *testing.T, st *heldMem, tick time.Duration, now func() time.Time) (*Devices, *published) {
+	t.Helper()
 	oldTick := heldTick
 	heldTick = tick
 	d := newTestDevices(t)
 	d.opts.Store = st
+	d.held.now = now
 	pub := &published{n: map[string]int{}}
 	d.opts.HeldChanged = pub.add
 	ctx, cancel := context.WithCancel(context.Background())
@@ -523,7 +608,7 @@ func TestHeldUnclearIsNotSentAgain(t *testing.T) {
 	}
 	// The owner checked and retries a: it goes again, then b and c.
 	mux := d.Handler(http.NotFoundHandler())
-	if code, body := clipCall(t, mux, "POST", "/api/v1/sessions/mac/s1/held/a/retry", "", "full"); code != http.StatusOK || body["ok"] != true {
+	if code, body := personCall(t, mux, "POST", "/api/v1/sessions/mac/s1/held/a/retry"); code != http.StatusOK || body["ok"] != true {
 		t.Fatalf("retry: %d %v", code, body)
 	}
 	eventually(t, 5*time.Second, "all sent", func() bool { return len(st.all()) == 0 })
@@ -567,11 +652,10 @@ func TestHeldRefusedDoesNotBlock(t *testing.T) {
 // A day after it was held a message still waiting fails as expired; Retry gives it a new day.
 func TestHeldExpiresAfterADay(t *testing.T) {
 	st := newHeldMem()
-	d, _ := heldDevices(t, st, time.Hour)
 	var mu sync.Mutex
 	now := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
-	d.held.now = clock
+	d, _ := heldDevicesAt(t, st, time.Hour, clock)
 	offlineMachine(d, "mac", "Studio Mac")
 	ctx := context.Background()
 	out, err := d.Call(ctx, heldSend("mac", "s1", "a", "a"))
@@ -627,13 +711,34 @@ func TestHeldDelete(t *testing.T) {
 	if code, body := clipCall(t, mux, "DELETE", "/api/v1/sessions/mac/s2/held/x", "", "answer"); code != http.StatusForbidden || body["code"] != proto.CodeReadOnly {
 		t.Fatalf("answer-only device: %d %v", code, body)
 	}
-	if code, body := clipCall(t, mux, "DELETE", "/api/v1/sessions/mac/s2/held/x", "", "full"); code != http.StatusOK || body["ok"] != true {
+	// A full role that is not a person's own device (the hub's token, a pairing code): a Retry would send it again as
+	// its sender.
+	for _, method := range []string{"DELETE", "POST"} {
+		path := "/api/v1/sessions/mac/s2/held/x"
+		if method == "POST" {
+			path += "/retry"
+		}
+		if code, body := clipCall(t, mux, method, path, "", "full"); code != http.StatusForbidden || body["code"] != proto.CodeReadOnly {
+			t.Fatalf("%s from a full role without a person: %d %v", method, code, body)
+		}
+	}
+	answerPerson := httptest.NewRequest("DELETE", "/api/v1/sessions/mac/s2/held/x", nil) // a person, but answer-only
+	answerPerson.Header.Set(assistantwire.RoleHeader, "answer")
+	answerPerson.Header.Set(assistantwire.PersonHeader, "1")
+	rec := httptest.NewRecorder()
+	if mux.ServeHTTP(rec, answerPerson); rec.Code != http.StatusForbidden {
+		t.Fatalf("answer-only person: %d", rec.Code)
+	}
+	if len(st.all()) != 2 {
+		t.Fatalf("changed without a person's full device: %+v", st.all())
+	}
+	if code, body := personCall(t, mux, "DELETE", "/api/v1/sessions/mac/s2/held/x"); code != http.StatusOK || body["ok"] != true {
 		t.Fatalf("delete: %d %v", code, body)
 	}
-	if code, _ := clipCall(t, mux, "DELETE", "/api/v1/sessions/mac/s2/held/x", "", "full"); code != http.StatusNotFound {
+	if code, _ := personCall(t, mux, "DELETE", "/api/v1/sessions/mac/s2/held/x"); code != http.StatusNotFound {
 		t.Fatalf("again: %d", code)
 	}
-	if code, _ := clipCall(t, mux, "POST", "/api/v1/sessions/mac/s2/held/x/retry", "", "full"); code != http.StatusNotFound {
+	if code, _ := personCall(t, mux, "POST", "/api/v1/sessions/mac/s2/held/x/retry"); code != http.StatusNotFound {
 		t.Fatalf("retry of a deleted one: %d", code)
 	}
 	if found, err := d.HeldDelete(ctx, "s2", "x"); found || err != nil {
@@ -641,7 +746,7 @@ func TestHeldDelete(t *testing.T) {
 	}
 	close(up)
 	eventually(t, 5*time.Second, "a being sent", func() bool { return len(n.sent()) == 1 })
-	if code, body := clipCall(t, mux, "DELETE", "/api/v1/sessions/mac/s1/held/a", "", "full"); code != http.StatusConflict || body["code"] != "conflict" {
+	if code, body := personCall(t, mux, "DELETE", "/api/v1/sessions/mac/s1/held/a"); code != http.StatusConflict || body["code"] != "conflict" {
 		t.Fatalf("while sent: %d %v", code, body)
 	}
 	found, err := d.HeldDelete(i18n.With(ctx, i18n.En), "s1", "a")
@@ -782,9 +887,13 @@ func TestHeldLinesInEveryLanguage(t *testing.T) {
 	}
 }
 
-// While the held messages cannot be read nothing is held (the send fails as before); once they can, the send path
+// While the held messages cannot be read nothing is held (the send fails as before), and after a failed read the
+// store is left alone for heldLoadBackoff: the sends meanwhile do not wait on it, one after another. Then the send path
 // reads them itself.
 func TestHeldNeedsTheStore(t *testing.T) {
+	old := heldLoadBackoff
+	heldLoadBackoff = 200 * time.Millisecond
+	t.Cleanup(func() { heldLoadBackoff = old })
 	st := newHeldMem()
 	st.setFail(errors.New("database down"))
 	d := newTestDevices(t)
@@ -792,16 +901,22 @@ func TestHeldNeedsTheStore(t *testing.T) {
 	offlineMachine(d, "mac", "Studio Mac")
 	ctx := context.Background()
 	var re *rpc.Error
-	if _, err := d.Call(ctx, heldSend("mac", "s1", "a", "a")); !errors.As(err, &re) || re.Code != devicewire.CodeMachineOffline {
-		t.Fatalf("store down: %v", err)
+	for i := range 3 {
+		if _, err := d.Call(ctx, heldSend("mac", "s1", "a", "a")); !errors.As(err, &re) || re.Code != devicewire.CodeMachineOffline {
+			t.Fatalf("store down, send %d: %v", i, err)
+		}
 	}
 	if found, err := d.HeldDelete(ctx, "s1", "a"); found || err != nil {
 		t.Fatalf("delete with the store down: %v %v", found, err)
 	}
+	if n := st.loadCount(); n != 1 {
+		t.Fatalf("the store was asked %d times within its back-off", n)
+	}
 	st.setFail(nil)
+	time.Sleep(heldLoadBackoff)
 	out, err := d.Call(ctx, heldSend("mac", "s1", "a", "a"))
-	if held := heldAnswerOf(t, out, err); held.ID != "a" || len(st.all()) != 1 {
-		t.Fatalf("held %+v, %d stored", held, len(st.all()))
+	if held := heldAnswerOf(t, out, err); held.ID != "a" || len(st.all()) != 1 || st.loadCount() != 2 {
+		t.Fatalf("held %+v, %d stored, %d loads", held, len(st.all()), st.loadCount())
 	}
 }
 
@@ -876,4 +991,339 @@ type writerCtxErr struct{}
 func (writerCtxErr) Error() string { return "failed to write frame: context deadline exceeded" }
 func (writerCtxErr) Is(target error) bool {
 	return target == rpc.ErrNotWritten || target == context.DeadlineExceeded
+}
+
+// putHeld keeps message id for session sid of machine mac in st as a manager held it at, in state (failed with
+// failure); its seq.
+func putHeld(t *testing.T, st *heldMem, sid, id, state, failure string, at time.Time) int64 {
+	t.Helper()
+	p := heldSend("mac", sid, id, id)
+	p.Hold, p.TimeoutMS, p.Request = nil, 0, ""
+	raw, _ := json.Marshal(p)
+	op, _, err := st.HoldOperation(context.Background(), db.HeldOperation{Kind: db.HeldKindMessage, OpID: id, MachineID: "mac",
+		SessionID: sid, Call: raw, Lang: "en", SentAt: at, HeldAt: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	r := st.rows[op.Seq]
+	r.State, r.Failure = state, failure
+	st.rows[op.Seq] = r
+	st.mu.Unlock()
+	return op.Seq
+}
+
+// A held message that cannot be made ready to send here (its preparation fails before the node is asked) wrote
+// nothing: it fails as refused, with why, and does not hold the next one back.
+func TestHeldNotPreparedIsRefused(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	ctx := context.Background()
+	out, err := d.Call(ctx, heldSend("mac", "s1", "a", "a"))
+	heldAnswerOf(t, out, err)
+	bad := heldSend("mac", "s1", "b", "b")
+	bad.Params = json.RawMessage(`{"session_id":"s1","client_msg_id":"b","text":5}`) // held behind a; not a text
+	out, err = d.Call(ctx, bad)
+	heldAnswerOf(t, out, err)
+	out, err = d.Call(ctx, heldSend("mac", "s1", "c", "c"))
+	heldAnswerOf(t, out, err)
+	close(up)
+	eventually(t, 5*time.Second, "a and c sent", func() bool { return slices.Equal(n.sent(), []string{"a", "c"}) && len(st.all()) == 1 })
+	if r := st.all()[0]; r.OpID != "b" || r.State != db.HeldFailed || r.Failure != db.HeldRefused {
+		t.Fatalf("b stored %+v", r)
+	}
+	if list := d.HeldMessages("mac", i18n.En)["s1"]; len(list) != 1 || list[0].Error != "Not sent: Persona couldn't get it ready to send" {
+		t.Fatalf("row %+v", list)
+	}
+}
+
+// Once the node took a held message it was delivered, whatever comes after its answer (too large to pass on): never
+// refused, so Retry could not send it twice.
+func TestHeldDeliveredWhateverComesAfter(t *testing.T) {
+	old := maxForward
+	maxForward = 16 << 10
+	t.Cleanup(func() { maxForward = old })
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{answer: func(m map[string]any) (any, error) {
+		if m["client_msg_id"] == "a" {
+			return map[string]any{"ok": true, "pad": strings.Repeat("x", 32<<10)}, nil
+		}
+		return map[string]any{"ok": true}, nil
+	}}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	for _, id := range []string{"a", "b"} {
+		out, err := d.Call(context.Background(), heldSend("mac", "s1", id, id))
+		heldAnswerOf(t, out, err)
+	}
+	close(up)
+	eventually(t, 5*time.Second, "both sent", func() bool { return slices.Equal(n.sent(), []string{"a", "b"}) && len(st.all()) == 0 })
+}
+
+// A message that may have arrived heads its session: on each new connection that lists the session, its transcript
+// is read once; there under its client_msg_id it did arrive, leaves the rows, and the next one goes once.
+func TestHeldLandedUnclearIsTakenAsSent(t *testing.T) {
+	st := newHeldMem()
+	at := time.Now().Add(-time.Hour)
+	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
+	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{items: map[string][]proto.Item{"s1": {{Role: "user", Text: "a", ClientMsgID: "a"}, {Role: "assistant", Text: "ok"}}}}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	close(up)
+	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 0 })
+	d.heldWake("mac")
+	time.Sleep(100 * time.Millisecond)
+	if got, reads := n.sent(), n.itemReads(); !slices.Equal(got, []string{"b"}) || reads != 1 {
+		t.Fatalf("sent %v, %d reads", got, reads)
+	}
+}
+
+// Not in the transcript by its id (words alike do not count), or the transcript not read: it stays for the owner,
+// nothing is sent, and it is read once a connection however often the deliveries look.
+func TestHeldUnclearNotLandedStays(t *testing.T) {
+	st := newHeldMem()
+	at := time.Now().Add(-time.Hour)
+	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
+	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
+	d, _ := heldDevices(t, st, 20*time.Millisecond)
+	n := &heldNode{items: map[string][]proto.Item{"s1": {{Role: "user", Text: "a"}, {Role: "user", Text: "x", ClientMsgID: "x"}}}}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	close(up)
+	eventually(t, 5*time.Second, "the transcript read", func() bool { return n.itemReads() == 1 })
+	time.Sleep(300 * time.Millisecond) // many ticks
+	if got, reads := n.sent(), n.itemReads(); len(got) != 0 || reads != 1 {
+		t.Fatalf("sent %v, %d reads", got, reads)
+	}
+	if rows := st.all(); len(rows) != 2 || !(rows[0].State == db.HeldFailed && rows[0].Failure == db.HeldUnclear) || rows[1].State != db.HeldWaiting {
+		t.Fatalf("stored %+v", rows)
+	}
+	// A new connection reads it again.
+	n.drop()
+	eventually(t, 10*time.Second, "read on the new connection", func() bool { return n.itemReads() == 2 })
+	if got := n.sent(); len(got) != 0 {
+		t.Fatalf("sent %v", got)
+	}
+}
+
+// While the owner's Retry of a failed message is being written, it holds the later ones of its session back: they
+// never overtake it.
+func TestHeldRetryInFlightHoldsLaterOnes(t *testing.T) {
+	st := newHeldMem()
+	at := time.Now().Add(-time.Hour)
+	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldRefused, at)
+	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	st.mu.Lock()
+	st.retryGate, st.retrying = make(chan struct{}), make(chan struct{}, 1)
+	gate, retrying := st.retryGate, st.retrying
+	st.mu.Unlock()
+	retried := make(chan error, 1)
+	go func() {
+		_, err := d.HeldRetry(context.Background(), "s1", "a")
+		retried <- err
+	}()
+	<-retrying // a's Retry is being written
+	close(up)  // the computer comes back meanwhile: its list wakes the deliveries
+	eventually(t, 5*time.Second, "connected", func() bool {
+		listed, _ := d.machineByID("mac").heldOn("s1")
+		return !listed.IsZero()
+	})
+	d.heldWake("mac")
+	time.Sleep(200 * time.Millisecond)
+	if got := n.sent(); len(got) != 0 {
+		t.Fatalf("sent %v while a's Retry was written", got)
+	}
+	close(gate)
+	if err := <-retried; err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "both sent", func() bool { return len(st.all()) == 0 })
+	if got := n.sent(); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("sent %v", got)
+	}
+}
+
+// A message held behind one that may have arrived waits for the owner, not for its computer: it never expires (nor
+// says its computer was away), and its wait starts again, so it has nearly a day once the owner decides. One not
+// behind such a message expires after a day.
+func TestHeldBehindUnclearDoesNotExpire(t *testing.T) {
+	st := newHeldMem()
+	at := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
+	b := putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
+	putHeld(t, st, "s2", "x", db.HeldWaiting, "", at)
+	var mu sync.Mutex
+	now := at.Add(25 * time.Hour)
+	d, _ := heldDevicesAt(t, st, time.Hour, func() time.Time { mu.Lock(); defer mu.Unlock(); return now })
+	offlineMachine(d, "mac", "Studio Mac")
+	d.heldExpire(context.Background())
+	rows := st.snapshot()
+	if r := rows[b]; r.State != db.HeldWaiting || !r.HeldAt.Equal(now) {
+		t.Fatalf("b %+v", r)
+	}
+	list := d.HeldMessages("mac", i18n.En)
+	if s1 := list["s1"]; len(s1) != 2 || s1[1].State != proto.UndeliveredWaiting || s1[1].Error != "Waits behind the message above" {
+		t.Fatalf("s1 %+v", s1)
+	}
+	if s2 := list["s2"]; len(s2) != 1 || s2[0].Error != "Not sent: Studio Mac was away for 24 hours" {
+		t.Fatalf("s2 %+v", s2)
+	}
+}
+
+// A message that waited a whole day is not sent when its computer comes back before the tick fails it: the expiry
+// is heldExpire's alone.
+func TestHeldExpiredIsNotSent(t *testing.T) {
+	st := newHeldMem()
+	at := time.Now()
+	putHeld(t, st, "s1", "a", db.HeldWaiting, "", at)
+	var mu sync.Mutex
+	now := at
+	d, _ := heldDevicesAt(t, st, time.Hour, func() time.Time { mu.Lock(); defer mu.Unlock(); return now }) // its first look finds it fresh
+	mu.Lock()
+	now = at.Add(25 * time.Hour)
+	mu.Unlock()
+	n := &heldNode{}
+	up := make(chan struct{})
+	m := laterMachine(t, d, "mac", "Studio Mac", n, up)
+	close(up)
+	eventually(t, 5*time.Second, "listed", func() bool { listed, _ := m.heldOn("s1"); return !listed.IsZero() })
+	d.heldWake("mac")
+	time.Sleep(200 * time.Millisecond)
+	if got := n.sent(); len(got) != 0 {
+		t.Fatalf("sent %v", got)
+	}
+	d.heldExpire(context.Background())
+	if r := st.all()[0]; r.State != db.HeldFailed || r.Failure != db.HeldExpired {
+		t.Fatalf("stored %+v", r)
+	}
+}
+
+// personCall is a request on mux from a person's own full device, as the hub relays it.
+func personCall(t *testing.T, mux http.Handler, method, path string) (int, map[string]any) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set(assistantwire.RoleHeader, "full")
+	req.Header.Set(assistantwire.PersonHeader, "1")
+	mux.ServeHTTP(rec, req)
+	out := map[string]any{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+// A hold the store kept but answered with an error (its answer lost after the commit) is found by its key and held:
+// the app is told so, rather than the failure while the row goes later by itself. Not kept: the failure as before.
+// The same when the message waits behind held ones.
+func TestHeldKeptThoughTheStoreSaidNo(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	offlineMachine(d, "mac", "Studio Mac")
+	ctx := context.Background()
+	st.mu.Lock()
+	st.holdErr = errors.New("connection refused")
+	st.mu.Unlock()
+	var re *rpc.Error
+	if _, err := d.Call(ctx, heldSend("mac", "s1", "a", "a")); !errors.As(err, &re) || re.Code != devicewire.CodeMachineOffline || len(st.all()) != 0 {
+		t.Fatalf("not kept: %v, %d stored", err, len(st.all()))
+	}
+	st.mu.Lock()
+	st.holdErr, st.committedErr = nil, errors.New("timeout: the commit's answer was lost")
+	st.mu.Unlock()
+	out, err := d.Call(ctx, heldSend("mac", "s1", "a", "a"))
+	if held := heldAnswerOf(t, out, err); held.ID != "a" || len(st.all()) != 1 {
+		t.Fatalf("kept: %+v, %d stored", held, len(st.all()))
+	}
+	out, err = d.Call(ctx, heldSend("mac", "s1", "b", "b")) // behind a
+	if held := heldAnswerOf(t, out, err); held.ID != "b" || len(st.all()) != 2 {
+		t.Fatalf("kept behind a: %+v, %d stored", held, len(st.all()))
+	}
+	if got := heldIDs(d.HeldMessages("mac", i18n.En)["s1"]); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("rows %v", got)
+	}
+}
+
+// What another manager on the same database (a switch-over) is sending is never made to wait again or deleted by the
+// owner's Retry or Delete here: 409, and the store keeps it as it is. One the store no longer has is gone here too.
+func TestHeldOwnerChangesLeaveOneBeingSentElsewhere(t *testing.T) {
+	st := newHeldMem()
+	a := putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, time.Now().Add(-time.Hour))
+	d, _ := heldDevices(t, st, time.Hour)
+	offlineMachine(d, "mac", "Studio Mac")
+	st.mu.Lock() // another manager retried it and sends it now
+	r := st.rows[a]
+	r.State, r.Failure = db.HeldSending, ""
+	st.rows[a] = r
+	st.mu.Unlock()
+	mux := d.Handler(http.NotFoundHandler())
+	for _, c := range []struct{ method, path string }{{"POST", "/api/v1/sessions/mac/s1/held/a/retry"}, {"DELETE", "/api/v1/sessions/mac/s1/held/a"}} {
+		if code, body := personCall(t, mux, c.method, c.path); code != http.StatusConflict || body["code"] != "conflict" {
+			t.Fatalf("%s: %d %v", c.method, code, body)
+		}
+		if r := st.snapshot()[a]; r.State != db.HeldSending {
+			t.Fatalf("%s changed it: %+v", c.method, r)
+		}
+	}
+	st.mu.Lock() // it went
+	delete(st.rows, a)
+	st.mu.Unlock()
+	if code, _ := personCall(t, mux, "POST", "/api/v1/sessions/mac/s1/held/a/retry"); code != http.StatusNotFound {
+		t.Fatalf("retry of one gone: %d", code)
+	}
+	if d.HeldMessages("mac", i18n.En) != nil {
+		t.Fatalf("still shown: %v", d.HeldMessages("mac", i18n.En))
+	}
+}
+
+// Deleting the message that held the rest of its session back lets the next one go at once, not a tick later.
+func TestHeldDeleteLetsTheNextOneGo(t *testing.T) {
+	st := newHeldMem()
+	at := time.Now().Add(-time.Hour)
+	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
+	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
+	d, _ := heldDevices(t, st, time.Hour) // no tick
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	close(up)
+	eventually(t, 5*time.Second, "a looked for", func() bool { return n.itemReads() == 1 })
+	if code, body := personCall(t, d.Handler(http.NotFoundHandler()), "DELETE", "/api/v1/sessions/mac/s1/held/a"); code != http.StatusOK {
+		t.Fatalf("delete: %d %v", code, body)
+	}
+	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 0 })
+}
+
+// A message that expired lets the ones it held back go at once (the expiry wakes them).
+func TestHeldExpiryLetsTheNextOneGo(t *testing.T) {
+	st := newHeldMem()
+	at := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	putHeld(t, st, "s1", "a", db.HeldWaiting, "", at)
+	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at.Add(2*time.Hour))
+	var mu sync.Mutex
+	now := at.Add(time.Hour)
+	d, _ := heldDevicesAt(t, st, time.Hour, func() time.Time { mu.Lock(); defer mu.Unlock(); return now })
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	mu.Lock()
+	now = at.Add(25 * time.Hour) // a has waited a day, b not
+	mu.Unlock()
+	close(up)
+	eventually(t, 5*time.Second, "listed", func() bool { listed, _ := d.machineByID("mac").heldOn("s1"); return !listed.IsZero() })
+	d.heldWake("mac")
+	time.Sleep(100 * time.Millisecond)
+	if got := n.sent(); len(got) != 0 {
+		t.Fatalf("sent %v behind an expired one", got)
+	}
+	d.heldExpire(context.Background())
+	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 1 })
 }
