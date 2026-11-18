@@ -108,7 +108,8 @@ func TestHeldMessagesAreDrawnOnAgentRowsOnly(t *testing.T) {
 }
 
 // Older apps call the conversations' undelivered routes for every row's message. One the assistant keeps is its own,
-// as before; any other goes to the devices' held message of that session, and its answer is the route's.
+// as before; any other goes to the devices' held message of that session when a person's own app asks (the hub's
+// assistantwire.PersonHeader), and its answer is the route's.
 func TestUndeliveredRoutesFallThroughToHeldMessages(t *testing.T) {
 	ft, _, _ := heldFleet(t)
 	s := ft.s
@@ -119,6 +120,7 @@ func TestUndeliveredRoutesFallThroughToHeldMessages(t *testing.T) {
 		if role != "" {
 			req.Header.Set(RoleHeader, role)
 		}
+		req.Header.Set(assistantwire.PersonHeader, "1")
 		s.ServeHTTP(rec, req)
 		return rec
 	}
@@ -170,5 +172,43 @@ func TestUndeliveredRoutesFallThroughToHeldMessages(t *testing.T) {
 	}
 	if got := acts()[n:]; len(got) != 0 {
 		t.Fatalf("the devices were asked %q", got)
+	}
+}
+
+// Only a person's own app reaches a held message through these routes: without the hub's assistantwire.PersonHeader
+// (the hub's own token, an extension, an older hub) the route answers 404 as before and the devices are not asked.
+// The conversation's own kept messages keep today's rules, the header or not.
+func TestUndeliveredRoutesReachHeldMessagesOnlyForAPerson(t *testing.T) {
+	ft, _, _ := heldFleet(t)
+	s := ft.s
+	do := func(method, path, person string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, "/api/v1/assistant/conversations/"+path, nil)
+		if person != "" {
+			req.Header.Set(assistantwire.PersonHeader, person)
+		}
+		s.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, person := range []string{"", "0", "yes"} {
+		if rec := do(http.MethodPost, "agent1/undelivered/held-1/retry", person); rec.Code != http.StatusNotFound {
+			t.Fatalf("retry with %s %q: %d %s", assistantwire.PersonHeader, person, rec.Code, rec.Body)
+		}
+		if rec := do(http.MethodDelete, "agent1/undelivered/held-1", person); rec.Code != http.StatusNotFound {
+			t.Fatalf("delete with %s %q: %d %s", assistantwire.PersonHeader, person, rec.Code, rec.Body)
+		}
+	}
+	ft.d.mu.Lock()
+	acts, left := slices.Clone(ft.d.heldActs), len(ft.d.held["mac"]["agent1"])
+	ft.d.mu.Unlock()
+	if len(acts) != 0 || left != 1 {
+		t.Fatalf("the devices were asked %q (%d left)", acts, left)
+	}
+	if rec := do(http.MethodPost, "conv9/undelivered/msg-9/retry", ""); rec.Code != http.StatusOK {
+		t.Fatalf("retry of the conversation's kept message: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(http.MethodDelete, "conv9/undelivered/msg-9", ""); rec.Code != http.StatusOK {
+		t.Fatalf("delete of the conversation's kept message: %d %s", rec.Code, rec.Body)
 	}
 }

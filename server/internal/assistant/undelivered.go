@@ -602,9 +602,11 @@ func (s *Service) undeliveredRoutes() {
 
 // heldAction is Retry (retry) or Delete on message mid of session sid when none of the conversations keeps it: one an
 // Agent's computer's manager holds (internal/devices held.go, #10661). Older apps call these routes for every row's
-// undelivered message, whatever kind it is. False when no machine holds it either: the route answers 404 as before.
+// undelivered message, whatever kind it is. Only a person's own app may change one (assistantwire.PersonHeader, set by
+// the hub): its delivery carries that person's provenance. False when no machine holds it, or another asks: the route
+// answers 404 as before.
 func (s *Service) heldAction(w http.ResponseWriter, r *http.Request, sid, mid string, retry bool) bool {
-	if s.devs == nil {
+	if s.devs == nil || r.Header.Get(assistantwire.PersonHeader) != "1" {
 		return false
 	}
 	act := s.devs.HeldDelete
