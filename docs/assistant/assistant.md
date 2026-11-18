@@ -1292,25 +1292,37 @@ Persona chat, which keeps its own as above) used to fail with "your computer is 
 manager that connects the computer holds it and sends it once the computer is back
 (`server/internal/devices/held.go`):
 
-- **Held only when nothing was written.** The hub marks an owner's message with a `client_msg_id` (not one carrying a
-  to-do, a fresh to-do start's first message or a launcher switch) as one that may be held (`NodeCall.hold`). The
-  devices manager holds it when the computer's node is not connected, so nothing reached it, or when older held
-  messages of the same Agent are still waiting (it never overtakes them). It keeps the call exactly as the hub sent it,
-  who sent it and the share authority with it, in its Postgres (table `held_operations`, kind `message`), and answers
-  `held`; the hub answers the app 202 `{"delivered":"later","undelivered":{…}}`, as for a Persona chat. An older manager
-  ignores the mark and the app gets the failure as before.
+- **Held only when nothing was written.** The hub marks the owner's message from a full device (a person's, not an
+  extension's or the hub token's) to an Agent it lists, with a `client_msg_id` and none of a to-do, a fresh to-do
+  start's first message or a launcher switch, as one that may be held (`NodeCall.hold`). The devices manager holds it
+  when the call wrote nothing to the node (not connected, closed or suspended before the write: the same errors its
+  reload retry treats as not sent), or when older messages of the same Agent are held still waiting, being sent or with
+  an unclear outcome (it never overtakes them). It keeps the call exactly as the hub sent it, who sent it, the
+  submission and the share authority with it, in its Postgres (table `held_operations`, kind `message`), and answers
+  `held`; the hub answers the app 202 `{"delivered":"later","undelivered":{…}}`, as for a Persona chat, and records the
+  send as `later` (a retry of the id is answered the same and sends nothing). An older manager ignores the mark, and a
+  manager that cannot store it gives the failure as before.
 - **Shown everywhere.** The row's `undelivered` lists held messages with `computer` (the computer's name) and the whole
-  line to show in `error`: "Will send when <computer> is back", with Delete. Every client that draws `undelivered`
-  shows them; Retry and Delete go to `…/sessions/{mid}/{sid}/held/{msg}`.
-- **Sent at once when the computer is back, once.** When the node's new connection is configured and listed, the held
-  messages go, oldest first for each Agent, under their own `client_msg_id`. A message is marked as being sent before
-  the call; a call that proves nothing was written (the node dropped again before it) leaves it waiting.
+  line to show in `error`: "Will send when <computer> is back", "Sending…", "Waits behind the message above", or why it
+  was not sent, with Delete, and Retry once it failed. Every client that draws `undelivered` shows them; the web sends
+  Retry and Delete to `…/sessions/{mid}/{sid}/held/{msg}`, and older apps' calls to the assistant's routes reach them
+  too. The web's message box on such an Agent stays open and says "<computer> is offline. Messages will be sent when
+  it's back."
+- **Sent when the computer and the Agent are back, once.** A held message goes while its computer's node is connected
+  and its current session list has the Agent (a runtime Agent comes back a moment after the node; a node connected for
+  two minutes without it gets the message anyway, and its answer decides). Each Agent's messages go oldest first, under
+  their own `client_msg_id`, one at a time; Agents are independent. A message is marked as being sent in Postgres
+  before the call, and not sent when that fails; a call that proves nothing was written (the node dropped again before
+  it) leaves it waiting.
 - **Never sent twice by itself.** A try whose outcome is unknown (the connection dropped during it, no answer in time,
   the node said it may have typed it, the manager stopped during it) is not tried again: it fails with "May have
   arrived before the connection dropped. Check the chat, then retry or delete", and the Agent's later held messages wait
-  behind it until the owner picks Retry or Delete. A node that refused it (nothing typed) fails it with its reason.
-- **Gives up after a day.** A message still held 24 hours after it was taken fails with "Not sent: <computer> was away
+  behind it until the owner picks Retry or Delete. A node that refused it (nothing typed) fails it with its reason and
+  the next one goes.
+- **Gives up after a day.** A message still waiting 24 hours after it was held fails with "Not sent: <computer> was away
   for 24 hours"; Retry starts a new day, Delete drops it. Delete is refused while that message is being sent.
+- **Known gap**: a runtime Agent's row leaves the list when its node shuts down cleanly, so its held messages have no
+  row to show on until it is listed again; they are still sent.
 - **Not yet held**: starting a new Agent on an offline computer (#10674) and dispatching a to-do to one (#10675).
 
 ## Availability metrics (#4924)

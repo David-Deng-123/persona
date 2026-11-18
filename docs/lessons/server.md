@@ -2704,3 +2704,19 @@ those inputs. Compare those callers' rendered input bytes, not just triage's gol
 The tier criteria are shared with event grouping. Describe each event's assigned new activity and unresolved
 requests, not one "current new message" for an entire batch. A mixed-event regression should keep a new request
 and screenshot separate from another event's final acknowledgement, while retaining each event's overall tier.
+
+## Doing the owner's call later (#10661)
+
+A message held while its computer is away must reach the Agent as the owner's, or a Claude outside Persona's
+terminals reads it as another session's (no `owner_input`) and a public share loses its submission. The devices
+manager strips both from every call a manager makes (`devices/owner_input.go`), so a manager cannot re-send it as its
+own `session.send`: keep the hub's `devicewire.NodeCall` as it came (caller, submission, share authority) and replay it
+through the devices manager's own call path (`devices/held.go`).
+
+Only an error the rpc layer says wrote nothing (`errOffline`, `rpc.ErrNotSent`, `ErrNotWritten`, `ErrSuspended`,
+`ErrClosed` that is not `ErrDropped`: the set the reload retry in `devices/reload.go` already relies on) may lead to an
+automatic second try. Anything else, a deadline included, may have typed it: ask the owner instead.
+
+Sending the moment the node's connection is configured and listed is too early for a runtime Agent: the runtime
+reconnects to the new node's socket a moment later, and the node answers "no such session". Wait for the session in
+the connection's own list (a new connection starts with none).
