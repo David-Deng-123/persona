@@ -328,13 +328,18 @@ func (h *Hub) sendMessageOnce(w http.ResponseWriter, r *http.Request, m *Machine
 		return
 	}
 	if apply, _ := p["apply_switch"].(bool); id != "" && known && !assistantConv && todoID == "" && !fresh && !apply &&
-		personSent(r.Context()) && h.requestWants(r, featureAgentMessageHold) {
-		// The owner's message to an Agent the hub lists: while its computer is away the manager may hold it and send it
-		// once the computer is back (#10661), answering held instead of offline (deliverOnce). Only a person's own, from a
-		// full device: the row draws it as the owner's bubble and only a full device can Retry or Delete it. Only from a
-		// client that draws a held message: one that does not would take 202 "later" for sent. Not a to-do's hand-off, an
-		// Agent's first prompt or a launcher switch: those are decided now, not replayed later.
-		ctx = withHold(ctx, l)
+		personSent(r.Context()) {
+		// The owner's message to an Agent the hub lists (#10661), from a person's own full device: the row draws a held
+		// one as the owner's bubble and only a full device can Retry or Delete it. Not a to-do's hand-off, an Agent's
+		// first prompt or a launcher switch: those are decided now, not replayed later. It never overtakes messages held
+		// for the Agent (NodeCall.Ordered: the manager refuses it, nothing typed, while they wait). From a client that
+		// draws a held message it may be held itself while the computer is away, answered held instead of offline
+		// (deliverOnce); one that does not would take 202 "later" for sent.
+		if h.requestWants(r, featureAgentMessageHold) {
+			ctx = withHold(ctx, l)
+		} else {
+			ctx = withOrdered(ctx)
+		}
 	}
 	modelSent := func(status int) { // the picked model ran: the manager may remember it
 		if status == http.StatusOK && picked != "" {
@@ -607,22 +612,39 @@ func laterBody(kept *proto.UndeliveredMessage) (int, []byte) {
 // proto.Features.
 const featureAgentMessageHold = "agent_message_hold"
 
-// holdKey marks a send whose message the machine's manager may hold while the computer is away (#10661).
+// holdKey marks the owner's message to an Agent (#10661): a heldSend, which busNode.Call puts on its session.send.
 type holdKey struct{}
 
-// withHold marks ctx's session.send as one the manager may hold, its answer worded in l: busNode.Call puts
-// devicewire.NodeCall.Hold on it.
+// heldSend is holdKey's mark: the message goes after any held for its Agent (NodeCall.Ordered), and, when hold, its
+// manager may hold it while the computer is away, its answer worded in lang (NodeCall.Hold).
+type heldSend struct {
+	hold bool
+	lang i18n.Lang
+}
+
+// withOrdered marks ctx's session.send as one that never overtakes messages held for its Agent.
+func withOrdered(ctx context.Context) context.Context {
+	return context.WithValue(ctx, holdKey{}, heldSend{})
+}
+
+// withHold is withOrdered for a message its manager may hold itself, its answer worded in l.
 func withHold(ctx context.Context, l i18n.Lang) context.Context {
-	return context.WithValue(ctx, holdKey{}, l)
+	return context.WithValue(ctx, holdKey{}, heldSend{hold: true, lang: l})
+}
+
+// orderedOf is the NodeCall.Ordered of ctx's session.send: whether withOrdered or withHold marked it.
+func orderedOf(ctx context.Context) bool {
+	_, ok := ctx.Value(holdKey{}).(heldSend)
+	return ok
 }
 
 // holdOf is the NodeCall.Hold of ctx's session.send: nil unless withHold marked it.
 func holdOf(ctx context.Context) *devicewire.Hold {
-	l, ok := ctx.Value(holdKey{}).(i18n.Lang)
-	if !ok {
+	m, ok := ctx.Value(holdKey{}).(heldSend)
+	if !ok || !m.hold {
 		return nil
 	}
-	return &devicewire.Hold{Lang: string(l)}
+	return &devicewire.Hold{Lang: string(m.lang)}
 }
 
 // heldBody is the answer to a message the machine's manager holds (devicewire.CodeHeld): laterBody with the held
