@@ -1319,8 +1319,9 @@ manager that connects the computer holds it and sends it once the computer is ba
   the next one goes.
 - **Gives up after a day.** A message still waiting 24 hours after it was held fails with "Not sent: <computer> was away
   for 24 hours"; Retry starts a new day, Delete drops it. Delete is refused while that message is being sent.
-- **Known gap**: a runtime Agent's row leaves the list when its node shuts down cleanly, so its held messages have no
-  row to show on until it is listed again; they are still sent.
+- **Known gap** (#10702): a runtime Agent's row leaves the list when its node shuts down cleanly, or after the manager
+  restarts while its computer is away; its held messages then have no row to show on until it is listed again. They
+  are still sent.
 - **Not yet held**: starting a new Agent on an offline computer (#10674) and dispatching a to-do to one (#10675).
 
 ## Availability metrics (#4924)
