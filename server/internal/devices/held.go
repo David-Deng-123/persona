@@ -254,10 +254,10 @@ func heldNotWritten(err error) bool {
 func heldMayHold(err error) bool { return heldNotWritten(err) && !errors.Is(err, context.Canceled) }
 
 // holdBehind holds c without calling the node when it must not overtake what its session holds (a message waiting,
-// being sent, or one that may have arrived), or answers the one c is held as already. ok false: c goes to the node.
-func (d *Devices) holdBehind(ctx context.Context, c *heldCall) (error, bool) {
+// being sent, or one that may have arrived), or answers the one c is held as already. nil: c goes to the node.
+func (d *Devices) holdBehind(ctx context.Context, c *heldCall) error {
 	if !d.heldLoad(ctx) {
-		return nil, false // cannot tell: as before
+		return nil // cannot tell: as before
 	}
 	h := &d.held
 	h.mu.Lock()
@@ -277,27 +277,27 @@ func (d *Devices) holdBehind(ctx context.Context, c *heldCall) (error, bool) {
 	h.mu.Unlock()
 	switch {
 	case held:
-		return d.heldAnswer(c.machine, c.session, c.id, c.lang), true
+		return d.heldAnswer(c.machine, c.session, c.id, c.lang)
 	case !blocked:
-		return nil, false
+		return nil
 	}
-	if err, ok := d.hold(ctx, c); ok {
-		return err, true
+	if err := d.hold(ctx, c); err != nil {
+		return err
 	}
 	// Not kept, and it must not go before the ones waiting: nothing was typed, the app may try again.
 	return &rpc.Error{Code: codeHeldNotKept, Message: i18n.T(c.lang, "devices-held.not_kept"),
-		Data: json.RawMessage(`{"delivered":"none"}`)}, true
+		Data: json.RawMessage(`{"delivered":"none"}`)}
 }
 
-// hold keeps c and answers CodeHeld; ok false when it could not be kept (nor the held ones read).
-func (d *Devices) hold(ctx context.Context, c *heldCall) (error, bool) {
+// hold keeps c and answers CodeHeld; nil when it could not be kept (nor the held ones read).
+func (d *Devices) hold(ctx context.Context, c *heldCall) error {
 	if !d.heldLoad(ctx) {
-		return nil, false
+		return nil
 	}
 	raw, err := json.Marshal(c.call)
 	if err != nil || len(raw) > heldMaxBytes {
 		d.logf("[%s] %s: a message too large to hold (%d bytes)", c.machine, c.session, len(raw))
-		return nil, false
+		return nil
 	}
 	h := &d.held
 	now := h.clock().UTC()
@@ -307,7 +307,7 @@ func (d *Devices) hold(ctx context.Context, c *heldCall) (error, bool) {
 		SessionID: c.session, Call: raw, Lang: string(c.lang), SentAt: now, HeldAt: now})
 	if err != nil {
 		d.logf("[%s] %s: a message could not be held: %v", c.machine, c.session, err)
-		return nil, false
+		return nil
 	}
 	h.mu.Lock()
 	rows := h.rows[op.MachineID]
@@ -322,7 +322,7 @@ func (d *Devices) hold(ctx context.Context, c *heldCall) (error, bool) {
 		d.heldChanged(c.machine)
 		d.heldWake(c.machine) // it may be back already
 	}
-	return d.heldAnswer(op.MachineID, op.SessionID, op.OpID, c.lang), true
+	return d.heldAnswer(op.MachineID, op.SessionID, op.OpID, c.lang)
 }
 
 // heldAnswer is CodeHeld with held message id as its row shows it.
@@ -412,8 +412,8 @@ func (r *heldRow) wire(lang i18n.Lang, computer string, behind bool) proto.Undel
 // ---- sending ----
 
 // heldWake starts sending machine's held messages that can go now (heldReady): one delivery per session at a time,
-// the sessions apart. Called when its node's session list changes (a new connection's first list included), on a
-// Retry, a new held message, and every heldTick.
+// the sessions apart. Called when its node's session list changes (a new connection's first list once its node is
+// configured: what was held while it was away goes then), on a Retry, a new held message, and every heldTick.
 func (d *Devices) heldWake(machine string) {
 	h := &d.held
 	h.mu.Lock()
@@ -429,6 +429,9 @@ func (d *Devices) heldWake(machine string) {
 		}
 	}
 	h.mu.Unlock()
+	if len(due) == 0 { // only failed ones, or every session's delivery runs: nothing to look up
+		return
+	}
 	m := d.machineByID(machine)
 	if m == nil {
 		return
@@ -451,10 +454,6 @@ func (d *Devices) heldWake(machine string) {
 		}()
 	}
 }
-
-// heldListed: machine's session list changed: a held message whose session it lists now goes. A new connection's
-// first list is accepted once its node is configured: what was held while it was away goes then.
-func (d *Devices) heldListed(machine string) { d.heldWake(machine) }
 
 // heldReady: a held message to session may go to m now: its node is connected and its current list has the session
 // (whatever its status: the node resumes a stopped one), or the connection is heldListWait old without it, and the
