@@ -1177,6 +1177,9 @@ describe("a message to an Agent whose computer is away", () => {
     let kept: boolean | undefined;
     await act(async () => void (kept = await sent)); await flush();
     expect(kept).toBe(true);
+    // the send declares the feature itself: a page whose socket is down has no client_hello for the hub to go by
+    const post = vi.mocked(fetch).mock.calls.find(([input]) => String(input).endsWith("/messages"));
+    expect(new Headers(post?.[1]?.headers).get("X-Persona-Features")).toBe("agent_message_hold");
     expect(Object.values(getState().outbox).flat()).toHaveLength(0);
     expect(host.querySelector("[data-outbox]")).toBeNull();
     // the row has it at once, before the hub's next list carries it

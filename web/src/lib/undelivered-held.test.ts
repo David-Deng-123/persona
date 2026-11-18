@@ -18,7 +18,10 @@ class FakeSocket {
   constructor() {
     FakeSocket.all.push(this);
   }
-  send() {}
+  sent: Record<string, unknown>[] = [];
+  send(data: string) {
+    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+  }
   close() {
     this.readyState = 3;
   }
@@ -45,7 +48,7 @@ const held = (id: string, extra: Partial<UndeliveredMessage> = {}): UndeliveredM
 const agent = (extra: Partial<Session> = {}): Session => ({ machine_id: "m1", session_id: "s1", title: "Agent", cwd: "/code", status: "unknown", ...extra });
 const ids = () => getSession("m1", "s1")?.undelivered?.map((m) => m.id);
 
-let calls: { url: string; method: string }[];
+let calls: { url: string; method: string; features: string | null }[];
 let answer: (url: string) => Response;
 beforeEach(() => {
   answer = () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -57,7 +60,7 @@ beforeEach(() => {
   vi.stubGlobal("localStorage", { getItem: () => "tok", setItem: () => {}, removeItem: () => {} });
   vi.stubGlobal("window", { setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), clearTimeout: (t: number) => clearTimeout(t) });
   vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-    calls.push({ url: String(input), method: (init?.method ?? "GET").toUpperCase() });
+    calls.push({ url: String(input), method: (init?.method ?? "GET").toUpperCase(), features: new Headers(init?.headers).get("X-Persona-Features") });
     return Promise.resolve(answer(String(input)));
   }));
 });
@@ -117,6 +120,14 @@ describe("an Agent row's held messages in the store", () => {
   });
 });
 
+describe("what the page declares", () => {
+  it("lists agent_message_hold in client_hello", () => {
+    const socket = online();
+    const hello = socket.sent.find((m) => m.type === "client_hello");
+    expect(hello?.features).toContain("agent_message_hold");
+  });
+});
+
 describe("a send from another page (lib/outbox.ts)", () => {
   it("held by the hub, leaves the outbox and shows on the Agent's row at once", async () => {
     applyCompleteSessions([agent()]);
@@ -125,7 +136,8 @@ describe("a send from another page (lib/outbox.ts)", () => {
       : new Response("{}", { status: 200 });
     const r = queueToSession("m1", "s1", { text: "Synthetic message k1" });
     await expect(r.sent).resolves.toBe(true);
-    expect(calls.find((c) => c.url.endsWith("/messages"))).toEqual({ url: "/api/v1/sessions/m1/s1/messages", method: "POST" });
+    // the send declares the feature itself: a page whose socket is down has no client_hello for the hub to go by
+    expect(calls.find((c) => c.url.endsWith("/messages"))).toEqual({ url: "/api/v1/sessions/m1/s1/messages", method: "POST", features: "agent_message_hold" });
     expect(getState().outbox["m1/s1"] ?? []).toEqual([]);
     expect(ids()).toEqual(["k1"]);
     expect(getSession("m1", "s1")?.undelivered?.[0].computer).toBe("Laptop");
@@ -136,19 +148,19 @@ describe("Retry and Delete", () => {
   it("go to the session's held routes for a held message, and change the row", async () => {
     applyCompleteSessions([agent({ machine_id: "m 1", session_id: "s/1", undelivered: [held("k/1", { state: "failed", error: "Not sent: Laptop was away for 24 hours" })] })]);
     await retryUndelivered("m 1", "s/1", { id: "k/1", computer: "Laptop" });
-    expect(calls.at(-1)).toEqual({ url: "/api/v1/sessions/m%201/s%2F1/held/k%2F1/retry", method: "POST" });
+    expect(calls.at(-1)).toMatchObject({ url: "/api/v1/sessions/m%201/s%2F1/held/k%2F1/retry", method: "POST" });
     expect(getSession("m 1", "s/1")?.undelivered).toEqual([expect.objectContaining({ id: "k/1", state: "waiting", error: undefined })]);
     await deleteUndelivered("m 1", "s/1", { id: "k/1", computer: "Laptop" });
-    expect(calls.at(-1)).toEqual({ url: "/api/v1/sessions/m%201/s%2F1/held/k%2F1", method: "DELETE" });
+    expect(calls.at(-1)).toMatchObject({ url: "/api/v1/sessions/m%201/s%2F1/held/k%2F1", method: "DELETE" });
     expect(getSession("m 1", "s/1")?.undelivered).toEqual([]);
   });
 
   it("go to the assistant's routes for a Persona chat's kept message, as before", async () => {
     applyCompleteSessions([agent({ assistant: true, undelivered: [held("a1", { computer: undefined, state: "failed" })] })]);
     await retryUndelivered("m1", "s1", { id: "a1" });
-    expect(calls.at(-1)).toEqual({ url: "/api/v1/assistant/conversations/s1/undelivered/a1/retry", method: "POST" });
+    expect(calls.at(-1)).toMatchObject({ url: "/api/v1/assistant/conversations/s1/undelivered/a1/retry", method: "POST" });
     await deleteUndelivered("m1", "s1", { id: "a1" });
-    expect(calls.at(-1)).toEqual({ url: "/api/v1/assistant/conversations/s1/undelivered/a1", method: "DELETE" });
+    expect(calls.at(-1)).toMatchObject({ url: "/api/v1/assistant/conversations/s1/undelivered/a1", method: "DELETE" });
     expect(getSession("m1", "s1")?.undelivered).toEqual([]);
   });
 });
