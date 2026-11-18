@@ -11,7 +11,8 @@ import { getSession, upsertSession } from "./store";
 import { parseUserText, type UserMessage } from "./turns";
 import type { Item, Session, UndeliveredMessage } from "./types";
 
-/** The hub holds a message to an Agent whose computer is away instead of failing it (#10661): its chat stays open. */
+/** The hub holds a message to an Agent whose computer is away instead of failing it (#10661): its chat stays open. The
+ *  page declares it in client_hello (lib/api.ts CLIENT_FEATURES) and on every send (lib/message-send.ts). */
 export const AGENT_MESSAGE_HOLD_FEATURE = "agent_message_hold";
 
 /** A send's answer when the manager kept the message to send later: 202 {"delivered":"later","undelivered":{…}}. */
