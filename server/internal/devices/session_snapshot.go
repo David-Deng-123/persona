@@ -44,7 +44,7 @@ func (m *Machine) acceptSessionsList(snapshot *sessionSnapshot, list []proto.Ses
 	if !m.setInitialSessions(snapshot.peer, snapshot.revision, list) {
 		return m.sessionList(), false
 	}
-	m.d.heldListed(m.cfg.ID) // a message held for a session listed now goes (held.go)
+	m.d.heldWake(m.cfg.ID) // a message held for a session listed now goes (held.go)
 	sessions := m.sessionList()
 	if forward {
 		m.d.forward(m.cfg.ID, "sessions.changed", map[string]any{"sessions": sessions})

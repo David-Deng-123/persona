@@ -663,7 +663,7 @@ func (d *Devices) callNode(ctx context.Context, p devicewire.NodeCall) (json.Raw
 	}
 	held := d.heldCallOf(m, p) // the owner's message to an Agent, which may wait for its computer (held.go)
 	if held != nil {
-		if err, ok := d.holdBehind(ctx, held); ok {
+		if err := d.holdBehind(ctx, held); err != nil {
 			return nil, err
 		}
 	}
@@ -725,7 +725,7 @@ func (d *Devices) callNode(ctx context.Context, p devicewire.NodeCall) (json.Raw
 	d.observeCreationCall(p, params, out, preparation, err)
 	if err != nil && held != nil && heldMayHold(err) {
 		// Nothing was written: held until the node is back. Its share receipt waits for that delivery.
-		if herr, ok := d.hold(ctx, held); ok {
+		if herr := d.hold(ctx, held); herr != nil {
 			return nil, herr
 		}
 	}

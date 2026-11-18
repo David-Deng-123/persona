@@ -460,8 +460,7 @@ func (s *Service) decorateInventory(machine string, list []proto.Session, comple
 				list[i].Undelivered = &kept
 			}
 		} else if u := held[list[i].SessionID]; len(u) > 0 {
-			kept := slices.Clone(u) // an Agent's: drawn as the conversations' kept messages are, Retry / Delete on its held routes
-			list[i].Undelivered = &kept
+			list[i].Undelivered = &u // an Agent's, fresh from HeldMessages: drawn as the conversations' kept messages are
 		}
 		list[i].SeenAt = seen[list[i].SessionID]
 		localizeSession(lang, &list[i]) // the node's Chinese activity line… (fleet_text.go)
