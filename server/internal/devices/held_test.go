@@ -714,6 +714,9 @@ func TestHeldOutcomeOf(t *testing.T) {
 		{wireError(fmt.Errorf("mac: %w", apierr.ErrOffline)), heldNotSent, ""},
 		{wireError(rpc.NotSent(rpc.ErrClosed)), heldNotSent, ""},
 		{rpc.ErrDropped, heldUnclear, ""},
+		{rpc.ErrClosed, heldUnclear, ""}, // bare: proves nothing (a wrapper may have lost ErrDropped's identity)
+		{fmt.Errorf("mac: %w", rpc.ErrClosed), heldUnclear, ""},
+		{writerCtxErr{}, heldUnclear, ""}, // ErrNotWritten without ErrNotSent: a writer's own context error
 		{fmt.Errorf("mac: %w", rpc.ErrDropped), heldUnclear, ""},
 		{context.DeadlineExceeded, heldUnclear, ""},
 		{context.Canceled, heldUnclear, ""},
@@ -731,9 +734,20 @@ func TestHeldOutcomeOf(t *testing.T) {
 		}
 	}
 	// Held at the send only when nothing was written and somebody waits for the answer.
-	for err, want := range map[error]bool{apierr.ErrOffline: true, rpc.NotSent(context.DeadlineExceeded): true,
+	held := map[error]bool{
+		apierr.ErrOffline:                               true,
+		rpc.NotSent(context.DeadlineExceeded):           true,
+		rpc.NotSent(rpc.ErrClosed):                      true,
+		rpc.ErrSuspended:                                true,
 		&rpc.Error{Code: devicewire.CodeMachineOffline}: true,
-		rpc.NotSent(context.Canceled):                   false, rpc.ErrDropped: false, context.DeadlineExceeded: false, refusal: false} {
+		rpc.NotSent(context.Canceled):                   false, // nobody waits for the answer
+		rpc.ErrDropped:                                  false,
+		rpc.ErrClosed:                                   false,
+		writerCtxErr{}:                                  false,
+		context.DeadlineExceeded:                        false,
+		refusal:                                         false,
+	}
+	for err, want := range held {
 		if heldMayHold(err) != want {
 			t.Errorf("heldMayHold(%v) = %v", err, !want)
 		}
@@ -853,4 +867,13 @@ func TestHeldGoesAnywayAfterTheListWait(t *testing.T) {
 	if list := d.HeldMessages("mac", i18n.En)["s1"]; len(list) != 1 || list[0].Error != "Not sent: no such session" {
 		t.Fatalf("row %+v", list)
 	}
+}
+
+// writerCtxErr is what rpc.Call answers when the writer itself failed with the call context's error (a
+// websocket.NetConn whose own context ended, part of the frame possibly out): ErrNotWritten, but not ErrNotSent.
+type writerCtxErr struct{}
+
+func (writerCtxErr) Error() string { return "failed to write frame: context deadline exceeded" }
+func (writerCtxErr) Is(target error) bool {
+	return target == rpc.ErrNotWritten || target == context.DeadlineExceeded
 }
