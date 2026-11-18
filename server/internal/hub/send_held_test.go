@@ -102,8 +102,17 @@ func holdHub(t *testing.T, row proto.Session) (*Hub, *Machine, *holdManager) {
 // agentRow is an Agent the hub lists while its computer is away.
 var agentRow = proto.Session{SessionID: "s1", Agent: "claude", Launcher: "claude", Cwd: "/home/me/project", Status: proto.StatusUnknown}
 
+// ownerPhone is a person's own app: a full device's credential.
+var ownerPhone = principal{ID: "dev-phone", Name: "Phone", Role: roleFull}
+
 func sendTo(h *Hub, m *Machine, sid, lang, body string) *httptest.ResponseRecorder {
+	return sendAsWho(h, m, ownerPhone, sid, lang, body)
+}
+
+// sendAsWho is sendTo from who's credential.
+func sendAsWho(h *Hub, m *Machine, who principal, sid, lang, body string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/box/"+sid+"/messages", strings.NewReader(body))
+	r = r.WithContext(context.WithValue(r.Context(), principalKey{}, who))
 	r.SetPathValue("sid", sid)
 	if lang != "" {
 		r.Header.Set("Accept-Language", lang)
@@ -163,9 +172,10 @@ func TestAgentMessageHeldWhileTheComputerIsAway(t *testing.T) {
 	}
 }
 
-// Only a plain message to an Agent the hub lists may be held. A message without an id cannot go once later; a to-do's
-// hand-off, an Agent's first prompt and a launcher switch are decided now; an assistant conversation keeps its own
-// (keepUndelivered); a session the hub does not list may be one. None carries Hold, and each fails as before.
+// Only a person's plain message to an Agent the hub lists may be held. A message without an id cannot go once later; a
+// to-do's hand-off, an Agent's first prompt and a launcher switch are decided now; an assistant conversation keeps its
+// own (keepUndelivered); a session the hub does not list may be one; an extension's, the hub token's or an answer-only
+// device's message is no owner's bubble a full device could Retry or Delete. None carries Hold, and each fails as before.
 func TestOnlyAPlainAgentMessageIsHoldable(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -173,6 +183,7 @@ func TestOnlyAPlainAgentMessageIsHoldable(t *testing.T) {
 		sid   string
 		body  string
 		fresh bool
+		who   *principal // nil: the owner's phone
 	}{
 		{name: "no client_msg_id", row: agentRow, sid: "s1", body: `{"text":"hi"}`},
 		{name: "a launcher switch", row: agentRow, sid: "s1", body: `{"text":"hi","client_msg_id":"x1","apply_switch":true}`},
@@ -181,13 +192,23 @@ func TestOnlyAPlainAgentMessageIsHoldable(t *testing.T) {
 		{name: "an assistant conversation", row: proto.Session{SessionID: "s1", Assistant: true, Status: proto.StatusUnknown},
 			sid: "s1", body: `{"text":"hi","client_msg_id":"x4"}`},
 		{name: "a session not listed", row: agentRow, sid: "s9", body: `{"text":"hi","client_msg_id":"x5"}`},
+		{name: "an extension's token", row: agentRow, sid: "s1", body: `{"text":"hi","client_msg_id":"x6"}`,
+			who: &principal{ID: "ext-token", Role: roleExtension, Extension: "example", Scopes: []string{"agents.control"}}},
+		{name: "an answer-only device", row: agentRow, sid: "s1", body: `{"text":"hi","client_msg_id":"x7"}`,
+			who: &principal{ID: "dev-watch", Name: "Watch", Role: roleAnswer}},
+		{name: "the hub's own token", row: agentRow, sid: "s1", body: `{"text":"hi","client_msg_id":"x8"}`,
+			who: &principal{Role: roleFull}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, m, k := holdHub(t, tc.row)
 			if tc.fresh {
 				h.fresh.add("box", tc.sid, "t1", "/home/me/project")
 			}
-			w := sendTo(h, m, tc.sid, "en", tc.body)
+			who := ownerPhone
+			if tc.who != nil {
+				who = *tc.who
+			}
+			w := sendAsWho(h, m, who, tc.sid, "en", tc.body)
 			sends := k.sends()
 			if len(sends) != 1 || sends[0].Hold != nil {
 				t.Fatalf("node calls %+v, want one session.send without Hold", sends)

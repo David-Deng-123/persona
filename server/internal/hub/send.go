@@ -327,10 +327,12 @@ func (h *Hub) sendMessageOnce(w http.ResponseWriter, r *http.Request, m *Machine
 		callErr(w, &rpc.Error{Code: "codex_send_guard", Message: i18n.T(l, "hub-send.guard_need_id"), Data: json.RawMessage(`{"delivered":"none"}`)})
 		return
 	}
-	if apply, _ := p["apply_switch"].(bool); id != "" && known && !assistantConv && todoID == "" && !fresh && !apply {
+	if apply, _ := p["apply_switch"].(bool); id != "" && known && !assistantConv && todoID == "" && !fresh && !apply &&
+		personSent(r.Context()) {
 		// The owner's message to an Agent the hub lists: while its computer is away the manager may hold it and send it
-		// once the computer is back (#10661), answering held instead of offline (deliverOnce). Not a to-do's hand-off, an
-		// Agent's first prompt or a launcher switch: those are decided now, not replayed later.
+		// once the computer is back (#10661), answering held instead of offline (deliverOnce). Only a person's own, from a
+		// full device: the row draws it as the owner's bubble and only a full device can Retry or Delete it. Not a to-do's
+		// hand-off, an Agent's first prompt or a launcher switch: those are decided now, not replayed later.
 		ctx = withHold(ctx, l)
 	}
 	modelSent := func(status int) { // the picked model ran: the manager may remember it
