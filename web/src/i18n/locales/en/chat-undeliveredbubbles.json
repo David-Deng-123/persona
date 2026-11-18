@@ -5,5 +5,5 @@
   "action_failed": "That did not work: {error}",
   "held_waiting": "Will send when {computer} is back",
   "held_failed": "Not sent",
-  "held_placeholder": "{computer} is offline. Messages will be sent when it's back."
+  "held_placeholder": "{computer} is offline. Sends when it's back."
 }

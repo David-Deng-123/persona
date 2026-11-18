@@ -5,5 +5,5 @@
   "action_failed": "没有成功：{error}",
   "held_waiting": "等 {computer} 回来后发送",
   "held_failed": "没有发送",
-  "held_placeholder": "{computer} 已离线，消息会在它回来后发送。"
+  "held_placeholder": "{computer} 已离线，回来后发送。"
 }

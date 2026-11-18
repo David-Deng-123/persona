@@ -1305,8 +1305,7 @@ manager that connects the computer holds it and sends it once the computer is ba
   line to show in `error`: "Will send when <computer> is back", "Sending…", "Waits behind the message above", or why it
   was not sent, with Delete, and Retry once it failed. Every client that draws `undelivered` shows them; the web sends
   Retry and Delete to `…/sessions/{mid}/{sid}/held/{msg}`, and older apps' calls to the assistant's routes reach them
-  too. The web's message box on such an Agent stays open and says "<computer> is offline. Messages will be sent when
-  it's back."
+  too. The web's message box on such an Agent stays open and says "<computer> is offline. Sends when it's back."
 - **Sent when the computer and the Agent are back, once.** A held message goes while its computer's node is connected
   and its current session list has the Agent (a runtime Agent comes back a moment after the node; a node connected for
   two minutes without it gets the message anyway, and its answer decides). Each Agent's messages go oldest first, under
