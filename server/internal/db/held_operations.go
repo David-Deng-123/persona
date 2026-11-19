@@ -132,6 +132,21 @@ func (d *DB) SettleHeldOperation(ctx context.Context, seq int64, from, state, fa
 	return tag.RowsAffected() == 1, err
 }
 
+// SettleHeldTry moves operation seq from being sent to state, only while the try it was judged on (its attempts then)
+// is still its latest: a repair, or the owner's change over a try that is over, never overwrites a newer claim (this
+// manager's after a Retry, or another's in a switch-over). False when it is not that try being sent.
+func (d *DB) SettleHeldTry(ctx context.Context, seq int64, attempts int, state, failure, reason string) (bool, error) {
+	tag, err := d.pool.Exec(ctx, `UPDATE held_operations SET state = $3, failure = $4, error = $5
+		WHERE seq = $1 AND state = 'sending' AND attempts = $2`, seq, attempts, state, failure, reason)
+	return tag.RowsAffected() == 1, err
+}
+
+// DeleteHeldTry drops operation seq while that try (its attempts then) is the one being sent. False otherwise.
+func (d *DB) DeleteHeldTry(ctx context.Context, seq int64, attempts int) (bool, error) {
+	tag, err := d.pool.Exec(ctx, `DELETE FROM held_operations WHERE seq = $1 AND state = 'sending' AND attempts = $2`, seq, attempts)
+	return tag.RowsAffected() == 1, err
+}
+
 // RetryHeldOperation is the owner's Retry on failed operation seq: waiting again, a new wait from at. False when it is
 // not failed (gone, waiting, or being sent: another manager on the same database in a switch-over may be sending it,
 // and it must not be made to wait again and go twice).
