@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"hash/crc32"
@@ -422,4 +423,32 @@ func (f *File) LastSeq() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lines
+}
+
+// End identifies the last complete line read from the file and the history its sequence counts in.
+func (f *File) End() Span {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return Span{History: f.history(), To: f.lines}
+}
+
+// CoversAfter reports whether the checked end still covers every line after seq in history.
+func (f *File) CoversAfter(end Span, history string, seq int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if history == "" || history != end.History || end.History != f.history() || end.To != f.lines || f.base > seq || seq > f.lines || len(f.partial) != 0 {
+		return false
+	}
+	fh, err := os.Open(f.Path)
+	if err != nil {
+		return false
+	}
+	defer fh.Close()
+	// A rewrite that grew the same inode can look like an append to the incremental parser.
+	first, err := bufio.NewReaderSize(fh, 64<<10).ReadSlice('\n')
+	if err != nil || crc32.ChecksumIEEE(first[:len(first)-1]) != f.firstHash {
+		return false
+	}
+	st, err := os.Stat(f.Path)
+	return err == nil && unchanged(st, f.offset, f.ino)
 }
