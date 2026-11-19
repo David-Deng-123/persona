@@ -3,6 +3,7 @@ package link
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -197,6 +198,32 @@ func TestCredentialRefusalInsideJoinedRouteErrors(t *testing.T) {
 		if !errors.Is(err, errCredentialRefused) {
 			t.Errorf("HTTP %d was hidden by another route's error", code)
 		}
+	}
+}
+
+func TestRetryWaitHonorsRateLimitsInJoinedRouteErrors(t *testing.T) {
+	const normalWait = time.Minute
+	badGateway := &httpError{status: http.StatusBadGateway, retry: 10 * time.Minute}
+	rateLimited := &httpError{status: http.StatusTooManyRequests, retry: 90 * time.Second}
+	longerLimit := fmt.Errorf("route: %w", &httpError{status: http.StatusTooManyRequests, retry: 2 * time.Minute})
+	nested := fmt.Errorf("routes: %w", errors.Join(rateLimited, errors.Join(badGateway, longerLimit)))
+	for _, tc := range []struct {
+		name  string
+		err   error
+		wait  time.Duration
+		probe bool
+	}{
+		{"502 before 429", errors.Join(badGateway, rateLimited), 90 * time.Second, false},
+		{"wrapped and nested joins", nested, 2 * time.Minute, false},
+		{"429 without Retry-After", errors.Join(badGateway, &httpError{status: http.StatusTooManyRequests}), normalWait, false},
+		{"only 502", badGateway, normalWait, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wait, probe := retryWait(tc.err, normalWait)
+			if wait != tc.wait || probe != tc.probe {
+				t.Fatalf("wait = %s, probe = %t, want %s and %t", wait, probe, tc.wait, tc.probe)
+			}
+		})
 	}
 }
 

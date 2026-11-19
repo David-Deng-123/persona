@@ -175,6 +175,27 @@ func handshakeError(resp *http.Response, err error) error {
 	return he
 }
 
+// retryWait applies rate limits to the backoff and reports whether they allow probes. A 429 anywhere in the error
+// tree disables probes, and the longest Retry-After from those responses can extend the wait.
+func retryWait(err error, wait time.Duration) (time.Duration, bool) {
+	switch e := err.(type) {
+	case *httpError:
+		if e.status == http.StatusTooManyRequests {
+			return max(wait, e.retry), false
+		}
+	case interface{ Unwrap() []error }:
+		probe := true
+		for _, child := range e.Unwrap() {
+			delay, childProbe := retryWait(child, wait)
+			wait, probe = delay, probe && childProbe
+		}
+		return wait, probe
+	case interface{ Unwrap() error }:
+		return retryWait(e.Unwrap(), wait)
+	}
+	return wait, true
+}
+
 // backoff: exponential from 1 s to a minute, each wait randomized down to half so links that broke together do not
 // come back together.
 type backoff struct{ n int }
@@ -360,8 +381,8 @@ func runActive(ctx context.Context, o Options, rep *reporter, b backoff) {
 			return
 		}
 		wait := b.next()
+		rateWait, canProbe := retryWait(end, wait)
 		var reach func(context.Context) bool
-		var he *httpError
 		switch {
 		case errors.Is(end, errDirectReady):
 			last = ""
@@ -371,8 +392,8 @@ func runActive(ctx context.Context, o Options, rep *reporter, b backoff) {
 		case errors.Is(end, errCredentialRefused):
 			state, wait = "refused", refusedWait
 			end = newTextError("link-errors.credential_refused", nil)
-		case errors.As(end, &he) && he.status == http.StatusTooManyRequests:
-			wait = max(wait, he.retry)
+		case !canProbe:
+			wait = rateWait
 		case websocket.CloseStatus(end) == CloseReplaced:
 			wait = replaceWait
 			end = newTextError("link-errors.replaced", nil)
