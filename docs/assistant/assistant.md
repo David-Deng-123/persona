@@ -1387,7 +1387,11 @@ manager that connects the computer holds it and sends it once the computer is ba
   held them: moving the computer to another manager (or one
   computer absorbed into another) while some are held leaves them unsent there. A message the computer refused does
   not hold back the later ones, so a Retry of it arrives after them. Two messages to one Agent sent at the same moment
-  as the computer comes back, or while the manager cannot read its database, may go out in either order.
+  as the computer comes back may go out in either order. While the manager cannot read its database it holds nothing
+  and lets every message go as before, so one may overtake messages held earlier. Messages that are not a person's
+  (the assistant's, an extension's, the hub token's) carry no `ordered` mark and may go ahead of a person's held
+  ones. A manager rolled back to a version without this keeps the rows it was told to hold but neither shows nor
+  sends them; the apps were told they go later.
 - **Not yet held**: starting a new Agent on an offline computer (#10674) and dispatching a to-do to one (#10675).
 
 ## Availability metrics (#4924)
