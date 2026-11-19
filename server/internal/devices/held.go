@@ -274,7 +274,8 @@ func (d *Devices) heldCallOf(ctx context.Context, m *Machine, p devicewire.NodeC
 		return nil
 	}
 	call := p
-	call.Hold, call.TimeoutMS, call.Request = nil, 0, ""
+	// Kept without what made it held or ordered: its delivery is the call itself, never held or refused again.
+	call.Hold, call.Ordered, call.TimeoutMS, call.Request = nil, false, 0, ""
 	c := &heldCall{machine: m.cfg.ID, session: ids.SessionID, id: ids.ID, lang: i18n.From(ctx), call: call}
 	if p.Hold != nil {
 		c.hold, c.lang = true, i18n.Lang(p.Hold.Lang)
@@ -775,7 +776,7 @@ func (d *Devices) heldDeliver(ctx context.Context, raw json.RawMessage, lang str
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return heldRefused, heldReason(l, err)
 	}
-	p.Hold = nil // never held again by its own delivery
+	p.Hold, p.Ordered = nil, false // never held or refused again by its own delivery (rows kept before this said ordered)
 	cctx, cancel := context.WithTimeout(ctx, heldSendTimeout)
 	defer cancel()
 	try := &heldTry{}

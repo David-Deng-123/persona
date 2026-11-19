@@ -1570,3 +1570,30 @@ func TestHeldLandedButRetriedElsewhereGoesOn(t *testing.T) {
 	close(up)
 	eventually(t, 5*time.Second, "a and b sent", func() bool { return slices.Equal(n.sent(), []string{"a", "b"}) && len(st.all()) == 0 })
 }
+
+// A message the hub sent with both Hold and Ordered (every declaring app's is) is held, and once its computer is back
+// it is delivered, once and in order: its own delivery is never held again, nor refused as being behind itself.
+func TestHeldOrderedHoldIsDelivered(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{listed: []string{"s1"}}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	ctx := i18n.With(context.Background(), i18n.En)
+	for _, id := range []string{"a", "b"} {
+		p := heldSend("mac", "s1", id, id)
+		p.Ordered = true
+		out, err := d.Call(ctx, p)
+		heldAnswerOf(t, out, err)
+	}
+	for _, r := range st.all() {
+		if strings.Contains(string(r.Call), `"ordered"`) || strings.Contains(string(r.Call), `"hold"`) {
+			t.Fatalf("kept with its marks: %s", r.Call)
+		}
+	}
+	close(up)
+	eventually(t, 5*time.Second, "both sent", func() bool { return len(n.sent()) == 2 && len(st.all()) == 0 })
+	if got := n.sent(); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("sent %v", got)
+	}
+}
