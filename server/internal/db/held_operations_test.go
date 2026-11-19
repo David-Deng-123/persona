@@ -132,6 +132,22 @@ func TestHeldOperationStates(t *testing.T) {
 	if _, found, err := d.HeldOperationOf(ctx, HeldKindMessage, "mac", "s2", "b"); found || err != nil {
 		t.Fatalf("another session's b: %v %v", found, err)
 	}
+	// A repair or an owner's change over b's try touches only that try (its attempts), never a newer claim.
+	if op := get(b); op.Attempts != 1 {
+		t.Fatalf("b's attempts %d", op.Attempts)
+	}
+	if ok, err := d.SettleHeldTry(ctx, b, 2, HeldFailed, HeldUnclear, ""); ok || err != nil {
+		t.Fatalf("settled another try: %v %v", ok, err)
+	}
+	if ok, err := d.DeleteHeldTry(ctx, b, 2); ok || err != nil {
+		t.Fatalf("deleted another try: %v %v", ok, err)
+	}
+	if ok, err := d.SettleHeldTry(ctx, c, 0, HeldFailed, HeldUnclear, ""); ok || err != nil {
+		t.Fatalf("settled a waiting one: %v %v", ok, err)
+	}
+	if op := get(b); op.State != HeldSending {
+		t.Fatalf("b %+v", op)
+	}
 	// b being sent when the manager stopped: unclear at the next start; c waiting stays.
 	if n, err := d.RecoverHeldOperations(ctx, HeldKindMessage); n != 1 || err != nil {
 		t.Fatalf("recover: %d %v", n, err)
@@ -168,10 +184,31 @@ func TestHeldOperationStates(t *testing.T) {
 	if ok, _ := d.ClaimHeldOperation(ctx, a, tried); !ok {
 		t.Fatal("claim a again")
 	}
-	if ok, err := d.DeleteHeldOperation(ctx, a, HeldSending); !ok || err != nil {
-		t.Fatalf("delete sent: %v %v", ok, err)
+	if ok, err := d.SettleHeldTry(ctx, a, get(a).Attempts, HeldFailed, HeldUnclear, ""); !ok || err != nil {
+		t.Fatalf("settle that try: %v %v", ok, err)
+	}
+	if op := get(a); op.State != HeldFailed || op.Failure != HeldUnclear {
+		t.Fatalf("a settled %+v", op)
+	}
+	if ok, _ := d.RetryHeldOperation(ctx, a, again); !ok {
+		t.Fatal("retry a")
+	}
+	if ok, _ := d.ClaimHeldOperation(ctx, a, tried); !ok {
+		t.Fatal("claim a once more")
+	}
+	if ok, err := d.DeleteHeldTry(ctx, a, get(a).Attempts-1); ok || err != nil {
+		t.Fatalf("deleted with an older try: %v %v", ok, err)
+	}
+	if ok, err := d.DeleteHeldTry(ctx, a, get(a).Attempts); !ok || err != nil {
+		t.Fatalf("delete that try: %v %v", ok, err)
 	}
 	if ops, _ := d.HeldOperations(ctx, HeldKindMessage); len(ops) != 1 || ops[0].Seq != b {
+		t.Fatalf("left %+v", ops)
+	}
+	if ok, err := d.DeleteHeldOperation(ctx, b, HeldFailed); !ok || err != nil { // b was found to have arrived
+		t.Fatalf("delete b from failed: %v %v", ok, err)
+	}
+	if ops, _ := d.HeldOperations(ctx, HeldKindMessage); len(ops) != 0 {
 		t.Fatalf("left %+v", ops)
 	}
 }

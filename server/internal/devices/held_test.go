@@ -43,8 +43,14 @@ type heldMem struct {
 	claimLost bool
 	settleErr error
 	retryErr  error
-	// beforeDelete, when set, runs (under the lock) as a delete begins: something else changes the row first.
-	beforeDelete func(s *heldMem, seq int64)
+	// beforeDelete, when set, runs (under the lock) as a delete begins: something else changes the row first; so does
+	// beforeDeleteTry for a delete of one try. settleTryGate, when set, holds a write of one try until it is closed,
+	// and settlingTry is told when one waits there.
+	beforeDelete, beforeDeleteTry func(s *heldMem, seq int64)
+	// beforeSettle, when set, runs (under the lock) as the next write from being sent begins, of one try or not.
+	beforeSettle               func(s *heldMem, seq int64)
+	settleTryGate, settlingTry chan struct{}
+	deleteTryErr               error // fails the next delete of one try
 }
 
 func newHeldMem() *heldMem {
@@ -149,16 +155,65 @@ func (s *heldMem) SettleHeldOperation(_ context.Context, seq int64, from, state,
 	if s.fail != nil {
 		return false, s.fail
 	}
-	if err := s.settleErr; err != nil && from == db.HeldSending {
-		s.settleErr = nil
-		return false, err
+	if from == db.HeldSending {
+		s.runBeforeSettle(seq)
 	}
+
 	r, ok := s.rows[seq]
 	if !ok || r.State != from {
 		return false, nil
 	}
 	r.State, r.Failure, r.Error = state, failure, reason
 	s.rows[seq] = r
+	return true, nil
+}
+
+func (s *heldMem) SettleHeldTry(_ context.Context, seq int64, attempts int, state, failure, reason string) (bool, error) {
+	s.mu.Lock()
+	gate, settling := s.settleTryGate, s.settlingTry
+	s.mu.Unlock()
+	if gate != nil {
+		settling <- struct{}{}
+		<-gate
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail != nil {
+		return false, s.fail
+	}
+	if err := s.settleErr; err != nil {
+		s.settleErr = nil
+		return false, err
+	}
+	s.runBeforeSettle(seq)
+	r, ok := s.rows[seq]
+	if !ok || r.State != db.HeldSending || r.Attempts != attempts {
+		return false, nil
+	}
+	r.State, r.Failure, r.Error = state, failure, reason
+	s.rows[seq] = r
+	return true, nil
+}
+
+func (s *heldMem) DeleteHeldTry(_ context.Context, seq int64, attempts int) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail != nil {
+		return false, s.fail
+	}
+	if f := s.beforeDeleteTry; f != nil {
+		s.beforeDeleteTry = nil
+		f(s, seq)
+	}
+	if err := s.deleteTryErr; err != nil {
+		s.deleteTryErr = nil
+		return false, err
+	}
+	r, ok := s.rows[seq]
+	if !ok || r.State != db.HeldSending || r.Attempts != attempts {
+		return false, nil
+	}
+	delete(s.rows, seq)
 	return true, nil
 }
 
@@ -1595,5 +1650,271 @@ func TestHeldOrderedHoldIsDelivered(t *testing.T) {
 	eventually(t, 5*time.Second, "both sent", func() bool { return len(n.sent()) == 2 && len(st.all()) == 0 })
 	if got := n.sent(); !slices.Equal(got, []string{"a", "b"}) {
 		t.Fatalf("sent %v", got)
+	}
+}
+
+// staleRefused is devices with held a (refused by the node, its outcome not written: stale here, being sent in the
+// store) and b behind it, on a connected node; tick its loop's period.
+func staleRefused(t *testing.T, st *heldMem, tick time.Duration) (*Devices, *heldNode) {
+	t.Helper()
+	d, _ := heldDevices(t, st, tick)
+	n := &heldNode{answer: func(m map[string]any) (any, error) {
+		if m["client_msg_id"] == "a" {
+			return nil, &rpc.Error{Code: "input_draft", Message: "a draft is in the way", Data: json.RawMessage(`{"delivered":"none"}`)}
+		}
+		return map[string]any{"ok": true}, nil
+	}}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	for _, id := range []string{"a", "b"} {
+		out, err := d.Call(context.Background(), heldSend("mac", "s1", id, id))
+		heldAnswerOf(t, out, err)
+	}
+	st.set(func(s *heldMem) { s.settleErr = errors.New("connection reset") })
+	close(up)
+	eventually(t, 5*time.Second, "a stale", func() bool {
+		d.held.mu.Lock()
+		defer d.held.mu.Unlock()
+		r := d.held.rowLocked("mac", st.all()[0].Seq)
+		return r != nil && r.stale && st.all()[0].State == db.HeldSending
+	})
+	return d, n
+}
+
+// While the repair writes a stale message it is busy: the owner's Delete meanwhile answers 409 rather than racing it;
+// written, the Delete goes.
+func TestHeldRepairHoldsOffTheOwner(t *testing.T) {
+	st := newHeldMem()
+	d, n := staleRefused(t, st, time.Hour)
+	gate, settling := make(chan struct{}), make(chan struct{}, 1)
+	st.set(func(s *heldMem) { s.settleTryGate, s.settlingTry = gate, settling })
+	repaired := make(chan struct{})
+	go func() { d.heldRepair(context.Background()); close(repaired) }()
+	<-settling
+	mux := d.Handler(http.NotFoundHandler())
+	if code, body := personCall(t, mux, "DELETE", "/api/v1/sessions/mac/s1/held/a"); code != http.StatusConflict {
+		t.Fatalf("delete while the repair writes: %d %v", code, body)
+	}
+	st.set(func(s *heldMem) { s.settleTryGate = nil })
+	close(gate)
+	<-repaired
+	if r := st.all()[0]; r.State != db.HeldFailed || r.Failure != db.HeldRefused {
+		t.Fatalf("repaired %+v", r)
+	}
+	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"a", "b"}) })
+	if code, body := personCall(t, mux, "DELETE", "/api/v1/sessions/mac/s1/held/a"); code != http.StatusOK || len(st.all()) != 0 {
+		t.Fatalf("delete after: %d %v, %d left", code, body, len(st.all()))
+	}
+}
+
+// The repair leaves a stale message the owner is changing: the owner's Retry, judged on that very try, writes it.
+func TestHeldRepairLeavesWhatTheOwnerChanges(t *testing.T) {
+	st := newHeldMem()
+	d, n := staleRefused(t, st, time.Hour)
+	gate, retrying := make(chan struct{}), make(chan struct{}, 1)
+	st.set(func(s *heldMem) { s.retryGate, s.retrying = gate, retrying })
+	retried := make(chan error, 1)
+	go func() { _, err := d.HeldRetry(context.Background(), "s1", "a"); retried <- err }()
+	<-retrying
+	d.heldRepair(context.Background())
+	if r := st.all()[0]; r.State != db.HeldSending {
+		t.Fatalf("the repair wrote what the owner changes: %+v", r)
+	}
+	st.set(func(s *heldMem) { s.retryGate = nil })
+	close(gate)
+	if err := <-retried; err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "a again, then b", func() bool { return slices.Equal(n.sent(), []string{"a", "a", "b"}) })
+}
+
+// The owner's Delete over a try that is over deletes that try only: a newer claim meanwhile (another manager) is not
+// deleted, and the Delete answers 409, the row kept here and there.
+func TestHeldStaleDeleteThatDidNotApplyIsNotDone(t *testing.T) {
+	st := newHeldMem()
+	t0 := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	a := putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, t0)
+	var mu sync.Mutex
+	now := t0.Add(heldSendTimeout + 2*time.Minute)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	d, _ := heldDevicesAt(t, st, time.Hour, clock)
+	offlineMachine(d, "mac", "Studio Mac")
+	st.set(func(s *heldMem) {
+		r := s.rows[a]
+		r.State, r.Failure, r.Attempts, r.TriedAt = db.HeldSending, "", 1, t0 // a try long over
+		s.rows[a] = r
+		s.beforeDeleteTry = func(s *heldMem, seq int64) { // another manager claims it again just then
+			r := s.rows[seq]
+			r.Attempts, r.TriedAt = 2, clock()
+			s.rows[seq] = r
+		}
+	})
+	if code, body := personCall(t, d.Handler(http.NotFoundHandler()), "DELETE", "/api/v1/sessions/mac/s1/held/a"); code != http.StatusConflict {
+		t.Fatalf("delete over a newer try: %d %v", code, body)
+	}
+	if r := st.snapshot()[a]; r.State != db.HeldSending || r.Attempts != 2 {
+		t.Fatalf("stored %+v", r)
+	}
+	if l := d.HeldMessages("mac", i18n.En)["s1"]; len(l) != 1 {
+		t.Fatalf("dropped here: %+v", l)
+	}
+}
+
+// The repair writes only the try it judged: a newer claim of that message in the store (another manager, or this one
+// after a Retry) is followed, never overwritten.
+func TestHeldRepairNeverOverwritesANewerTry(t *testing.T) {
+	st := newHeldMem()
+	d, n := staleRefused(t, st, time.Hour)
+	seq := st.all()[0].Seq
+	st.set(func(s *heldMem) { r := s.rows[seq]; r.Attempts, r.TriedAt = r.Attempts+1, time.Now(); s.rows[seq] = r })
+	d.heldRepair(context.Background())
+	if r := st.all()[0]; r.State != db.HeldSending || r.Attempts != 2 {
+		t.Fatalf("a newer try overwritten: %+v", r)
+	}
+	if l := d.HeldMessages("mac", i18n.En)["s1"]; l[0].State != proto.UndeliveredFailed || l[0].Error == "Not sent: a draft is in the way" {
+		t.Fatalf("not followed: %+v", l)
+	}
+	if got := n.sent(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("sent %v", got)
+	}
+}
+
+// A message sent whose row the store has otherwise by then (another manager took it up meanwhile) is followed: not
+// dropped here while the store keeps it.
+func TestHeldSentButTheStoreHasItOtherwise(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	out, err := d.Call(context.Background(), heldSend("mac", "s1", "a", "a"))
+	heldAnswerOf(t, out, err)
+	st.set(func(s *heldMem) {
+		s.beforeDeleteTry = func(s *heldMem, seq int64) {
+			r := s.rows[seq]
+			r.State, r.Failure = db.HeldFailed, db.HeldUnclear
+			s.rows[seq] = r
+		}
+	})
+	close(up)
+	eventually(t, 5*time.Second, "a sent", func() bool { return len(n.sent()) == 1 })
+	eventually(t, 5*time.Second, "followed", func() bool {
+		l := d.HeldMessages("mac", i18n.En)["s1"]
+		return len(l) == 1 && l[0].State == proto.UndeliveredFailed
+	})
+	if rows := st.all(); len(rows) != 1 || rows[0].State != db.HeldFailed {
+		t.Fatalf("stored %+v", rows)
+	}
+}
+
+// A Retry of a message the store no longer has lets the ones its busy mark held back go at once.
+func TestHeldRetryOfAGoneRowWakes(t *testing.T) {
+	st := newHeldMem()
+	at := time.Now().Add(-time.Hour)
+	a := putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldRefused, at)
+	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	gate, retrying := make(chan struct{}), make(chan struct{}, 1)
+	st.set(func(s *heldMem) { s.retryGate, s.retrying = gate, retrying })
+	retried := make(chan bool, 1)
+	go func() { found, _ := d.HeldRetry(context.Background(), "s1", "a"); retried <- found }()
+	<-retrying
+	close(up)
+	eventually(t, 5*time.Second, "connected", func() bool { listed, _ := d.machineByID("mac").heldOn("s1"); return !listed.IsZero() })
+	st.set(func(s *heldMem) { delete(s.rows, a); s.retryGate = nil }) // gone meanwhile
+	close(gate)
+	if found := <-retried; found {
+		t.Fatal("retried one that is gone")
+	}
+	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) })
+}
+
+func (s *heldMem) runBeforeSettle(seq int64) {
+	if f := s.beforeSettle; f != nil {
+		s.beforeSettle = nil
+		f(s, seq)
+	}
+}
+
+// The owner's Retry over a try that is over writes that try only: a newer claim meanwhile (another manager) is not
+// made to wait again (it would go twice); the Retry answers 409.
+func TestHeldStaleRetryNeverOverwritesANewerTry(t *testing.T) {
+	st := newHeldMem()
+	t0 := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	a := putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, t0)
+	var mu sync.Mutex
+	now := t0.Add(heldSendTimeout + 2*time.Minute)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	d, _ := heldDevicesAt(t, st, time.Hour, clock)
+	offlineMachine(d, "mac", "Studio Mac")
+	st.set(func(s *heldMem) {
+		r := s.rows[a]
+		r.State, r.Failure, r.Attempts, r.TriedAt = db.HeldSending, "", 1, t0 // a try long over
+		s.rows[a] = r
+		s.beforeSettle = func(s *heldMem, seq int64) { // another manager claims it again just then
+			r := s.rows[seq]
+			r.Attempts, r.TriedAt = 2, clock()
+			s.rows[seq] = r
+		}
+	})
+	if code, body := personCall(t, d.Handler(http.NotFoundHandler()), "POST", "/api/v1/sessions/mac/s1/held/a/retry"); code != http.StatusConflict {
+		t.Fatalf("retry over a newer try: %d %v", code, body)
+	}
+	if r := st.snapshot()[a]; r.State != db.HeldSending || r.Attempts != 2 {
+		t.Fatalf("stored %+v", r)
+	}
+}
+
+// A delivery's outcome is written over its own try only: when the message was claimed again meanwhile (another manager
+// in a switch-over), that newer try is followed, never overwritten.
+func TestHeldOwnOutcomeNeverOverwritesANewerTry(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{answer: func(map[string]any) (any, error) {
+		return nil, &rpc.Error{Code: "input_draft", Message: "a draft is in the way", Data: json.RawMessage(`{"delivered":"none"}`)}
+	}}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	out, err := d.Call(context.Background(), heldSend("mac", "s1", "a", "a"))
+	heldAnswerOf(t, out, err)
+	st.set(func(s *heldMem) {
+		s.beforeSettle = func(s *heldMem, seq int64) {
+			r := s.rows[seq]
+			r.Attempts, r.TriedAt = r.Attempts+1, time.Now()
+			s.rows[seq] = r
+		}
+	})
+	close(up)
+	eventually(t, 5*time.Second, "a tried", func() bool { return len(n.sent()) == 1 })
+	eventually(t, 5*time.Second, "followed", func() bool {
+		l := d.HeldMessages("mac", i18n.En)["s1"]
+		return len(l) == 1 && l[0].Error == "May have arrived before the connection dropped. Check the chat, then retry or delete."
+	})
+	if r := st.all()[0]; r.State != db.HeldSending || r.Attempts != 2 {
+		t.Fatalf("a newer try overwritten: %+v", r)
+	}
+}
+
+// A message sent whose delete failed leaves the rows here at once; the tick deletes it in the store.
+func TestHeldSentDeleteFailedIsDeletedLater(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	out, err := d.Call(context.Background(), heldSend("mac", "s1", "a", "a"))
+	heldAnswerOf(t, out, err)
+	st.set(func(s *heldMem) { s.deleteTryErr = errors.New("connection reset") })
+	close(up)
+	eventually(t, 5*time.Second, "a sent", func() bool { return len(n.sent()) == 1 && d.HeldMessages("mac", i18n.En) == nil })
+	if rows := st.all(); len(rows) != 1 || rows[0].State != db.HeldSending {
+		t.Fatalf("stored %+v", rows)
+	}
+	d.heldRepair(context.Background())
+	if rows := st.all(); len(rows) != 0 {
+		t.Fatalf("left %+v", rows)
 	}
 }

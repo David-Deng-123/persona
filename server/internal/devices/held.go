@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"sync"
@@ -47,6 +48,8 @@ type heldStore interface {
 	RecoverHeldOperations(ctx context.Context, kind string) (int64, error)
 	ClaimHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
 	SettleHeldOperation(ctx context.Context, seq int64, from, state, failure, reason string) (bool, error)
+	SettleHeldTry(ctx context.Context, seq int64, attempts int, state, failure, reason string) (bool, error)
+	DeleteHeldTry(ctx context.Context, seq int64, attempts int) (bool, error)
 	RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
 	RenewHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
 	DeleteHeldOperation(ctx context.Context, seq int64, states ...string) (bool, error)
@@ -132,8 +135,9 @@ type heldBook struct {
 	rows   map[string][]*heldRow // by machine, in the order they were held
 	// sending: the sessions (machine + "/" + session) a delivery runs in: one at a time each.
 	sending map[string]bool
-	// gone: messages sent whose row the store kept (its delete failed), by seq: heldRepair deletes them.
-	gone map[int64]bool
+	// gone: messages sent whose row the store kept (its delete failed), by seq, with the attempts of that try:
+	// heldRepair deletes them.
+	gone map[int64]int
 	now  func() time.Time // tests
 }
 
@@ -201,7 +205,7 @@ func (d *Devices) heldLoad(ctx context.Context) bool {
 		rows[op.MachineID] = append(rows[op.MachineID], newHeldRow(op))
 	}
 	h.mu.Lock()
-	h.rows, h.sending, h.gone, h.loaded = rows, map[string]bool{}, map[int64]bool{}, true
+	h.rows, h.sending, h.gone, h.loaded = rows, map[string]bool{}, map[int64]int{}, true
 	h.mu.Unlock()
 	for machine := range rows { // rows drawn before the load showed none
 		d.heldChanged(machine)
@@ -856,16 +860,28 @@ func (d *Devices) heldSettle(ctx context.Context, machine, session string, seq i
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
 	defer d.heldChanged(machine)
+	h.mu.Lock()
+	attempts := 0 // the try this was (its writes touch only that try: never a newer claim)
+	if r := h.rowLocked(machine, seq); r != nil {
+		attempts = r.Attempts
+	}
+	h.mu.Unlock()
 	if outcome == heldDelivered {
-		_, err := st.DeleteHeldOperation(sctx, seq, db.HeldSending)
-		h.mu.Lock()
-		h.dropLocked(machine, seq)
-		if err != nil { // still being sent in the store: heldRepair deletes it (a restart shows it unclear)
-			h.gone[seq] = true
-		}
-		h.mu.Unlock()
-		if err != nil {
+		ok, err := st.DeleteHeldTry(sctx, seq, attempts)
+		switch {
+		case err != nil: // still being sent in the store: heldRepair deletes it (a restart shows it unclear)
+			h.mu.Lock()
+			h.dropLocked(machine, seq)
+			h.gone[seq] = attempts
+			h.mu.Unlock()
 			d.logf("[%s] %s: a held message was sent but stays in the store: %v", machine, session, err)
+		case !ok: // the store has it otherwise: followed, not dropped here while it keeps a row
+			d.logf("[%s] %s: a held message was sent; the store has it otherwise", machine, session)
+			d.heldSync(ctx, machine, seq)
+		default:
+			h.mu.Lock()
+			h.dropLocked(machine, seq)
+			h.mu.Unlock()
 		}
 		d.logf("[%s] %s: a held message was sent", machine, session)
 		return true
@@ -879,7 +895,7 @@ func (d *Devices) heldSettle(ctx context.Context, machine, session string, seq i
 	default:
 		failure, reason = db.HeldUnclear, ""
 	}
-	ok, err := st.SettleHeldOperation(sctx, seq, db.HeldSending, state, failure, reason)
+	ok, err := st.SettleHeldTry(sctx, seq, attempts, state, failure, reason)
 	h.mu.Lock()
 	if r := h.rowLocked(machine, seq); r != nil {
 		r.State, r.Failure, r.Error = state, failure, reason
@@ -928,7 +944,7 @@ func (d *Devices) heldExpire(ctx context.Context) {
 			switch {
 			case r.unclear():
 				behind[r.SessionID] = true
-			case r.State != db.HeldWaiting || r.busy:
+			case r.State != db.HeldWaiting || r.busy || r.stale:
 			case behind[r.SessionID] && now.Sub(r.HeldAt) >= heldBlockedRenew:
 				r.busy = true // neither sent nor changed by the owner meanwhile
 				dues = append(dues, due{machine, r.Seq, true})
@@ -1027,49 +1043,63 @@ func (d *Devices) heldRetry(ctx context.Context, machine, sid, msg string) (bool
 		return err != nil, err
 	}
 	now := h.clock()
-	ok, err := true, error(nil)
-	if r.State != db.HeldWaiting {
-		sctx, cancel := heldStoreCtx(ctx)
-		ok, err = d.heldStore().RetryHeldOperation(sctx, r.Seq, now)
-		cancel()
-	}
-	held := true
-	if err == nil && !ok { // the store has it otherwise (only a failed one is retried)
-		var stale bool
-		if held, stale, err = d.heldMirror(ctx, r); stale {
-			// Left being sent by a try that is over: what it is, it may have arrived; then the owner's Retry.
-			sctx, cancel := heldStoreCtx(ctx)
-			if _, err = d.heldStore().SettleHeldOperation(sctx, r.Seq, db.HeldSending, db.HeldFailed, db.HeldUnclear, ""); err == nil {
-				ok, err = d.heldStore().RetryHeldOperation(sctx, r.Seq, now)
-			}
-			cancel()
-		}
+	held, wrote := true, false
+	if r.State != db.HeldWaiting { // a waiting one is only woken: nothing to write
+		held, wrote, err = d.heldRetryStore(ctx, r, now)
 	}
 	h.mu.Lock()
-	row := h.rowLocked(r.MachineID, r.Seq)
-	if row != nil {
+	if row := h.rowLocked(r.MachineID, r.Seq); row != nil {
 		row.busy = false
+		if wrote {
+			row.State, row.Failure, row.Error, row.HeldAt, row.stale = db.HeldWaiting, "", "", now, false
+		}
 	}
+	h.mu.Unlock()
+	d.heldChanged(r.MachineID)
+	d.heldWake(r.MachineID) // its busy mark held the later ones back; retried, it goes now
 	switch {
 	case err != nil:
-		h.mu.Unlock()
 		if !errors.Is(err, errHeldSendingNow) {
 			d.logf("[%s] %s: a held message's retry not kept: %v", r.MachineID, sid, err)
 			err = errHeldStore
 		}
-		d.heldWake(r.MachineID) // its busy mark held the later ones back
 		return true, err
-	case ok && row != nil && r.State != db.HeldWaiting: // written (a waiting one is only woken: nothing to write)
-		row.State, row.Failure, row.Error, row.HeldAt, row.stale = db.HeldWaiting, "", "", now, false
-	}
-	h.mu.Unlock()
-	d.heldChanged(r.MachineID)
-	if !held {
+	case !held:
 		return false, nil
 	}
 	d.logf("[%s] %s: a held message retried by the owner", r.MachineID, sid)
-	d.heldWake(r.MachineID)
 	return true, nil
+}
+
+// heldRetryStore writes the owner's Retry of failed r. held false: the store no longer has it; wrote: it waits again
+// there. A store that has it otherwise is followed (heldMirror); one it has as being sent by a try that is over gets
+// that try written as unclear first, then the Retry, never over a newer try; else errHeldSendingNow.
+func (d *Devices) heldRetryStore(ctx context.Context, r *heldRow, now time.Time) (held, wrote bool, err error) {
+	st := d.heldStore()
+	sctx, cancel := heldStoreCtx(ctx)
+	defer cancel()
+	ok, err := st.RetryHeldOperation(sctx, r.Seq, now)
+	if err != nil || ok {
+		return true, ok, err
+	}
+	held, stale, attempts, err := d.heldMirror(ctx, r) // only a failed one is retried
+	if err != nil || !stale {
+		return held, false, err
+	}
+	settled, err := st.SettleHeldTry(sctx, r.Seq, attempts, db.HeldFailed, db.HeldUnclear, "")
+	if err == nil && settled {
+		if ok, err = st.RetryHeldOperation(sctx, r.Seq, now); err == nil && ok {
+			return true, true, nil
+		}
+	}
+	if err != nil {
+		return true, false, err
+	}
+	// The store changed meanwhile (a newer try, or another change): answered from what it has now.
+	if held, _, _, err = d.heldMirror(ctx, r); err == nil && held {
+		err = errHeldSendingNow
+	}
+	return held, false, err
 }
 
 // heldDelete is the owner's Delete on a message that waits or failed; errHeldSendingNow while it is being sent.
@@ -1084,17 +1114,11 @@ func (d *Devices) heldDelete(ctx context.Context, machine, sid, msg string) (boo
 	}
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
-	ok, err := d.heldStore().DeleteHeldOperation(sctx, r.Seq) // never one being sent
-	if err == nil && !ok {
-		held, stale := false, false
-		switch held, stale, err = d.heldMirror(ctx, r); {
-		case stale: // left being sent by a try that is over
-			_, err = d.heldStore().DeleteHeldOperation(sctx, r.Seq, db.HeldSending)
-		case err == nil && held:
-			err = errHeldSendingNow // the store has it, and not waiting or failed: being sent
-		}
-	}
+	gone, err := d.heldDeleteStore(ctx, sctx, r)
 	h.mu.Lock()
+	if err == nil && !gone {
+		err = errHeldSendingNow
+	}
 	if err != nil {
 		if row := h.rowLocked(r.MachineID, r.Seq); row != nil {
 			row.busy = false
@@ -1104,7 +1128,8 @@ func (d *Devices) heldDelete(ctx context.Context, machine, sid, msg string) (boo
 			d.logf("[%s] %s: a held message's delete not kept: %v", r.MachineID, sid, err)
 			err = errHeldStore
 		}
-		d.heldWake(r.MachineID) // its busy mark held the later ones back
+		d.heldChanged(r.MachineID) // the store's row may have been taken in meanwhile (heldMirror)
+		d.heldWake(r.MachineID)    // its busy mark held the later ones back
 		return true, err
 	}
 	h.dropLocked(r.MachineID, r.Seq)
@@ -1116,17 +1141,45 @@ func (d *Devices) heldDelete(ctx context.Context, machine, sid, msg string) (boo
 	return true, nil
 }
 
+// heldDeleteStore writes the owner's Delete of r: gone, the store no longer has it. A store that has it otherwise is
+// followed (heldMirror); one it has as being sent by a try that is over gets that try deleted, never a newer one; a
+// delete that did not apply is answered from what the store has then, never counted as done.
+func (d *Devices) heldDeleteStore(ctx, sctx context.Context, r *heldRow) (gone bool, err error) {
+	st := d.heldStore()
+	ok, err := st.DeleteHeldOperation(sctx, r.Seq) // never one being sent
+	if err != nil || ok {
+		return ok, err
+	}
+	held, stale, attempts, err := d.heldMirror(ctx, r)
+	switch {
+	case err != nil:
+		return false, err
+	case !held:
+		return true, nil // gone already
+	case !stale:
+		return false, errHeldSendingNow // the store has it, and not waiting or failed: being sent
+	}
+	if ok, err = st.DeleteHeldTry(sctx, r.Seq, attempts); err != nil || ok {
+		return ok, err
+	}
+	// The store changed meanwhile (a newer try): answered from what it has now.
+	if held, _, _, err = d.heldMirror(ctx, r); err != nil {
+		return false, err
+	}
+	return !held, nil
+}
+
 // heldMirror takes into memory what the store has of r after it did not take the owner's change: gone, it is
 // dropped (held false); waiting or failed, so it is here too. Being sent: stale when no delivery of its session runs
 // here and the try is over (this manager's own that it could not write, or one begun longer ago than any try takes),
 // so the owner's change may be written over it; else errHeldSendingNow (another manager on the same database, in a
 // switch-over, may be sending it), left as it is here.
-func (d *Devices) heldMirror(ctx context.Context, r *heldRow) (held, stale bool, err error) {
+func (d *Devices) heldMirror(ctx context.Context, r *heldRow) (held, stale bool, attempts int, err error) {
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
 	op, found, err := d.heldStore().HeldOperationOf(sctx, r.Kind, r.MachineID, r.SessionID, r.OpID)
 	if err != nil {
-		return true, false, err
+		return true, false, 0, err
 	}
 	h := &d.held
 	h.mu.Lock()
@@ -1135,18 +1188,18 @@ func (d *Devices) heldMirror(ctx context.Context, r *heldRow) (held, stale bool,
 	switch {
 	case !found:
 		h.dropLocked(r.MachineID, r.Seq)
-		return false, false, nil
+		return false, false, 0, nil
 	case op.State == db.HeldSending:
-		own := row != nil && row.stale && row.staleOwn
+		own := row != nil && row.stale && row.staleOwn && row.Attempts == op.Attempts
 		if !h.sending[r.MachineID+"/"+r.SessionID] && (own || heldTryOver(op.TriedAt, h.clock())) {
-			return true, true, nil
+			return true, true, op.Attempts, nil
 		}
-		return true, false, errHeldSendingNow
+		return true, false, 0, errHeldSendingNow
 	}
 	if row != nil {
 		row.State, row.Failure, row.Error, row.HeldAt, row.stale = op.State, op.Failure, op.Error, op.HeldAt, false
 	}
-	return true, false, nil
+	return true, false, 0, nil
 }
 
 // heldSync takes into memory what the store has of message seq of machine after it did not take a delivery's write:
@@ -1177,7 +1230,9 @@ func (d *Devices) heldSync(ctx context.Context, machine string, seq int64) {
 	case !found:
 		h.dropLocked(machine, seq)
 	case op.State == db.HeldSending:
+		// The try it holds is the one judged, by its attempts: a repair never writes over a newer one.
 		r.State, r.Failure, r.Error, r.stale, r.staleOwn = db.HeldFailed, db.HeldUnclear, "", true, false
+		r.Attempts = op.Attempts
 		if !op.TriedAt.IsZero() {
 			r.TriedAt = op.TriedAt
 		}
@@ -1188,62 +1243,62 @@ func (d *Devices) heldSync(ctx context.Context, machine string, seq int64) {
 
 // heldRepair writes what was decided of the messages the store still has as being sent (stale), and deletes the
 // rows of ones sent whose delete failed: once no delivery of the session runs here and the try is over (at once for
-// this manager's own). It never sends anything.
+// this manager's own). Each write touches only the try it was judged on, never a newer claim; a row the owner is
+// changing is left for later, and one being written is busy meanwhile (the owner's change answers 409). It never sends
+// anything.
 func (d *Devices) heldRepair(ctx context.Context) {
 	h := &d.held
 	now := h.clock()
-	type due struct {
-		row heldRow
-	}
-	var dues []due
-	var gone []int64
+	var dues []heldRow
+	gone := map[int64]int{}
 	h.mu.Lock()
 	for machine, rows := range h.rows {
 		for _, r := range rows {
-			if r.stale && !h.sending[machine+"/"+r.SessionID] && (r.staleOwn || heldTryOver(r.TriedAt, now)) {
-				dues = append(dues, due{*r})
+			if r.stale && !r.busy && !h.sending[machine+"/"+r.SessionID] && (r.staleOwn || heldTryOver(r.TriedAt, now)) {
+				r.busy = true
+				dues = append(dues, *r)
 			}
 		}
 	}
-	for seq := range h.gone {
-		gone = append(gone, seq)
-	}
+	maps.Copy(gone, h.gone)
 	h.mu.Unlock()
 	st := d.heldStore()
-	for _, seq := range gone {
+	for seq, attempts := range gone {
 		sctx, cancel := heldStoreCtx(ctx)
-		_, err := st.DeleteHeldOperation(sctx, seq, db.HeldSending)
+		_, err := st.DeleteHeldTry(sctx, seq, attempts)
 		cancel()
-		if err == nil {
+		if err == nil { // deleted, or that try is not there any more
 			h.mu.Lock()
 			delete(h.gone, seq)
 			h.mu.Unlock()
 		}
 	}
 	touched := map[string]bool{}
-	for _, e := range dues {
-		r := e.row
+	for _, r := range dues {
+		touched[r.MachineID] = true
 		sctx, cancel := heldStoreCtx(ctx)
-		ok, err := st.SettleHeldOperation(sctx, r.Seq, db.HeldSending, r.State, r.Failure, r.Error)
+		ok, err := st.SettleHeldTry(sctx, r.Seq, r.Attempts, r.State, r.Failure, r.Error)
 		cancel()
-		switch {
-		case err != nil: // the next look tries again
-			continue
-		case ok:
-			h.mu.Lock()
-			if row := h.rowLocked(r.MachineID, r.Seq); row != nil {
+		h.mu.Lock()
+		if row := h.rowLocked(r.MachineID, r.Seq); row != nil {
+			row.busy = false
+			if err == nil && ok {
 				row.stale, row.staleOwn = false, false
 			}
-			h.mu.Unlock()
+		}
+		h.mu.Unlock()
+		switch {
+		case err != nil: // the next look tries again
+			d.logf("[%s] %s: a held message's outcome not kept yet: %v", r.MachineID, r.SessionID, err)
+		case ok:
 			d.logf("[%s] %s: a held message's outcome kept at last", r.MachineID, r.SessionID)
-		default: // the store has it otherwise
+		default: // the store has it otherwise (a newer try, or another change)
 			d.heldSync(ctx, r.MachineID, r.Seq)
 		}
-		touched[r.MachineID] = true
 	}
 	for machine := range touched {
 		d.heldChanged(machine)
-		d.heldWake(machine) // the ones it held back go now
+		d.heldWake(machine) // what it held back, its busy mark too, goes now
 	}
 }
 
