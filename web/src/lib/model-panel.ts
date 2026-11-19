@@ -95,6 +95,8 @@ export interface PanelConfig {
 export interface PanelState {
   /** What runs now; null while unknown. */
   current: PanelConfig | null;
+  /** The current effort is shown from Model settings and is omitted from model picks. */
+  currentEffortDisplayOnly?: boolean;
   /** A switch accepted for the next message (#5035, #5033). */
   pending?: PanelConfig | null;
   /** Providers whose models switch without a restart: the Recommended group is the current model, then their other models. */
@@ -209,11 +211,12 @@ const takes = (model: Pick<PanelModel, "efforts">, effort: string | undefined) =
  * other: its override's effort, else the effort running now when this model takes it, else none (the model's own
  * default). New agy starts use their native effort unless the user picks one. Fast comes from the override when offered.
  */
-export function rowSetup(provider: Pick<PanelProvider, "id" | "models"> & { engine?: string }, model: PanelModel, state: Pick<PanelState, "current" | "starting">, override?: PanelOverride): PanelConfig {
+export function rowSetup(provider: Pick<PanelProvider, "id" | "models"> & { engine?: string }, model: PanelModel, state: Pick<PanelState, "current" | "currentEffortDisplayOnly" | "starting">, override?: PanelOverride): PanelConfig {
   const current = state.current;
   const now = runsNow(provider, model, current);
-  const inherited = state.starting && provider.engine === "agy" ? undefined : takes(model, current?.effort);
-  const effort = now ? (state.starting ? takes(model, current?.effort) : current?.effort) : (takes(model, override?.effort) ?? inherited);
+  const currentEffort = state.currentEffortDisplayOnly ? undefined : current?.effort;
+  const inherited = state.starting && provider.engine === "agy" ? undefined : takes(model, currentEffort);
+  const effort = now ? (state.starting ? takes(model, currentEffort) : currentEffort) : (takes(model, override?.effort) ?? inherited);
   // what runs is what runs: an unset Fast on the running model is Standard, not "unknown, take the override"
   const fast = model.fast ? (now ? current?.fast : override?.fast) : undefined;
   return cleanSetup({ provider: provider.id, model: model.id, effort, fast });
