@@ -443,8 +443,8 @@ func TestAgyPaneResumeRejectsAmbiguousReports(t *testing.T) {
 			n, f, home := herdrNode(t)
 			seedAgents(t, n, f, agyTestAgent(agyTestPane, home, agyTestID), agyTestAgent(tc.pane, home, tc.id))
 			const model = "test-model"
-			n.noteWorkAgent(context.Background(), n.hosts.Get(host.Herdr).(*herdrHost), agyTestPane, agyTestRow, home, agyAgent, agyAgent, model)
-			assertAgyResumeReport(t, f, 0, model, "")
+			n.noteWorkAgent(context.Background(), n.hosts.Get(host.Herdr).(*herdrHost), agyTestPane, agyTestRow, home, agyAgent, agyAgent, model, "")
+			assertAgyResumeReport(t, f, 0, model, "", "")
 		})
 	}
 }

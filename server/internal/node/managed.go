@@ -548,7 +548,9 @@ func gatewayModelArgs(args, env []string, warn func(string)) []string {
 // codexCatalog is the model catalog URL of a Codex provider's gateway, "" for none (codexProviderArgs).
 func launchArgv(agent string, args, respArgs []string, respEffort, respModel string, respEnv []string, codexCatalog string) []string {
 	if agent == agyAgent && slices.Equal(args, []string{"models"}) {
-		return []string{agyAgent, "models"}
+		// Discovery needs the same provider settings as a start, with no model selected.
+		respArgs = withoutModelArgs(respArgs)
+		respModel = ""
 	}
 	hasModelArg := false
 	hasSettingsArg := false

@@ -146,9 +146,23 @@ func TestAgyLauncherModelsUsesConfiguredLauncher(t *testing.T) {
 }
 
 func TestAgyManagedDiscoveryUsesModelsSubcommand(t *testing.T) {
-	got := launchArgv(agyAgent, []string{"models"}, []string{"--model", "fixed"}, "", "configured",
-		[]string{"GEMINI_API_KEY=fixture"}, "")
-	if !slices.Equal(got, []string{"agy", "models"}) {
-		t.Fatalf("managed discovery argv = %q", got)
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  []string
+		want []string
+	}{
+		{"native", []string{"--model", "fixed"}, nil, []string{"agy", "models"}},
+		{"Gemini API key", []string{"--model", "fixed", "--log-level", "debug"}, []string{"GEMINI_API_KEY=fixture"},
+			[]string{"agy", "--log-level", "debug", "--settings", `{"modelProvider":"gemini"}`, "models"}},
+		{"explicit provider settings", []string{"--model=fixed", `--settings={"modelProvider":"oauth"}`}, []string{"GEMINI_API_KEY=fixture"},
+			[]string{"agy", `--settings={"modelProvider":"oauth"}`, "models"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := launchArgv(agyAgent, []string{"models"}, tc.args, "", "configured", tc.env, "")
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("managed discovery argv = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

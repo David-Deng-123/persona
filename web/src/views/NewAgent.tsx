@@ -500,6 +500,17 @@ function AgentForm({ open, onClose, preset }: NewAgentProps) {
   const hostDefault = picked ? currentHosts(picked).default : "";
   useEffect(() => { setHost(""); }, [open, mid]);
   const agent = launcherAgent(listLauncher, launchers, models.list);
+  const previousCatalog = useRef({ host: opensIn, launcher: listLauncher, agent });
+  useLayoutEffect(() => {
+    const previous = previousCatalog.current;
+    previousCatalog.current = { host: opensIn, launcher: listLauncher, agent };
+    if (open && previous.host !== opensIn && previous.launcher === listLauncher && (agent === "agy" || previous.agent === "agy")) {
+      // A model selected for another AGY host may be absent from this host's catalog.
+      setModel("");
+      setEffort("");
+      setTier(null);
+    }
+  }, [open, opensIn, listLauncher, agent]);
   // what a start on it takes besides the model (#8261): Claude Code's modes and efforts, or the permission modes a
   // launcher lists (Paseo's other providers) and the efforts its model lists, or neither (Codex keeps its own)
   const claudeModes = takesEffort(agent) && !listedModes(listEntry);
@@ -913,16 +924,7 @@ function AgentForm({ open, onClose, preset }: NewAgentProps) {
             <Field label={t("lib-engines.start_in")}>
               <div role="radiogroup" aria-label={t("lib-engines.start_in")} data-testid="start-host" className="flex flex-wrap gap-1.5">
                 {hosts.map((h) => (
-                  <Choice key={h} radio selected={(host || hostDefault) === h} onClick={() => {
-                    if (h === host) return;
-                    setHost(h);
-                    // A model picked from another AGY catalog may be unavailable on this host.
-                    if (agent === "agy") {
-                      setModel("");
-                      setEffort("");
-                      setTier(null);
-                    }
-                  }}>
+                  <Choice key={h} radio selected={(host || hostDefault) === h} onClick={() => setHost(h)}>
                     {engineName(h, picked)}
                     {h === hostDefault ? ` · ${t("lib-engines.default")}` : ""}
                   </Choice>

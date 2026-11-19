@@ -110,6 +110,17 @@ func TestAgentStartParams(t *testing.T) {
 	}
 }
 
+func TestAgentStartParamsResolvesAgyType(t *testing.T) {
+	f := newFakeHub().withMachine()
+	f.launcherList = []proto.Launcher{{Name: "agy-wrapper", Agent: "agy", Source: "zshrc"}}
+	s := newTestService(t, f)
+	setModel(t, s, "agent.new", ModelBinding{Provider: "launcher.agy-wrapper"})
+	got, err := s.AgentStartParams(t.Context(), AgentStartParams{MachineID: "server", Params: map[string]any{"async": true}})
+	if err != nil || got["launcher"] != "agy-wrapper" || got["agent_type"] != "agy" {
+		t.Fatalf("resolved start params = %v, %v", got, err)
+	}
+}
+
 func TestAgentStartParamsExplicitLauncherDefaultEffort(t *testing.T) {
 	s := newTestService(t, newFakeHub())
 	setModel(t, s, "agent.new", ModelBinding{Provider: "launcher.agy", Model: "configured-model", Effort: "xhigh"})
