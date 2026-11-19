@@ -166,6 +166,7 @@ func (s *Service) backgroundLost(ctx context.Context, old, to, web string) []sup
 				continue // told again from its signals
 			}
 			if to != "" {
+				msg.TriedAt, msg.Looks, msg.LookAfter = time.Time{}, 0, time.Time{} // the earlier try was to another conversation
 				r.st.Queue[to] = append(r.st.Queue[to], msg)
 				moved++
 			}

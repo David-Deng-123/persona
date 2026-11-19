@@ -293,8 +293,7 @@ func (s *Service) deliverDigest(ctx context.Context, here Settings, to string, l
 		}
 		return true
 	}
-	tried := time.Now()
-	if err := s.deliverRelay(ctx, here.MachineID, to, msg); err != nil && !s.relaySettled(here.MachineID, to, msg, tried, err) {
+	if err := s.tryDirectRelay(ctx, here.MachineID, to, &msg); err != nil {
 		s.logf("supervise: %v; queued", err)
 		if s.queueDigest(to, msg, kept, now, prev) {
 			accepted = true

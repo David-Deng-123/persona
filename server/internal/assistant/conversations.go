@@ -262,6 +262,11 @@ type relayMsg struct {
 	Answer bool `json:"answer,omitempty"`
 	// Due: past the relay rate it waits for the window (relayAdmit, #10400) and goes in no sooner than this, once.
 	Due time.Time `json:"due,omitzero"`
+	// TriedAt is the start of the earliest try that may have gone in. Save it before sending from the queue.
+	// Looks and LookAfter keep the transcript check budget and schedule across manager restarts.
+	TriedAt   time.Time `json:"tried_at,omitzero"`
+	Looks     int       `json:"looks,omitempty"`
+	LookAfter time.Time `json:"look_after,omitzero"`
 	// Quote: the owner's message the sender carried (conversation_send / conversation_new quote), as the hub verified
 	// it (relay_quote.go, #3822). A version that does not know it drops it on its next save: the message then goes
 	// without the owner's words, as before.
@@ -301,7 +306,6 @@ type relayBook struct {
 	// conversation that cannot start is not cold-started again on every session list (#10194). In memory: a restart
 	// tries at once.
 	failedAt map[string]time.Time
-	doubted  map[string]time.Time // by relayMsgID: when a try that ended in doubt began, its line not found then (relay_once.go)
 	// ownerTurns: the conversations whose round the owner is on, in memory only (#6394). While one is set, every
 	// queued message waits, whatever its rank: the owner's own message always goes before the queue. A restart falls
 	// back on the persisted Spoke presence window (relay_presence.go).
@@ -356,10 +360,10 @@ func (s *Service) relayLocked(ctx context.Context) bool {
 	return true
 }
 
-func (s *Service) saveRelayLocked() {
+func (s *Service) saveRelayLocked() error {
 	st := s.store()
 	if st == nil {
-		return
+		return nil
 	}
 	for id, hp := range s.relays.st.Hops {
 		if time.Since(hp.At) > relayHopMemory {
@@ -379,9 +383,11 @@ func (s *Service) saveRelayLocked() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := st.PutSetting(ctx, relayKey, s.relays.st); err != nil {
+	err := st.PutSetting(ctx, relayKey, s.relays.st)
+	if err != nil {
 		s.logf("save conversation relay: %v", err)
 	}
+	return err
 }
 
 // hopLocked is the hop a message from → to would be, and whether it is an answer: the first message back to the
@@ -728,8 +734,12 @@ func (msg relayMsg) source() *proto.MessageSource {
 // notice (quiet.go) is its own text, and the work it starts is not a hop of any chain.
 func (s *Service) deliverRelay(ctx context.Context, machine, to string, msg relayMsg) error {
 	text := relayDeliveryText(msg)
-	params := map[string]any{"session_id": to, "text": text, "message_source": msg.source(), "resume_only": true, holdPushesParam: msg.Tool == superviseTool,
-		"once_id": relayMsgID(to, msg)} // every try of it under one id: the node sends it once (relay_once.go)
+	source, onceID := msg.source(), relayMsgID(to, msg)
+	if strings.TrimSpace(text) != "" && relayWords(text) == "" {
+		text = prompts.RelayMessageText(text, source, onceID)
+	}
+	params := map[string]any{"session_id": to, "text": text, "message_source": source, "resume_only": true, holdPushesParam: msg.Tool == superviseTool,
+		"once_id": onceID} // every try of it under one id: the node sends it once (relay_once.go)
 	if msg.Interject {
 		params["interject_background"] = true
 	}
@@ -884,18 +894,10 @@ func (s *Service) drainRelays(machine string, list []proto.Session) {
 				}
 			}
 			var err error
-			tried := time.Now()
+			var retry time.Duration
 			if !stale && !keep {
-				if s.relayLanded(machine, id, msg) {
-					err = nil // an earlier try in doubt went in after all: nothing is sent again
-				} else {
-					err = s.deliverRelay(ctx, machine, id, msg)
-					if err == nil {
-						s.forgetDoubt(id, msg)
-					} else if s.relaySettled(machine, id, msg, tried, err) {
-						err = nil
-					}
-				}
+				msg, retry, err = s.tryQueuedRelay(ctx, machine, id, msg)
+				keep = retry > 0
 			}
 			cancel()
 			b.mu.Lock()
@@ -918,7 +920,14 @@ func (s *Service) drainRelays(machine string, list []proto.Session) {
 				s.saveRelayLocked()
 				taken = true
 			} else {
+				if q := b.st.Queue[id]; len(q) > 0 && q[0] != msg {
+					q[0] = msg
+					s.saveRelayLocked()
+				}
 				b.stuck[id] = msg // the next drain takes another one first (pickLocked)
+			}
+			if retry > 0 {
+				s.drainAfterLocked(machine, id, retry)
 			}
 			b.mu.Unlock()
 			if taken && !stale && err == nil {
@@ -1365,7 +1374,7 @@ func (s *Service) toolConversationSend(ctx context.Context, self string, args js
 		s.drainRelays(c.MachineID, []proto.Session{c}) // what may go goes; the rest when the hold for the user ends
 		return fmt.Sprintf("%q has messages waiting, or the user is talking in it: the message is queued (%d waiting) and goes in after them.%s", name, n, back), nil
 	}
-	if err := s.deliverRelay(ctx, c.MachineID, c.SessionID, msg); err != nil {
+	if err := s.tryDirectRelay(ctx, c.MachineID, c.SessionID, &msg); err != nil {
 		if !relayRetryable(err) {
 			return "", err // a refusal for good (its model or connection gone, a pick that cannot be read): fail closed
 		}
