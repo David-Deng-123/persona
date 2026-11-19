@@ -24,9 +24,10 @@ const (
 
 // Why a HeldOperation failed.
 const (
-	HeldUnclear = "unclear" // a try whose outcome is unknown: it may have arrived
-	HeldRefused = "refused" // the computer refused it, nothing typed (Error says why)
-	HeldExpired = "expired" // its computer was away for a whole day
+	HeldUnclear   = "unclear"    // a try whose outcome is unknown: it may have arrived
+	HeldRefused   = "refused"    // the computer refused it, nothing typed (Error says why)
+	HeldExpired   = "expired"    // its computer was away for a whole day
+	HeldSignedOut = "signed_out" // the device credential that sent it was revoked
 )
 
 // HeldOperation is a row of held_operations: an operation the owner sent to a computer while it was away, held by its
@@ -36,27 +37,29 @@ const (
 // again), TriedAt when its latest try began (zero: never tried). A waiting one whose Failure is HeldUnclear was retried
 // by the owner after a try that may have arrived: its session's transcript is looked at before it goes.
 type HeldOperation struct {
-	Seq       int64
-	Kind      string
-	OpID      string
-	MachineID string
-	SessionID string
-	Call      json.RawMessage
-	Lang      string
-	State     string
-	Failure   string
-	Error     string
-	SentAt    time.Time
-	HeldAt    time.Time
-	TriedAt   time.Time
-	Attempts  int
-	Text      string
-	Images    int
+	Seq          int64
+	Kind         string
+	OpID         string
+	MachineID    string
+	SessionID    string
+	Call         json.RawMessage
+	Lang         string
+	State        string
+	Failure      string
+	Error        string
+	SentAt       time.Time
+	HeldAt       time.Time
+	TriedAt      time.Time
+	Attempts     int
+	Text         string
+	Images       int
+	CredentialID string
 }
 
 // heldShown is what a row shows of its call, read in the database (a held message's pictures never leave it for that).
 const heldShown = `coalesce(call->'params'->>'text', ''),
-	CASE WHEN jsonb_typeof(call->'params'->'images') = 'array' THEN jsonb_array_length(call->'params'->'images') ELSE 0 END`
+	CASE WHEN jsonb_typeof(call->'params'->'images') = 'array' THEN jsonb_array_length(call->'params'->'images') ELSE 0 END,
+	coalesce(call->'caller'->>'credential_id', '')`
 
 const heldColumns = `seq, kind, op_id, machine_id, session_id, call, lang, state, failure, error, sent_at, held_at, tried_at, attempts, ` + heldShown
 
@@ -64,7 +67,7 @@ func scanHeld(row pgx.Row) (HeldOperation, error) {
 	var o HeldOperation
 	var tried *time.Time
 	err := row.Scan(&o.Seq, &o.Kind, &o.OpID, &o.MachineID, &o.SessionID, &o.Call, &o.Lang, &o.State, &o.Failure, &o.Error,
-		&o.SentAt, &o.HeldAt, &tried, &o.Attempts, &o.Text, &o.Images)
+		&o.SentAt, &o.HeldAt, &tried, &o.Attempts, &o.Text, &o.Images, &o.CredentialID)
 	if tried != nil {
 		o.TriedAt = *tried
 	}
@@ -169,7 +172,7 @@ func (d *DB) RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (o
 	var failure string
 	err = d.pool.QueryRow(ctx, `UPDATE held_operations SET state = 'waiting', error = '', held_at = $2,
 		failure = CASE WHEN failure = 'unclear' THEN 'unclear' ELSE '' END
-		WHERE seq = $1 AND state = 'failed' RETURNING failure`, seq, at.UTC()).Scan(&failure)
+		WHERE seq = $1 AND state = 'failed' AND failure <> 'signed_out' RETURNING failure`, seq, at.UTC()).Scan(&failure)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}

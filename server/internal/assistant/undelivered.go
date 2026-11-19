@@ -52,21 +52,23 @@ const undeliveredMaxBytes = 16 << 20
 
 // keptMessage is one owner message kept for its conversation.
 type keptMessage struct {
-	ID      string         `json:"id"` // its client_msg_id
-	Machine string         `json:"machine"`
-	Session string         `json:"session"`
-	Params  map[string]any `json:"params"` // the app's message as it came (text, images, launcher, model)
-	Human   bool           `json:"human,omitempty"`
-	Lang    string         `json:"lang,omitempty"`
-	At      time.Time      `json:"at"`
+	ID           string         `json:"id"` // its client_msg_id
+	Machine      string         `json:"machine"`
+	Session      string         `json:"session"`
+	Params       map[string]any `json:"params"` // the app's message as it came (text, images, launcher, model)
+	Human        bool           `json:"human,omitempty"`
+	CredentialID string         `json:"credential_id,omitempty"`
+	Lang         string         `json:"lang,omitempty"`
+	At           time.Time      `json:"at"`
 	// State is proto.UndeliveredWaiting or proto.UndeliveredFailed.
 	State    string    `json:"state"`
 	Attempts int       `json:"attempts,omitempty"`
 	NextAt   time.Time `json:"next_at"`
 	// TriedAt: when the latest try that may have gone in began (its outcome in doubt, or the manager stopped during it);
 	// zero when every try so far surely typed nothing.
-	TriedAt time.Time `json:"tried_at,omitempty"`
-	Error   string    `json:"error,omitempty"`
+	TriedAt   time.Time `json:"tried_at,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	SignedOut bool      `json:"signed_out,omitempty"`
 }
 
 func (k keptMessage) text() string {
@@ -79,13 +81,20 @@ func (k keptMessage) images() int {
 	return len(n)
 }
 
+func (k *keptMessage) failSignedOut() {
+	k.State, k.SignedOut = proto.UndeliveredFailed, true
+	k.Error = i18n.T(i18n.Lang(k.Lang), "undelivered.signed_out")
+}
+
 type undeliveredBook struct {
-	mu      sync.Mutex
-	loaded  bool
-	st      map[string][]keptMessage // by conversation, oldest first
-	sending map[string]bool          // conversations a pass is sending into
-	wake    chan struct{}
-	start   sync.Once
+	mu              sync.Mutex
+	loaded          bool
+	st              map[string][]keptMessage // by conversation, oldest first
+	sending         map[string]bool          // conversations a pass is sending into
+	revoked         map[string]bool          // credentials this manager was told were signed out
+	revocationDirty bool                     // the failed rows still need to be saved
+	wake            chan struct{}
+	start           sync.Once
 }
 
 func (s *Service) undeliveredLocked(ctx context.Context) bool {
@@ -156,7 +165,7 @@ func (s *Service) KeepUndelivered(ctx context.Context, p assistantwire.KeepUndel
 			return k.wire(), nil
 		}
 	}
-	k := keptMessage{ID: id, Machine: p.MachineID, Session: p.SessionID, Params: params, Human: p.Human, Lang: string(lang),
+	k := keptMessage{ID: id, Machine: p.MachineID, Session: p.SessionID, Params: params, Human: p.Human, Lang: string(lang), CredentialID: p.CredentialID,
 		At: now, State: proto.UndeliveredWaiting, Attempts: 1, NextAt: now.Add(undeliveredBackoff[0]),
 		Error: undeliveredReason(lang, p.Code)}
 	if p.Code == assistantwire.CodeUndeliveredAhead {
@@ -169,6 +178,9 @@ func (s *Service) KeepUndelivered(ctx context.Context, p assistantwire.KeepUndel
 		if k.TriedAt.IsZero() {
 			k.TriedAt = now
 		}
+	}
+	if b.revoked[k.CredentialID] {
+		k.failSignedOut()
 	}
 	b.st[p.SessionID] = append(b.st[p.SessionID], k)
 	err := s.saveUndeliveredLocked()
@@ -192,12 +204,57 @@ func undeliveredReason(lang i18n.Lang, code string) string {
 }
 
 func (k keptMessage) wire() proto.UndeliveredMessage {
-	m := proto.UndeliveredMessage{ID: k.ID, Text: k.text(), Images: k.images(), At: k.At, State: k.State, Attempts: k.Attempts, Error: k.Error}
+	m := proto.UndeliveredMessage{ID: k.ID, Text: k.text(), Images: k.images(), At: k.At, State: k.State, Attempts: k.Attempts, Error: k.Error, DeleteOnly: k.SignedOut}
 	if k.State == proto.UndeliveredWaiting && !k.NextAt.IsZero() {
 		next := k.NextAt
 		m.NextAt = &next
 	}
 	return m
+}
+
+// undeliveredCredentialRevoked records the sender even if a concurrent request has yet to keep its message.
+func (s *Service) undeliveredCredentialRevoked(ctx context.Context, id string) {
+	b := &s.undelivered
+	b.mu.Lock()
+	b.recordRevocationLocked(id)
+	changed := s.undeliveredLocked(ctx) && s.failRevokedKeptLocked()
+	b.mu.Unlock()
+	if changed {
+		s.publish(context.WithoutCancel(ctx))
+	}
+	s.wakeUndelivered()
+}
+
+func (b *undeliveredBook) recordRevocationLocked(id string) {
+	if b.revoked == nil {
+		b.revoked = make(map[string]bool)
+	}
+	b.revoked[id] = true
+}
+
+// failRevokedKeptLocked fails the known revoked rows and retries any failed save. The book's lock is held.
+func (s *Service) failRevokedKeptLocked() bool {
+	b := &s.undelivered
+	if len(b.revoked) == 0 && !b.revocationDirty {
+		return false
+	}
+	changed := false
+	for _, q := range b.st {
+		for i := range q {
+			if b.revoked[q[i].CredentialID] && !q[i].SignedOut {
+				q[i].failSignedOut()
+				changed = true
+			}
+		}
+	}
+	if changed || b.revocationDirty {
+		err := s.saveUndeliveredLocked()
+		b.revocationDirty = err != nil
+		if err != nil {
+			s.logf("save kept messages from signed-out devices: %v", err)
+		}
+	}
+	return changed
 }
 
 // undeliveredViews are the kept messages by conversation, for the rows (snapshot); false while they could not be read.
@@ -339,6 +396,7 @@ func (s *Service) undeliveredPass(ctx context.Context, now time.Time) {
 		b.mu.Unlock()
 		return
 	}
+	changed := s.failRevokedKeptLocked()
 	var due []string
 	for id, q := range b.st {
 		if b.sending[id] {
@@ -358,6 +416,9 @@ func (s *Service) undeliveredPass(ctx context.Context, now time.Time) {
 		b.sending[id] = true
 	}
 	b.mu.Unlock()
+	if changed {
+		s.publish(context.WithoutCancel(ctx))
+	}
 	var wg sync.WaitGroup
 	for _, id := range due {
 		wg.Add(1)
@@ -410,13 +471,27 @@ func (s *Service) undeliveredSend(ctx context.Context, id string) {
 		case err == nil:
 			s.dropKeptLocked(id, k.ID)
 			s.logf("undelivered: sent a kept message to %s after %d tries", short(id), k.Attempts)
+		case errors.Is(err, errKeptSignedOut):
+			b.recordRevocationLocked(k.CredentialID)
+			s.failRevokedKeptLocked()
+		case errors.Is(err, errKeptCredentialCheck):
+			s.updateKeptLocked(id, k.ID, func(m *keptMessage) {
+				m.TriedAt, m.NextAt = k.TriedAt, time.Now().UTC().Add(undeliveredBackoff[0])
+			})
+			s.logf("check kept message's device credential: %v", err)
 		case undeliveredGone(err):
 			s.updateKeptLocked(id, k.ID, func(m *keptMessage) {
+				if m.SignedOut {
+					return
+				}
 				m.State, m.TriedAt, m.Error = proto.UndeliveredFailed, time.Time{}, i18n.T(i18n.Lang(m.Lang), "assistant-undelivered.gone")
 			})
 		default:
 			doubt := relayInDoubt(err)
 			s.updateKeptLocked(id, k.ID, func(m *keptMessage) {
+				if m.SignedOut {
+					return
+				}
 				m.Attempts++
 				m.NextAt = time.Now().UTC().Add(undeliveredBackoff[min(m.Attempts-1, len(undeliveredBackoff)-1)])
 				m.Error = undeliveredReason(i18n.Lang(m.Lang), keptErrCode(err))
@@ -428,11 +503,16 @@ func (s *Service) undeliveredSend(ctx context.Context, id string) {
 		}
 		b.mu.Unlock()
 		changed = true
-		if err != nil {
+		if err != nil && !errors.Is(err, errKeptSignedOut) {
 			return
 		}
 	}
 }
+
+var (
+	errKeptSignedOut       = errors.New("kept message's sending device was signed out")
+	errKeptCredentialCheck = errors.New("kept message's sending credential could not be checked")
+)
 
 func keptErrCode(err error) string {
 	var re *rpc.Error
@@ -481,6 +561,18 @@ func (s *Service) deliverKept(ctx context.Context, k keptMessage) error {
 	}
 	sctx, cancel := context.WithTimeout(ctx, 5*time.Minute) // a cold start on a busy computer can take minutes
 	defer cancel()
+	if k.CredentialID != "" {
+		revoked, err := s.hub.CredentialRevoked(sctx, k.CredentialID)
+		if err != nil {
+			return errors.Join(errKeptCredentialCheck, err)
+		}
+		s.undelivered.mu.Lock()
+		revoked = revoked || s.undelivered.revoked[k.CredentialID]
+		s.undelivered.mu.Unlock()
+		if revoked {
+			return errKeptSignedOut
+		}
+	}
 	params, err := s.messageParams(withLauncherNoteDiscarded(sctx), SendParams{MachineID: k.Machine, SessionID: k.Session,
 		Params: maps.Clone(k.Params), Lang: k.Lang, Human: k.Human}, true)
 	if err != nil {
@@ -488,6 +580,13 @@ func (s *Service) deliverKept(ctx context.Context, k keptMessage) error {
 	}
 	params["session_id"] = k.Session
 	params["client_msg_id"] = k.ID
+	s.undelivered.mu.Lock()
+	revoked := s.undelivered.revoked[k.CredentialID]
+	s.undelivered.mu.Unlock()
+	if revoked {
+		s.humanSent.voidSend(k.Session, k.ID)
+		return errKeptSignedOut
+	}
 	tried := time.Now()
 	err = s.call(sctx, k.Machine, DeviceSessionSend, params, nil)
 	if err != nil && relayInDoubt(err) && s.undeliveredLandedSince(k, tried) {
@@ -549,20 +648,28 @@ func (s *Service) undeliveredRoutes() {
 		}
 		b := &s.undelivered
 		b.mu.Lock()
-		found := false
+		found, signedOut := false, false
 		if s.undeliveredLocked(r.Context()) {
 			for _, k := range b.st[sid] {
 				if k.ID == mid {
 					found = true
+					signedOut = k.SignedOut
+					break
 				}
 			}
-			now := time.Now().UTC()
-			s.updateKeptLocked(sid, mid, func(m *keptMessage) {
-				// A new day of tries from now; the line it may have written is still looked for first.
-				m.State, m.At, m.NextAt, m.Attempts = proto.UndeliveredWaiting, now, now, 0
-			})
+			if found && !signedOut {
+				now := time.Now().UTC()
+				s.updateKeptLocked(sid, mid, func(m *keptMessage) {
+					// A new day of tries from now; the line it may have written is still looked for first.
+					m.State, m.At, m.NextAt, m.Attempts = proto.UndeliveredWaiting, now, now, 0
+				})
+			}
 		}
 		b.mu.Unlock()
+		if signedOut {
+			apierr.Write(w, http.StatusConflict, i18n.Err("undelivered.signed_out"))
+			return
+		}
 		if !found {
 			if s.heldAction(w, r, sid, mid, true) {
 				return

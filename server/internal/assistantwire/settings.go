@@ -162,13 +162,14 @@ type SendParams struct {
 // launcher, model; never what SendParams made of it): a retry runs SendParams again. Human is SendParams.Human for it;
 // Error the failure the owner is told, Code its code ("" for none).
 type KeepUndeliveredParams struct {
-	MachineID string         `json:"machine_id"`
-	SessionID string         `json:"session_id"`
-	Params    map[string]any `json:"params"`
-	Human     bool           `json:"human,omitempty"`
-	Lang      string         `json:"lang,omitempty"`
-	Code      string         `json:"code,omitempty"`
-	Error     string         `json:"error,omitempty"`
+	MachineID    string         `json:"machine_id"`
+	SessionID    string         `json:"session_id"`
+	Params       map[string]any `json:"params"`
+	CredentialID string         `json:"credential_id,omitempty"`
+	Human        bool           `json:"human,omitempty"`
+	Lang         string         `json:"lang,omitempty"`
+	Code         string         `json:"code,omitempty"`
+	Error        string         `json:"error,omitempty"`
 	// TriedAt is when the first send began for CodeDeliveryUnknown. Zero means nothing was typed, so no landed-check is
 	// needed before a retry. The original start, not when the connection ended, covers a slow first attempt.
 	TriedAt time.Time `json:"tried_at,omitempty"`
