@@ -547,6 +547,9 @@ func gatewayModelArgs(args, env []string, warn func(string)) []string {
 // Launch leaves it out for a session model the gateway says takes none (launchEffort, #8798).
 // codexCatalog is the model catalog URL of a Codex provider's gateway, "" for none (codexProviderArgs).
 func launchArgv(agent string, args, respArgs []string, respEffort, respModel string, respEnv []string, codexCatalog string) []string {
+	if agent == agyAgent && slices.Equal(args, []string{"models"}) {
+		return []string{agyAgent, "models"}
+	}
 	hasModelArg := false
 	hasSettingsArg := false
 	hasEffortArg := false

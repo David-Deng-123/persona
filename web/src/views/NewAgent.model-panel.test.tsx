@@ -37,7 +37,7 @@ const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // the Mac has a launcher the Studio lacks; a gateway (relay) lists a model a Codex launcher lists too
 const LAUNCHERS: Record<string, Launcher[]> = {
   // codex: this computer opens Codex with no first message too (#4961), so a start may leave it empty
-  mac: [{ name: "claude", agent: "claude" }, { name: "relay", agent: "claude" }, { name: "codex", agent: "codex", prompt_optional: true }, { name: "only-mac", agent: "claude" }],
+  mac: [{ name: "claude", agent: "claude" }, { name: "relay", agent: "claude" }, { name: "codex", agent: "codex", prompt_optional: true }, { name: "only-mac", agent: "claude" }, { name: "agy", agent: "agy" }],
   studio: [{ name: "claude", agent: "claude" }, { name: "relay", agent: "claude" }],
   mini: [{ name: "claude", agent: "claude" }, { name: "relay", agent: "claude" }],
 };
@@ -46,6 +46,7 @@ const LISTS: Record<string, unknown> = {
   relay: { agent: "claude", models: [{ id: "default", name: "Default", default: true }, { id: "glm-5", name: "GLM 5", efforts: ["low", "medium", "high"] }, { id: "gpt-5.5", name: "GPT 5.5" }] },
   codex: { agent: "codex", models: [{ id: "default", name: "Default", default: true }, { id: "gpt-5.5", name: "GPT 5.5" }] },
   "only-mac": { agent: "claude", models: [{ id: "default", name: "Default", default: true }] },
+  agy: { agent: "agy", models: [{ id: "example-high", name: "Example High", efforts: ["low", "high", "xhigh"], default_effort: "high" }] },
 };
 // Model settings › New agent: Claude Code's Opus at High
 const PURPOSE = { purpose: { id: "agent.new", effective: { provider: "launcher.claude", model: "opus", effort: "high" } }, providers: [] };
@@ -228,6 +229,33 @@ describe("New agent's model panel (#5104)", () => {
     act(() => pill().click());
     start();
     expect(launched[0]).toMatchObject({ launcher: "relay", model: "glm-5" });
+    expect(launched[0].effort).toBeUndefined();
+  });
+
+  it.each([false, true])("sends the selected agy effort or uses the launcher default (reset=%s)", async (reset) => {
+    await open();
+    await pick("model:agy\nexample-high");
+    await openPanel();
+    await customize("model:agy\nexample-high");
+    await slide("End");
+    if (reset) {
+      act(() => button("恢复推荐").click());
+      await flush();
+    }
+    act(() => pill().click());
+    start();
+    expect(launched).toHaveLength(1);
+    expect(launched[0]).toMatchObject({ launcher: "agy", model: "example-high" });
+    expect(launched[0].effort).toBe(reset ? undefined : "xhigh");
+  });
+
+  it("omits both overrides when the agy default is picked", async () => {
+    await open();
+    await pick("model:agy\ndefault");
+    start();
+    expect(launched).toHaveLength(1);
+    expect(launched[0]).toMatchObject({ launcher: "agy" });
+    expect(launched[0].model).toBeUndefined();
     expect(launched[0].effort).toBeUndefined();
   });
 
