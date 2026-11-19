@@ -50,6 +50,7 @@ const LISTS: Record<string, unknown> = {
 };
 // Model settings › New agent: Claude Code's Opus at High
 const PURPOSE = { purpose: { id: "agent.new", effective: { provider: "launcher.claude", model: "opus", effort: "high" } }, providers: [] };
+let effective = PURPOSE.purpose.effective;
 let failList = "";
 let failLaunchersOf = "";
 const asked: string[] = [];
@@ -81,6 +82,7 @@ beforeEach(() => {
   resetModelListsForTests();
   state.machines = [{ id: "mac", name: "Mac", online: true }, { id: "studio", name: "Studio", online: true }];
   launched.length = 0;
+  effective = PURPOSE.purpose.effective;
   failList = "";
   failLaunchersOf = "";
   asked.length = 0;
@@ -92,8 +94,11 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     asked.push(url);
-    if (url.includes("/model-config/purposes/")) return json(PURPOSE);
+    if (url.includes("/model-config/purposes/")) return json({ ...PURPOSE, purpose: { ...PURPOSE.purpose, effective } });
     const list = /\/machines\/([^/]+)\/launchers\/([^/?]+)\/models/.exec(url);
+    if (list?.[2] === "agy" && new URL(url, "http://localhost").searchParams.get("host") === "herdr") {
+      return json({ agent: "agy", models: [{ id: "local-high", name: "Local High", efforts: ["high"] }] });
+    }
     if (list) return decodeURIComponent(list[2]) === failList ? json({ error: "节点没有回应" }, 500) : json(LISTS[decodeURIComponent(list[2])] ?? { models: [] });
     const ls = /\/machines\/([^/]+)\/launchers/.exec(url);
     if (ls && decodeURIComponent(ls[1]) === failLaunchersOf) return json({ error: "节点没有回应" }, 500);
@@ -257,6 +262,37 @@ describe("New agent's model panel (#5104)", () => {
     expect(launched[0]).toMatchObject({ launcher: "agy" });
     expect(launched[0].model).toBeUndefined();
     expect(launched[0].effort).toBeUndefined();
+  });
+
+  it.each(["default", "example-high"])("uses native agy effort for the %s row despite Model settings", async (model) => {
+    effective = { provider: "launcher.agy", model: "example-high", effort: "xhigh" };
+    await open();
+    const rowKey = `model:agy\n${model}`;
+    await pick(rowKey);
+    if (model !== "default") await pick(rowKey); // pick the current named row again
+    start();
+    expect(launched).toHaveLength(1);
+    expect(launched[0]).toMatchObject({ launcher: "agy", launcherDefaultEffort: true });
+    expect(launched[0].effort).toBeUndefined();
+    expect(launched[0].model).toBe(model === "default" ? undefined : model);
+  });
+
+  it("switches from the default host's agy catalog to the explicitly selected herdr catalog", async () => {
+    state.machines[0] = { ...state.machines[0], engine_hosts: ["orca", "herdr"], engine_default: "orca" };
+    await open();
+    await pick("model:agy\nexample-high");
+    expect(asked.some((url) => url.endsWith("/launchers/agy/models"))).toBe(true);
+    act(() => radio("herdr").click());
+    await flush();
+    await openPanel();
+    expect(row("model:agy\nexample-high")).toBeUndefined();
+    expect(row("model:agy\nlocal-high")).toBeDefined();
+    expect(asked.some((url) => url.endsWith("/launchers/agy/models?host=herdr"))).toBe(true);
+    act(() => row("model:agy\nlocal-high").click());
+    await flush();
+    start();
+    expect(launched).toHaveLength(1);
+    expect(launched[0]).toMatchObject({ launcher: "agy", host: "herdr", model: "local-high" });
   });
 
   it("an engine pill in a model's flyout picks the launcher that runs the same model with that engine", async () => {

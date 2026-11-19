@@ -131,7 +131,7 @@ export function newAgentPanel({ launchers, listOf, choice, configured, runs, tie
     };
     const note = locked || folded?.description;
     if (note) first.description = note;
-    const defaultEffort = followed.effort || d?.default_effort;
+    const defaultEffort = (agent !== "agy" && followed.effort) || d?.default_effort;
     if (defaultEffort) first.defaultEffort = defaultEffort;
     if (folded?.resolved) first.resolved = folded.resolved;
     const models: PanelModel[] = [first];
@@ -166,8 +166,9 @@ export function newAgentPanel({ launchers, listOf, choice, configured, runs, tie
 
   // the row lit: the model picked, else the launcher's Default row (which says what it runs)
   const followed = followedBinding(runs, configured);
+  const agent = launcherAgent(runs, launchers, listOf(runs).list);
   const state: PanelState = {
-    current: runs ? cleanSetup({ provider: runs, model: choice.model || DEFAULT_ROW, effort: choice.effort || followed.effort }) : null,
+    current: runs ? cleanSetup({ provider: runs, model: choice.model || DEFAULT_ROW, effort: choice.effort || (agent === "agy" ? "" : followed.effort) }) : null,
     recommended: [],
     starting: true,
   };
@@ -213,7 +214,7 @@ export function newAgentPill(o: { launchers: Launcher[]; runs: string; list: Mod
     failed: list === undefined && Boolean(e.error),
   };
   if (model) out.model = model;
-  const effort = takesEffort(agent, l) ? choice.effort || followed.effort : "";
+  const effort = takesEffort(agent, l) ? choice.effort || (agent === "agy" && choice.launcher ? "" : followed.effort) : "";
   if (effort) out.effort = effort;
   return out;
 }

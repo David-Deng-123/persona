@@ -110,6 +110,30 @@ func TestAgentStartParams(t *testing.T) {
 	}
 }
 
+func TestAgentStartParamsExplicitLauncherDefaultEffort(t *testing.T) {
+	s := newTestService(t, newFakeHub())
+	setModel(t, s, "agent.new", ModelBinding{Provider: "launcher.agy", Model: "configured-model", Effort: "xhigh"})
+	for _, tc := range []struct {
+		name       string
+		params     map[string]any
+		wantEffort string
+	}{
+		{"follow model settings", map[string]any{}, "xhigh"},
+		{"existing explicit launcher", map[string]any{"launcher": "agy"}, "xhigh"},
+		{"explicit launcher default", map[string]any{"launcher": "agy", "launcher_default_effort": true}, ""},
+		{"explicit effort wins", map[string]any{"launcher": "agy", "launcher_default_effort": true, "effort": "low"}, "low"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.AgentStartParams(t.Context(), AgentStartParams{Params: tc.params})
+			effort, _ := got["effort"].(string)
+			if err != nil || got["launcher"] != "agy" || got["model"] != "configured-model" ||
+				effort != tc.wantEffort || got["launcher_default_effort"] != nil {
+				t.Fatalf("start params = %v, %v, want effort %q", got, err, tc.wantEffort)
+			}
+		})
+	}
+}
+
 func TestAgentStartClaudeBypassesPermissions(t *testing.T) {
 	for _, tc := range []struct {
 		name, launcher, listed, agent, want string

@@ -790,7 +790,9 @@ func (h *Hub) startSession(w http.ResponseWriter, r *http.Request) {
 		Host           string `json:"host,omitempty"`
 		PermissionMode string `json:"permission_mode,omitempty"`
 		Effort         string `json:"effort,omitempty"`
-		Ultracode      *bool  `json:"ultracode,omitempty"`
+		// LauncherDefaultEffort keeps an explicit launcher's effort at its native default.
+		LauncherDefaultEffort bool  `json:"launcher_default_effort,omitempty"`
+		Ultracode             *bool `json:"ultracode,omitempty"`
 		// Goal: a one-line condition the node sets with /goal after the first message is in (node/startgoal.go); a
 		// start it cannot take there answers 409 start_goal_unsupported before anything starts.
 		Goal string `json:"goal,omitempty"`
