@@ -67,6 +67,8 @@ func TestActiveLinkReconnectsWhenTheDirectHubComesBack(t *testing.T) {
 }
 
 func TestActiveLinkOnlyProbesWhileTheHubStaysDown(t *testing.T) {
+	ssh := newSSHHarness(t)
+	ssh.setMode("auth_refused")
 	var tries, probes atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -86,17 +88,24 @@ func TestActiveLinkOnlyProbesWhileTheHubStaysDown(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	check := make(chan struct{}, 1)
-	c := Config{Machine: "laptop", FP: pinOf(srv), Token: "jd_test", Endpoints: []Endpoint{{URL: srv.URL}}}
-	statuses := runAtBackoffCap(t, c, Options{Check: check})
+	c := Config{Machine: "laptop", FP: pinOf(srv), Token: "jd_test", Endpoints: []Endpoint{{URL: srv.URL}},
+		SSH: &SSH{Server: "hub.example.com", Target: srv.Listener.Addr().String()}}
+	statuses := runAtBackoffCap(t, c, Options{Check: check, SSHBin: ssh.bin})
 	waitFor(t, statuses, func(s Status) bool { return s.State == "waiting" })
-	waitCondition(t, 5*time.Second, "baseline and periodic probes", func() bool { return probes.Load() >= 2 })
+	waitCondition(t, 7*time.Second, "baseline and two periodic probes", func() bool { return probes.Load() >= 3 })
 	if n := tries.Load(); n != 1 {
 		t.Fatalf("got %d full attempts during one wait, want 1", n)
+	}
+	if n := len(ssh.runs()); n != 1 {
+		t.Fatalf("got %d SSH logins across the first attempt and backoff probes, want 1", n)
 	}
 	check <- struct{}{}
 	waitFor(t, statuses, func(s Status) bool { return s.State == "waiting" })
 	if n := tries.Load(); n != 2 {
 		t.Fatalf("got %d full attempts after Check, want 2", n)
+	}
+	if n := len(ssh.runs()); n != 2 {
+		t.Fatalf("got %d SSH logins after Check, want 2", n)
 	}
 }
 
@@ -272,7 +281,7 @@ func TestWaitCanStillWakeWhileAProbeIsRunning(t *testing.T) {
 	}
 }
 
-func TestHubReachableStripsEndpointCredentials(t *testing.T) {
+func TestHubProbeStripsEndpointCredentials(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != healthPath {
 			w.WriteHeader(http.StatusNotFound)
@@ -288,21 +297,25 @@ func TestHubReachableStripsEndpointCredentials(t *testing.T) {
 	t.Cleanup(srv.Close)
 	endpoint := strings.Replace(srv.URL, "https://", "https://user:pass@", 1)
 	c := &Config{FP: pinOf(srv), Proxy: ProxyOff, Endpoints: []Endpoint{{URL: endpoint}}}
-	if !hubReachable(t.Context(), c, "") {
+	if probe := hubProbe(c); probe == nil || !probe(t.Context()) {
 		t.Fatal("probe did not receive a successful unauthenticated health response")
 	}
 }
 
-func TestHubReachableThroughProxy(t *testing.T) {
+func TestHubProbeThroughProxy(t *testing.T) {
 	hub := newSSHTestHub(t, "/hub")
 	proxy := newConnectProxy(t, hub.target, nil)
 	c := &Config{FP: hub.pin, Proxy: proxy.url, Endpoints: []Endpoint{{URL: unroutable + "/hub"}}}
+	probe := hubProbe(c)
+	if probe == nil {
+		t.Fatal("no probe for the configured routes")
+	}
 	proxy.reset.Store(true) // CONNECT succeeds, but the hub's TLS handshake fails.
-	if hubReachable(t.Context(), c, "") {
+	if probe(t.Context()) {
 		t.Fatal("a proxy that resets the tunnel counted as reachable")
 	}
 	proxy.reset.Store(false)
-	if !hubReachable(t.Context(), c, "") {
+	if !probe(t.Context()) {
 		t.Fatal("hub health did not answer through the proxy")
 	}
 	if len(proxy.asked()) < 2 {
@@ -310,21 +323,14 @@ func TestHubReachableThroughProxy(t *testing.T) {
 	}
 }
 
-func TestHubReachableThroughSSH(t *testing.T) {
-	ssh := newSSHHarness(t)
-	hub := newSSHTestHub(t, "/hub")
-	c := &Config{FP: hub.pin, Endpoints: []Endpoint{{URL: hub.srv.URL + "/hub"}},
-		SSH: &SSH{Server: "hub.example.com", Target: hub.target, Always: true}}
-	ssh.setMode("target_unreachable")
-	if hubReachable(t.Context(), c, ssh.bin) {
-		t.Fatal("an SSH listener without a working forward counted as reachable, or Always allowed a direct probe")
+func TestHubProbeSkipsSSHOnlyRoutes(t *testing.T) {
+	c := &Config{SSH: &SSH{Server: "hub.example.com", Target: "127.0.0.1:443"}}
+	if hubProbe(c) != nil {
+		t.Fatal("an SSH-only configuration enabled a probe")
 	}
-	ssh.setMode("forward")
-	if !hubReachable(t.Context(), c, ssh.bin) {
-		t.Fatal("hub health did not answer through SSH")
-	}
-	c.FP = "different-pin"
-	if hubReachable(t.Context(), c, ssh.bin) {
-		t.Fatal("probe accepted a different hub key through SSH")
+	c.SSH.Always = true
+	c.Endpoints = []Endpoint{{URL: "https://hub.example.com"}}
+	if hubProbe(c) != nil {
+		t.Fatal("Always use SSH enabled a probe despite requiring the SSH route")
 	}
 }

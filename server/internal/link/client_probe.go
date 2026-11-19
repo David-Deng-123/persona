@@ -43,58 +43,38 @@ func probeRecovery(ctx context.Context, reach func(context.Context) bool) <-chan
 	return recovered
 }
 
-// hubReachable races all eligible routes within one probe interval. Reachability is shared across routes: a hub
-// answering through any of them is already reachable, and any of them can bring a hub back into reach.
-func hubReachable(ctx context.Context, c *Config, sshBin string) bool {
-	ctx, cancel := context.WithTimeout(ctx, probeEvery)
-	defer cancel()
-	p, proxiedEndpoints, _ := proxied(c)
-	var probes []func() bool
-	addEndpoints := func(eps []Endpoint, proxy *url.URL) {
-		for _, ep := range eps {
-			probes = append(probes, func() bool {
-				return hubHealthy(ctx, hubClient(c, proxy, nil), ep.URL)
-			})
-		}
+// hubProbe returns a check that races direct and outbound proxy routes within one probe interval. SSH logins
+// are reserved for full connection attempts. The check is nil when there are no candidates or SSH is required.
+func hubProbe(c *Config) func(context.Context) bool {
+	if len(c.Endpoints) == 0 || (c.SSH != nil && c.SSH.Always) {
+		return nil
 	}
-	for _, kind := range routeOrder(c, p != nil, "") {
-		switch kind {
-		case KindSSH:
-			probes = append(probes, func() bool { return sshHubHealthy(ctx, c, sshBin) })
-		case KindProxy:
-			addEndpoints(proxiedEndpoints, p)
-		default:
-			addEndpoints(ranked(c.Endpoints), nil)
-		}
-	}
-	results := make(chan bool, len(probes))
-	for _, probe := range probes {
-		go func() { results <- probe() }()
-	}
-	for range probes {
-		select {
-		case <-ctx.Done():
-			return false
-		case healthy := <-results:
-			if healthy {
-				return true
+	direct := ranked(c.Endpoints)
+	proxy, proxiedEndpoints, _ := proxied(c)
+	return func(ctx context.Context) bool {
+		ctx, cancel := context.WithTimeout(ctx, probeEvery)
+		defer cancel()
+		count := len(direct) + len(proxiedEndpoints)
+		results := make(chan bool, count)
+		start := func(eps []Endpoint, p *url.URL) {
+			for _, ep := range eps {
+				go func() { results <- hubHealthy(ctx, hubClient(c, p, nil), ep.URL) }()
 			}
 		}
-	}
-	return false
-}
-
-func sshHubHealthy(ctx context.Context, c *Config, sshBin string) bool {
-	cfg, err := NormalizeSSH(c.SSH.Server, c.SSH.Target, c.SSH.Always, c.Endpoints)
-	if err != nil || ctx.Err() != nil {
+		start(direct, nil)
+		start(proxiedEndpoints, proxy)
+		for range count {
+			select {
+			case <-ctx.Done():
+				return false
+			case healthy := <-results:
+				if healthy {
+					return true
+				}
+			}
+		}
 		return false
 	}
-	t, err := startSSHTunnel(sshBin, *cfg)
-	if err != nil {
-		return false
-	}
-	defer t.close()
-	return hubHealthy(ctx, tunnelClient(c, t), tunnelBaseURL(c, *cfg))
 }
 
 // hubHealthy asks for health through the same TLS and routing checks used by the WebSocket. The health request

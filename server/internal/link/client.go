@@ -400,8 +400,8 @@ func runActive(ctx context.Context, o Options, rep *reporter, b backoff) {
 		case websocket.CloseStatus(end) == CloseRevoked:
 			state, wait = "refused", refusedWait
 			end = newTextError("link-errors.credential_revoked", nil)
-		default:
-			reach = func(ctx context.Context) bool { return hubReachable(ctx, c, o.SSHBin) }
+		case wait > probeOver:
+			reach = hubProbe(c)
 		}
 		retry := time.Now().Add(wait)
 		o.Logf("link: %s; next attempt in %s", ErrorText(i18n.En, end), wait.Round(time.Second))
