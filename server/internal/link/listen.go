@@ -104,7 +104,7 @@ func runPassive(ctx context.Context, o Options, rep *reporter) {
 		c, err := Read(o.Path)
 		if err != nil {
 			rep.set(func(s *Status) { *s = Status{State: "waiting", Error: err.Error()} })
-			o.wait(ctx, b.next(), was)
+			o.wait(ctx, b.next(), was, nil)
 			continue
 		}
 		p := Passive{}
@@ -117,7 +117,7 @@ func runPassive(ctx context.Context, o Options, rep *reporter) {
 			rep.set(func(s *Status) {
 				*s = Status{State: "waiting", Listen: listen, Error: defaultText("link-errors.tls_identity", i18n.Args{"error": err})}
 			})
-			o.wait(ctx, b.next(), was)
+			o.wait(ctx, b.next(), was, nil)
 			continue
 		}
 		ln, err := osproc.Listen("tcp", listen)
@@ -129,7 +129,7 @@ func runPassive(ctx context.Context, o Options, rep *reporter) {
 				*s = Status{State: "waiting", Listen: listen, Machine: p.Machine, HubName: p.HubName, MachineName: p.MachineName, Retry: &retry,
 					Error: defaultText("link-errors.listen_failed", i18n.Args{"listen": listen, "error": describeListen(err)})}
 			})
-			o.wait(ctx, wait, was)
+			o.wait(ctx, wait, was, nil)
 			continue
 		}
 		b = backoff{}

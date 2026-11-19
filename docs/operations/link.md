@@ -242,6 +242,7 @@ Both sides ignore a message type they don't know.
 
 **Reconnect**
 - Exponential backoff: starts at 1 second, doubles up to 1 minute; randomized between half and full delay each time. After a link connected for a full minute disconnects, it starts over.
+- When a normal wait exceeds 3 seconds, Link checks the hub's unauthenticated `GET /api/v1/health` at the start and, if no route answers, every 2 seconds. It races eligible direct addresses, outbound proxy targets and the SSH forward with the same TLS verification as the link. A 2xx response with `"ok": true` on any route ends the wait early if no route answered at the start. Credential, replacement and rate-limit waits skip these probes.
 - Special cases:
 
   | Case | Wait |

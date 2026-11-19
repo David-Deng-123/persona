@@ -59,8 +59,9 @@ const (
 var errPairedAgain = errors.New("paired again meanwhile")
 
 var (
-	errPin    = newTextError("link-errors.pin_mismatch", nil)
-	errRedial = newTextError("link-errors.manual_reconnect", nil)
+	errPin               = newTextError("link-errors.pin_mismatch", nil)
+	errRedial            = newTextError("link-errors.manual_reconnect", nil)
+	errCredentialRefused = errors.New("hub refused the link credential")
 	// errRepaired: link.json was paired again while the link was up; it reconnects at once with the new pairing.
 	errRepaired = newTextError("link-errors.repaired", nil)
 	// errDirectReady: while connected over SSH without Always, a direct WebSocket connected and passed validation;
@@ -159,6 +160,10 @@ type httpError struct {
 
 func (e *httpError) Error() string { return "HTTP " + strconv.Itoa(e.status) }
 
+func (e *httpError) Is(target error) bool {
+	return target == errCredentialRefused && (e.status == http.StatusUnauthorized || e.status == http.StatusForbidden)
+}
+
 func handshakeError(resp *http.Response, err error) error {
 	if resp == nil || resp.StatusCode == http.StatusSwitchingProtocols {
 		return err
@@ -234,7 +239,7 @@ func Run(ctx context.Context, o Options) error {
 		if mode == ModePassive {
 			runPassive(mctx, o, rep)
 		} else {
-			runActive(mctx, o, rep)
+			runActive(mctx, o, rep, backoff{})
 		}
 		cancel()
 		if ctx.Err() == nil {
@@ -282,10 +287,9 @@ func watchMode(ctx context.Context, path, mode string, cancel context.CancelFunc
 	}
 }
 
-// runActive keeps the link to the hub up until ctx ends.
-func runActive(ctx context.Context, o Options, rep *reporter) {
+// runActive keeps the link to the hub up until ctx ends, starting with backoff b.
+func runActive(ctx context.Context, o Options, rep *reporter, b backoff) {
 	rep.switchTo(ModeActive)
-	var b backoff
 	// last is the kind of the link that worked last: a proxy or SSH route goes first next time (routeOrder). A new
 	// credential, tunnel or proxy setting starts over from direct.
 	var last, lastToken, lastProxy string
@@ -300,7 +304,7 @@ func runActive(ctx context.Context, o Options, rep *reporter) {
 			} else {
 				rep.set(func(s *Status) { *s = Status{State: "waiting", Error: err.Error()} })
 			}
-			o.wait(ctx, time.Hour, was)
+			o.wait(ctx, time.Hour, was, nil)
 			continue
 		}
 		if c.Token != lastToken || !c.SSH.Equal(lastSSHConfig) || c.Proxy != lastProxy {
@@ -355,6 +359,7 @@ func runActive(ctx context.Context, o Options, rep *reporter) {
 			return
 		}
 		wait := b.next()
+		var reach func(context.Context) bool
 		var he *httpError
 		switch {
 		case errors.Is(end, errDirectReady):
@@ -362,7 +367,7 @@ func runActive(ctx context.Context, o Options, rep *reporter) {
 			b, wait = backoff{}, 0
 		case errors.Is(end, errRedial), errors.Is(end, errRepaired):
 			b, wait = backoff{}, 0
-		case errors.As(end, &he) && (he.status == http.StatusUnauthorized || he.status == http.StatusForbidden):
+		case errors.Is(end, errCredentialRefused):
 			state, wait = "refused", refusedWait
 			end = newTextError("link-errors.credential_refused", nil)
 		case errors.As(end, &he) && he.status == http.StatusTooManyRequests:
@@ -373,6 +378,8 @@ func runActive(ctx context.Context, o Options, rep *reporter) {
 		case websocket.CloseStatus(end) == CloseRevoked:
 			state, wait = "refused", refusedWait
 			end = newTextError("link-errors.credential_revoked", nil)
+		default:
+			reach = func(ctx context.Context) bool { return hubReachable(ctx, c, o.SSHBin) }
 		}
 		retry := time.Now().Add(wait)
 		o.Logf("link: %s; next attempt in %s", ErrorText(i18n.En, end), wait.Round(time.Second))
@@ -380,7 +387,7 @@ func runActive(ctx context.Context, o Options, rep *reporter) {
 			*s = Status{State: state, Machine: c.Machine, HubName: c.HubName, MachineName: c.MachineName, Error: summary(end),
 				SSHError: sshStatusOf(end), Retry: &retry, Trust: trustOf(c), Endpoints: ranked(c.Endpoints), SSH: cloneSSH(c.SSH)}
 		})
-		o.wait(ctx, wait, was)
+		o.wait(ctx, wait, was, reach)
 	}
 }
 
@@ -400,9 +407,7 @@ func dialActive(ctx context.Context, c *Config, sshBin string, last string) (*li
 		}
 		return dial(ctx, c)
 	}, func(err error) bool {
-		var he *httpError
-		return ctx.Err() != nil || (c.FP != "" && errors.As(err, &he) &&
-			(he.status == http.StatusUnauthorized || he.status == http.StatusForbidden))
+		return ctx.Err() != nil || (c.FP != "" && errors.Is(err, errCredentialRefused))
 	})
 }
 
@@ -449,12 +454,19 @@ func tryRoutes[T any](order []string, try func(kind string) (T, error), stop fun
 
 // wait sleeps up to d, less if the network changed, a reconnect was asked for or link.json changed (paired again,
 // an address added) since was: the stamp (stampOf) from when the attempt read it, so a change that landed during the
-// attempt (a new credential written while the hub refused the old one) ends the wait at its first poll.
-func (o Options) wait(ctx context.Context, d time.Duration, was time.Time) {
+// attempt (a new credential written while the hub refused the old one) ends the wait at its first poll. With reach
+// set, a long wait also ends when the hub goes from unreachable at the start of the wait to reachable.
+func (o Options) wait(ctx context.Context, d time.Duration, was time.Time, reach func(context.Context) bool) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
-	poll := time.NewTicker(cmp.Or(o.PairCheck, 2*time.Second))
+	poll := time.NewTicker(cmp.Or(o.PairCheck, pairCheck))
 	defer poll.Stop()
+	var recovered <-chan struct{}
+	if reach != nil && d > probeOver {
+		probeCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		recovered = probeRecovery(probeCtx, reach)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -464,6 +476,9 @@ func (o Options) wait(ctx context.Context, d time.Duration, was time.Time) {
 		case <-o.Check:
 			return
 		case <-o.Redial:
+			return
+		case <-recovered:
+			o.Logf("link: the hub answers again; trying now")
 			return
 		case <-poll.C:
 			if !stampOf(o.Path).Equal(was) {
