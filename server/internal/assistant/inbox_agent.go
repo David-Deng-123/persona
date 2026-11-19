@@ -123,8 +123,8 @@ type InboxAgent struct {
 	// savingRetry keeps workers off an explicit retry until its row is committed.
 	savingRetry bool
 	// told counts the notes queued into Pending (in memory only): a message made of Pending carried those queued up
-	// to its count, and the ones queued since are the newest. Pending is trimmed to the latest 20, so its length
-	// cannot tell how many came since.
+	// to its count, and the ones queued since are the newest. Pending is bounded, so its length cannot tell how
+	// many came since.
 	told int
 	// signaled is the item's message count when an inbox signal to the linked task's supervisor last counted it
 	// (in memory only, supervise_inbox.go): the next one counts the messages since that count.
@@ -134,11 +134,15 @@ type InboxAgent struct {
 	signaledOf string
 }
 
-// queueNote adds a note to Pending, kept to the latest 20.
+// queueNote adds a note to Pending, keeping 20 places for ordinary notes plus one for a recent retry instruction.
 func (a *InboxAgent) queueNote(n inboxNote) {
 	a.Pending = append(a.Pending, n)
 	if len(a.Pending) > 20 {
-		a.Pending = a.Pending[len(a.Pending)-20:]
+		start := len(a.Pending) - 20
+		if slices.ContainsFunc(a.Pending[start-1:], func(n inboxNote) bool { return n.Retry }) {
+			start--
+		}
+		a.Pending = a.Pending[start:]
 	}
 	a.told++
 }

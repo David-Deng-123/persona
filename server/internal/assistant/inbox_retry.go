@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/nwverse/persona/server/internal/apierr"
@@ -65,6 +66,11 @@ func (s *Service) retryInboxHandling(ctx context.Context, id string) (InboxItem,
 	a := &InboxAgent{Task: it.Summary, Reason: it.Reason}
 	if it.Agent != nil {
 		*a = *it.Agent
+		a.Pending = slices.Clone(a.Pending)
+		// The explicit retry schedules delivery of every retained note, including held source notices.
+		for i := range a.Pending {
+			a.Pending[i].Deferred = false
+		}
 	}
 	reason := a.Error
 	if h := it.Handling; h != nil {
@@ -75,10 +81,11 @@ func (s *Service) retryInboxHandling(ctx context.Context, id string) (InboxItem,
 	}
 	// The superseded turn cannot write suggestions or finish an in-flight delivery against the new attempt.
 	a.ProcessingTurn = rand.Text()
-	a.Pending, a.Back, a.Wake, a.DeferredAt, a.WakeSlot = nil, "", false, nil, false
+	a.Back, a.Wake, a.DeferredAt, a.WakeSlot = "", false, nil, false
 	a.Attempts, a.RetryAfter, a.StartedAt, a.DraftedAt = 0, nil, &now, nil
 	a.savingRetry = true
 	it.Agent = a
+	// Of advances when escalation queues source messages. The pending notes above already carry those messages.
 	if a.SessionID != "" && a.Of != it.Last && it.Context != "" {
 		b.tell(it, inboxNote{Name: prompts.NoteNewMessages, Context: it.Context}, false, now)
 	}

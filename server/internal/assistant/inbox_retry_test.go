@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nwverse/persona/server/internal/assistantwire"
+	"github.com/nwverse/persona/server/internal/prompts"
 	"github.com/nwverse/persona/server/internal/proto"
 )
 
@@ -69,6 +70,66 @@ func TestInboxRetryReusesConversationOnce(t *testing.T) {
 	h.deliverPending(context.Background())
 	if sent := h.f.sentToAgents(); len(sent) != 1 || !strings.Contains(sent[0], "The previous attempt timed out") || inboxProcessingStarts(h) != starts {
 		t.Fatalf("retry did not wake the existing conversation once: %v", sent)
+	}
+}
+
+func TestInboxRetryDeliversPendingNotes(t *testing.T) {
+	h, _, it := handledHub(t)
+	h.inbox.handing.Lock()
+	t.Cleanup(h.inbox.handing.Unlock)
+	ctx := context.Background()
+	cfg := InboxAgentConfig{Enabled: true}
+	now := time.Now()
+	const source = "The quote should include delivery"
+	const instruction = "Check delivery costs before drafting"
+	const first = "Use the original item number"
+	const readNotice = "已经在来源里看过这件事的最新消息"
+
+	h.inbox.mu.Lock()
+	h.inbox.tell(it, inboxNote{Name: prompts.NoteInstructed, Text: first}, true, now)
+	for range 16 {
+		h.inbox.tell(it, inboxNote{Name: prompts.NoteInstructed, Text: "Keep checking the quote"}, true, now)
+	}
+	it.Last, it.Context = "101", source
+	h.inbox.mu.Unlock()
+	h.saveWrites(ctx, h.inbox.escalate(now.Add(-time.Hour), now), "its escalation")
+	h.inbox.mu.Lock()
+	h.inbox.tell(it, inboxNote{Name: prompts.NoteInstructed, Text: instruction}, true, now)
+	h.inbox.mu.Unlock()
+
+	h.f.mu.Lock()
+	h.f.failSend = errors.New("delivery refused")
+	h.f.mu.Unlock()
+	h.deliverPending(ctx)
+	failedAt := now.Add(agentTimeout(cfg) + time.Second)
+	h.sweepInboxAgents(ctx, cfg, failedAt)
+	// A source read can join the deferred queue after handling has failed.
+	h.inbox.mu.Lock()
+	h.inbox.queueInboxWake(it, inboxNote{Name: prompts.NoteSelfRead}, false, failedAt)
+	h.inbox.mu.Unlock()
+	row := inboxAgentStoppedSnapshot(t, h, it)
+	if row.Handling.State != HandlingFailed || row.Agent.Of != row.Last || len(row.Agent.Pending) != 20 || len(h.f.sentToAgents()) != 0 {
+		t.Fatalf("failed delivery did not leave a full pending queue: %s, of=%q, last=%q, pending=%d", row.Handling.State, row.Agent.Of, row.Last, len(row.Agent.Pending))
+	}
+
+	h.f.mu.Lock()
+	h.f.failSend = nil
+	h.f.mu.Unlock()
+	starts := inboxProcessingStarts(h)
+	if code, out := retryInboxCall(t, h, it.ID); code != http.StatusOK {
+		t.Fatalf("retry: %d %v", code, out)
+	}
+	h.deliverPending(ctx)
+	h.deliverPending(ctx)
+	sent := h.f.sentToAgents()
+	row = inboxAgentStoppedSnapshot(t, h, it)
+	if len(sent) != 1 || row.Agent.SessionID != "s1" || len(row.Agent.Pending) != 0 || inboxProcessingStarts(h) != starts {
+		t.Fatalf("retry did not drain the existing conversation's queue once: session=%q, pending=%d, sends=%d", row.Agent.SessionID, len(row.Agent.Pending), len(sent))
+	}
+	for _, want := range []string{first, source, instruction, readNotice} {
+		if strings.Count(sent[0], want) != 1 {
+			t.Errorf("expected exactly one copy of %q in the retry delivery: %s", want, sent[0])
+		}
 	}
 }
 
