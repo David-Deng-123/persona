@@ -242,6 +242,7 @@ var rpcFailureKeys = map[string]string{
 	// an owner's message to an Agent with older messages held for it (devices held.go, #10661)
 	"held_ahead":    "rpc-errors.held_ahead",
 	"held_not_kept": "rpc-errors.held_not_kept",
+	"held_full":     "rpc-errors.held_full",
 	// the first message to a Codex opened with no first message (node/codex_waiting.go, #4961)
 	"codex_not_ready":          "rpc-errors.codex_not_ready",
 	"codex_first_text":         "rpc-errors.codex_first_text",
