@@ -83,6 +83,10 @@ func (n *Node) launcherModels(ctx context.Context, name, agentType string, refre
 		return n.liveRuntimeModels(ctx, h, runtimeName, refresh, res)
 	}
 	agent := n.launcherModelsAgent(ctx, name, agentType)
+	if agent == agyAgent && (assistantLauncherPurpose(ctx) || n.startKind(ctx) == agyAgent) {
+		// The companion is unavailable on this path. Its catalog must stay separate from the pane's cached list.
+		return proto.LauncherModels{Agent: agyAgent, Models: []proto.AgentModel{}}, nil
+	}
 	key := n.home + "\x00" + name + "\x00" + agent + "\x00" + n.executionFingerprint(name, modelExecution{})
 	launcherModelsCache.Lock()
 	at, ok := launcherModelsCache.at[key]

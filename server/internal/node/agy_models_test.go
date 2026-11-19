@@ -124,6 +124,38 @@ func TestAgyLauncherModelsDiscoveryAndRefresh(t *testing.T) {
 	}
 }
 
+func TestAgyLauncherModelsWithoutCompanion(t *testing.T) {
+	n, home := testNode(t)
+	catalog, calls := fakeAgyModels(t, home)
+	writeFile(t, catalog, "example-high\tExample High\n")
+
+	raw, err := nodeCall(t, n, "launchers.models", map[string]any{"name": agyAgent, "host": proto.EngineHerdr})
+	if err != nil || !strings.Contains(string(raw), "\"id\":\"example-high\"") {
+		t.Fatalf("local pane catalog = %s, %v", raw, err)
+	}
+	t.Setenv("AGY_FIXTURE_FAILURE", "Please sign in")
+	for _, tc := range []struct{ name, field, value string }{
+		{"assistant", "purpose", "assistant"},
+		{"terminal-less", "host", agyAgent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, refresh := range []bool{false, true} {
+				raw, err := nodeCall(t, n, "launchers.models", map[string]any{
+					"name": agyAgent, tc.field: tc.value, "refresh": refresh,
+				})
+				var got proto.LauncherModels
+				if err != nil || json.Unmarshal(raw, &got) != nil || got.Agent != agyAgent || got.Models == nil || len(got.Models) != 0 {
+					t.Fatalf("catalog with refresh=%v = %s, %v", refresh, raw, err)
+				}
+			}
+		})
+	}
+	got, err := os.ReadFile(calls)
+	if err != nil || string(got) != "models\n" {
+		t.Fatalf("agy calls = %q, %v", got, err)
+	}
+}
+
 func TestAgyLauncherModelsUsesConfiguredLauncher(t *testing.T) {
 	n, home := testNode(t)
 	catalog, calls := fakeAgyModels(t, home)
