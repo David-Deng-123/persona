@@ -179,7 +179,7 @@ func (d *Devices) heldLoad(ctx context.Context) bool {
 	settled := func() (bool, bool) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		return h.loaded, h.loaded || !h.failed.IsZero() && time.Since(h.failed) < heldLoadBackoff
+		return h.loaded, h.loaded || !h.failed.IsZero() && h.clock().Sub(h.failed) < heldLoadBackoff
 	}
 	if loaded, done := settled(); done {
 		return loaded
@@ -196,7 +196,7 @@ func (d *Devices) heldLoad(ctx context.Context) bool {
 	fail := func(err error) bool {
 		d.logf("held messages: %v", err)
 		h.mu.Lock()
-		h.failed = time.Now()
+		h.failed = h.clock()
 		h.mu.Unlock()
 		return false
 	}

@@ -509,6 +509,37 @@ func heldDevicesAt(t *testing.T, st *heldMem, tick time.Duration, now func() tim
 	return d, pub
 }
 
+// heldIdle waits until no delivery of d's held messages runs: a wake marks each session it starts on before it
+// returns, and the delivery clears that mark as it stops, so what the wakes before this started has acted by then.
+func heldIdle(t *testing.T, d *Devices) {
+	t.Helper()
+	eventually(t, 5*time.Second, "the held deliveries done", func() bool {
+		d.held.mu.Lock()
+		defer d.held.mu.Unlock()
+		return len(d.held.sending) == 0
+	})
+}
+
+// heldTicks does what the held loop does on each tick, times over, and waits until what they started has acted.
+func heldTicks(t *testing.T, d *Devices, times int) {
+	t.Helper()
+	ctx := context.Background()
+	for range times {
+		d.heldRepair(ctx)
+		d.heldExpire(ctx)
+		d.held.mu.Lock()
+		var machines []string
+		for machine := range d.held.rows {
+			machines = append(machines, machine)
+		}
+		d.held.mu.Unlock()
+		for _, machine := range machines {
+			d.heldWake(machine)
+		}
+		heldIdle(t, d)
+	}
+}
+
 type published struct {
 	mu sync.Mutex
 	n  map[string]int
@@ -686,7 +717,7 @@ func TestHeldMessagesGoWhenTheComputerIsBack(t *testing.T) {
 
 	// Each once: another wake sends nothing again.
 	d.heldWake("mac")
-	time.Sleep(100 * time.Millisecond)
+	heldIdle(t, d)
 	if len(n.sent()) != 3 {
 		t.Fatalf("sent again: %v", n.sent())
 	}
@@ -739,7 +770,7 @@ func TestHeldUnclearIsNotSentAgain(t *testing.T) {
 	if held := heldAnswerOf(t, out, err); held.Error != "Waits behind the message above" {
 		t.Fatalf("c: %+v", held)
 	}
-	time.Sleep(300 * time.Millisecond)
+	heldTicks(t, d, 3)
 	if got := n.sent(); !slices.Equal(got, []string{"a"}) {
 		t.Fatalf("sent %v", got)
 	}
@@ -931,7 +962,7 @@ func TestHeldAcrossARestart(t *testing.T) {
 	}
 	close(up)
 	eventually(t, 5*time.Second, "x sent", func() bool { return slices.Equal(n.sent(), []string{"x"}) })
-	time.Sleep(200 * time.Millisecond)
+	heldTicks(t, d, 2)
 	if got := n.sent(); !slices.Equal(got, []string{"x"}) || len(st.all()) != 2 {
 		t.Fatalf("sent %v, %d left", got, len(st.all()))
 	}
@@ -1041,6 +1072,9 @@ func TestHeldNeedsTheStore(t *testing.T) {
 	st.setFail(errors.New("database down"))
 	d := newTestDevices(t)
 	d.opts.Store = st
+	var mu sync.Mutex
+	now := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	d.held.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	offlineMachine(d, "mac", "Studio Mac")
 	ctx := context.Background()
 	var re *rpc.Error
@@ -1056,7 +1090,15 @@ func TestHeldNeedsTheStore(t *testing.T) {
 		t.Fatalf("the store was asked %d times within its back-off", n)
 	}
 	st.setFail(nil)
-	time.Sleep(heldLoadBackoff)
+	mu.Lock()
+	now = now.Add(heldLoadBackoff - time.Millisecond) // still within the back-off: the store is not asked
+	mu.Unlock()
+	if _, err := d.Call(ctx, heldSend("mac", "s1", "a", "a")); !errors.As(err, &re) || re.Code != devicewire.CodeMachineOffline || st.loadCount() != 1 {
+		t.Fatalf("within the back-off: %v, %d loads", err, st.loadCount())
+	}
+	mu.Lock()
+	now = now.Add(time.Millisecond)
+	mu.Unlock()
 	out, err := d.Call(ctx, heldSend("mac", "s1", "a", "a"))
 	if held := heldAnswerOf(t, out, err); held.ID != "a" || len(st.all()) != 1 || st.loadCount() != 2 {
 		t.Fatalf("held %+v, %d stored, %d loads", held, len(st.all()), st.loadCount())
@@ -1079,8 +1121,7 @@ func TestHeldWaitsForItsSessionToBeListed(t *testing.T) {
 		defer m.mu.Unlock()
 		return m.peer != nil && m.sessionsListed
 	})
-	d.heldWake("mac")                  // what a tick does
-	time.Sleep(300 * time.Millisecond) // and the connection's wake
+	heldTicks(t, d, 2)
 	if got := n.sent(); len(got) != 0 {
 		t.Fatalf("sent before its session was listed: %v", got)
 	}
@@ -1089,7 +1130,7 @@ func TestHeldWaitsForItsSessionToBeListed(t *testing.T) {
 	}
 	n.list("s1", "s2")
 	eventually(t, 5*time.Second, "a sent", func() bool { return len(st.all()) == 0 })
-	time.Sleep(200 * time.Millisecond)
+	heldTicks(t, d, 1)
 	if got := n.sent(); !slices.Equal(got, []string{"a"}) {
 		t.Fatalf("sent %v", got)
 	}
@@ -1220,8 +1261,7 @@ func TestHeldLandedUnclearIsTakenAsSent(t *testing.T) {
 	laterMachine(t, d, "mac", "Studio Mac", n, up)
 	close(up)
 	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 0 })
-	d.heldWake("mac")
-	time.Sleep(100 * time.Millisecond)
+	heldTicks(t, d, 1)
 	if got, reads := n.sent(), n.itemReads(); !slices.Equal(got, []string{"b"}) || reads != 1 {
 		t.Fatalf("sent %v, %d reads", got, reads)
 	}
@@ -1234,13 +1274,13 @@ func TestHeldUnclearNotLandedStays(t *testing.T) {
 	at := time.Now().Add(-time.Hour)
 	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
 	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
-	d, _ := heldDevices(t, st, 20*time.Millisecond)
+	d, _ := heldDevices(t, st, time.Hour) // its ticks driven below
 	n := &heldNode{items: map[string][]proto.Item{"s1": {{Role: "user", Text: "a"}, {Role: "user", Text: "x", ClientMsgID: "x"}}}}
 	up := make(chan struct{})
 	laterMachine(t, d, "mac", "Studio Mac", n, up)
 	close(up)
 	eventually(t, 5*time.Second, "the transcript read", func() bool { return n.itemReads() == 1 })
-	time.Sleep(300 * time.Millisecond) // many ticks
+	heldTicks(t, d, 5)
 	if got, reads := n.sent(), n.itemReads(); len(got) != 0 || reads != 1 {
 		t.Fatalf("sent %v, %d reads", got, reads)
 	}
@@ -1282,7 +1322,7 @@ func TestHeldRetryInFlightHoldsLaterOnes(t *testing.T) {
 		return !listed.IsZero()
 	})
 	d.heldWake("mac")
-	time.Sleep(200 * time.Millisecond)
+	heldIdle(t, d)
 	if got := n.sent(); len(got) != 0 {
 		t.Fatalf("sent %v while a's Retry was written", got)
 	}
@@ -1341,7 +1381,7 @@ func TestHeldExpiredIsNotSent(t *testing.T) {
 	close(up)
 	eventually(t, 5*time.Second, "listed", func() bool { listed, _ := m.heldOn("s1"); return !listed.IsZero() })
 	d.heldWake("mac")
-	time.Sleep(200 * time.Millisecond)
+	heldIdle(t, d)
 	if got := n.sent(); len(got) != 0 {
 		t.Fatalf("sent %v", got)
 	}
@@ -1463,7 +1503,7 @@ func TestHeldExpiryLetsTheNextOneGo(t *testing.T) {
 	close(up)
 	eventually(t, 5*time.Second, "listed", func() bool { listed, _ := d.machineByID("mac").heldOn("s1"); return !listed.IsZero() })
 	d.heldWake("mac")
-	time.Sleep(100 * time.Millisecond)
+	heldIdle(t, d)
 	if got := n.sent(); len(got) != 0 {
 		t.Fatalf("sent %v behind an expired one", got)
 	}
@@ -1588,7 +1628,7 @@ func TestHeldUnwrittenOutcomeIsRepaired(t *testing.T) {
 		return len(l) == 2 && l[0].Error == "Not sent: a draft is in the way"
 	})
 	d.heldWake("mac")
-	time.Sleep(100 * time.Millisecond)
+	heldIdle(t, d)
 	if got := n.sent(); !slices.Equal(got, []string{"a"}) || st.all()[0].State != db.HeldSending {
 		t.Fatalf("before the repair: sent %v, stored %+v", got, st.all())
 	}
@@ -1666,7 +1706,8 @@ func TestHeldFailedRetryLetsTheNextOneGo(t *testing.T) {
 	<-retrying
 	close(up)
 	eventually(t, 5*time.Second, "connected", func() bool { listed, _ := d.machineByID("mac").heldOn("s1"); return !listed.IsZero() })
-	time.Sleep(100 * time.Millisecond)
+	d.heldWake("mac")
+	heldIdle(t, d)
 	if got := n.sent(); len(got) != 0 {
 		t.Fatalf("sent %v while a was being retried", got)
 	}
@@ -1697,7 +1738,7 @@ func TestHeldLandedThoughRetriedElsewhereIsNotSentAgain(t *testing.T) {
 	laterMachine(t, d, "mac", "Studio Mac", n, up)
 	close(up)
 	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 0 })
-	time.Sleep(100 * time.Millisecond)
+	heldTicks(t, d, 1)
 	if got := n.sent(); !slices.Equal(got, []string{"b"}) {
 		t.Fatalf("sent %v", got)
 	}
@@ -2023,10 +2064,10 @@ func retryAway(t *testing.T, items []proto.Item) (*Devices, *heldMem, *heldNode,
 // The owner's Retry of a message that may have arrived looks for it before it goes: in the transcript, it is not
 // sent again (the Retry is done), and the next one goes.
 func TestHeldRetriedUnclearInTheTranscriptIsNotSentAgain(t *testing.T) {
-	_, st, n, up := retryAway(t, []proto.Item{{Role: "user", Text: "a", ClientMsgID: "a"}})
+	d, st, n, up := retryAway(t, []proto.Item{{Role: "user", Text: "a", ClientMsgID: "a"}})
 	close(up)
 	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 0 })
-	time.Sleep(100 * time.Millisecond)
+	heldTicks(t, d, 1)
 	if got, reads := n.sent(), n.itemReads(); !slices.Equal(got, []string{"b"}) || reads != 1 {
 		t.Fatalf("sent %v, %d reads", got, reads)
 	}
@@ -2050,7 +2091,7 @@ func TestHeldRetriedUnclearUnreadIsNotSent(t *testing.T) {
 	n.mu.Unlock()
 	close(up)
 	eventually(t, 5*time.Second, "read once", func() bool { return n.itemReads() == 1 })
-	time.Sleep(100 * time.Millisecond)
+	heldIdle(t, d)
 	if got := n.sent(); len(got) != 0 || st.all()[0].State != db.HeldWaiting {
 		t.Fatalf("sent %v, stored %+v", got, st.all())
 	}
