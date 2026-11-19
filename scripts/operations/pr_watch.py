@@ -1002,6 +1002,14 @@ class Watcher:
             # The completed backoff permits a fresh independent attempt budget.
             old = self.state.put(repo, number, head, evidence_key=evidence_key,
                                  review_attempts=0, repair_attempts=0, retry_after=0)
+        if pr.get("isCrossRepository"):
+            # Skip review when another continuation already contains this head.
+            # A failed lookup raises so a later poll can retry it.
+            existing = pr_watch_repair.existing_continuation(repo, pr)
+            if existing:
+                self.record_continuation(repo, pr, evidence_key, existing, None,
+                                         repair_rounds=int(old.get("repair_rounds", 0)), format=FORMAT_VERSION)
+                return
         if (old.get("head") == head and old.get("evidence_key") == evidence_key
                 and old.get("outcome") == "retry" and old.get("retry_reason") == "failed_verification"):
             # The migration record is a failed verification, not a success to
