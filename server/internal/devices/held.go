@@ -46,13 +46,14 @@ type heldStore interface {
 	HeldOperationOf(ctx context.Context, kind, machine, session, opID string) (db.HeldOperation, bool, error)
 	HeldOperations(ctx context.Context, kind string) ([]db.HeldOperation, error)
 	RecoverHeldOperations(ctx context.Context, kind string) (int64, error)
-	ClaimHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
+	ClaimHeldOperation(ctx context.Context, seq int64, at time.Time) (db.HeldOperation, bool, error)
 	SettleHeldOperation(ctx context.Context, seq int64, from, state, failure, reason string) (bool, error)
 	SettleHeldTry(ctx context.Context, seq int64, attempts int, state, failure, reason string) (bool, error)
 	DeleteHeldTry(ctx context.Context, seq int64, attempts int) (bool, error)
-	RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
+	RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (ok, check bool, err error)
 	RenewHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error)
 	DeleteHeldOperation(ctx context.Context, seq int64, states ...string) (bool, error)
+	DeleteUnsureHeld(ctx context.Context, kind, machine, session, opID string) (bool, error)
 }
 
 // Vars so tests change them.
@@ -80,6 +81,13 @@ func heldTryOver(tried, now time.Time) bool { return now.Sub(tried) > heldSendTi
 // nothing was typed.
 const codeHeldNotKept = "held_not_kept"
 
+// heldPerSession bounds the messages held for one session (waiting or failed): a new one beyond it is refused
+// (codeHeldFull), nothing written. The owner's failed ones are never dropped to make room.
+const heldPerSession = 50
+
+// codeHeldFull: a message that would be held was refused, nothing typed: its session holds heldPerSession already.
+const codeHeldFull = "held_full"
+
 // codeHeldAhead: a message kept in order (NodeCall.Ordered) without Hold was refused, nothing typed, while older ones
 // of its session are held: it would have overtaken them.
 const codeHeldAhead = "held_ahead"
@@ -105,22 +113,20 @@ type heldRow struct {
 	stale, staleOwn bool
 }
 
+// newHeldRow is op as the manager keeps it: what its row shows, not its call (pictures up to heldMaxBytes), which is
+// read from the store when it goes.
 func newHeldRow(op db.HeldOperation) *heldRow {
-	r := &heldRow{HeldOperation: op}
-	var c struct {
-		Params struct {
-			Text   string            `json:"text"`
-			Images []json.RawMessage `json:"images"`
-		} `json:"params"`
-	}
-	if json.Unmarshal(op.Call, &c) == nil {
-		r.text, r.images = c.Params.Text, len(c.Params.Images)
-	}
+	r := &heldRow{HeldOperation: op, text: op.Text, images: op.Images}
+	r.Call = nil
 	return r
 }
 
 // unclear: a try of it may have arrived; the later ones of its session wait behind it.
 func (r *heldRow) unclear() bool { return r.State == db.HeldFailed && r.Failure == db.HeldUnclear }
+
+// checkFirst: the owner retried it after a try that may have arrived: the session's transcript is read before it goes,
+// and it does not go when it is there.
+func (r *heldRow) checkFirst() bool { return r.State == db.HeldWaiting && r.Failure == db.HeldUnclear }
 
 // expired: it has waited a whole day; heldExpire fails it, nothing sends it.
 func (r *heldRow) expired(now time.Time) bool { return now.Sub(r.HeldAt) >= heldExpiry }
@@ -138,8 +144,14 @@ type heldBook struct {
 	// gone: messages sent whose row the store kept (its delete failed), by seq, with the attempts of that try:
 	// heldRepair deletes them.
 	gone map[int64]int
-	now  func() time.Time // tests
+	// unsure: holds the store may have kept though neither its answer nor a look-up said so: the app was told they
+	// failed, so heldRepair drops them (untried, waiting) unless held here since.
+	unsure map[heldKey]bool
+	now    func() time.Time // tests
 }
+
+// heldKey names a held message: its machine, session and client_msg_id.
+type heldKey struct{ machine, session, id string }
 
 func (h *heldBook) clock() time.Time {
 	if h.now != nil {
@@ -205,7 +217,7 @@ func (d *Devices) heldLoad(ctx context.Context) bool {
 		rows[op.MachineID] = append(rows[op.MachineID], newHeldRow(op))
 	}
 	h.mu.Lock()
-	h.rows, h.sending, h.gone, h.loaded = rows, map[string]bool{}, map[int64]int{}, true
+	h.rows, h.sending, h.gone, h.unsure, h.loaded = rows, map[string]bool{}, map[int64]int{}, map[heldKey]bool{}, true
 	h.mu.Unlock()
 	for machine := range rows { // rows drawn before the load showed none
 		d.heldChanged(machine)
@@ -356,12 +368,25 @@ func (d *Devices) hold(ctx context.Context, c *heldCall) error {
 	if !d.heldLoad(ctx) {
 		return nil
 	}
+	h := &d.held
+	key := heldKey{c.machine, c.session, c.id}
+	h.mu.Lock()
+	n, known := 0, false
+	for _, r := range h.rows[c.machine] {
+		if r.SessionID == c.session {
+			n, known = n+1, known || r.OpID == c.id
+		}
+	}
+	h.mu.Unlock()
+	if !known && n >= heldPerSession {
+		d.logf("[%s] %s: a message not held: %d held there already", c.machine, c.session, n)
+		return &rpc.Error{Code: codeHeldFull, Message: i18n.T(c.lang, "devices-held.full"), Data: json.RawMessage(`{"delivered":"none"}`)}
+	}
 	raw, err := json.Marshal(c.call)
 	if err != nil || len(raw) > heldMaxBytes {
 		d.logf("[%s] %s: a message too large to hold (%d bytes)", c.machine, c.session, len(raw))
 		return nil
 	}
-	h := &d.held
 	now := h.clock().UTC()
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
@@ -374,6 +399,11 @@ func (d *Devices) hold(ctx context.Context, c *heldCall) error {
 		lctx, lcancel := heldStoreCtx(ctx)
 		kept, found, lerr := st.HeldOperationOf(lctx, db.HeldKindMessage, c.machine, c.session, c.id)
 		lcancel()
+		if lerr != nil { // it may be kept, and the app is told it failed: heldRepair drops it unless held since
+			h.mu.Lock()
+			h.unsure[key] = true
+			h.mu.Unlock()
+		}
 		if lerr != nil || !found {
 			d.logf("[%s] %s: a message could not be held: %v", c.machine, c.session, err)
 			return nil
@@ -382,12 +412,13 @@ func (d *Devices) hold(ctx context.Context, c *heldCall) error {
 		op, fresh = kept, true
 	}
 	h.mu.Lock()
+	delete(h.unsure, key) // held here now: not one to drop
 	rows := h.rows[op.MachineID]
 	i, found := slices.BinarySearchFunc(rows, op.Seq, func(r *heldRow, seq int64) int { return cmp.Compare(r.Seq, seq) })
 	if !found {
 		h.rows[op.MachineID] = slices.Insert(rows, i, newHeldRow(op))
 	}
-	n := len(h.rows[op.MachineID])
+	n = len(h.rows[op.MachineID])
 	h.mu.Unlock()
 	if fresh {
 		d.logf("[%s] %s: a message held until its computer is back (%d held there)", c.machine, c.session, n)
@@ -486,6 +517,8 @@ func (r *heldRow) wire(lang i18n.Lang, computer string, behind bool) proto.Undel
 		m.Error = i18n.T(lang, "devices-held.sending")
 	case behind:
 		m.Error = i18n.T(lang, "devices-held.behind")
+	case r.checkFirst():
+		m.Error = i18n.T(lang, "devices-held.check", i18n.Args{"name": computer})
 	default:
 		m.Error = i18n.T(lang, "devices-held.waiting", i18n.Args{"name": computer})
 	}
@@ -538,8 +571,8 @@ func (d *Devices) heldWake(machine string) {
 	}
 	type due struct {
 		session string
-		unclear bool
-		checked time.Time
+		head    heldHead
+		row     heldRow
 	}
 	var sessions []string
 	for _, r := range h.rows[machine] {
@@ -553,11 +586,8 @@ func (d *Devices) heldWake(machine string) {
 		if h.sending[machine+"/"+session] {
 			continue
 		}
-		switch r, head := h.headLocked(machine, session); {
-		case head == heldHeadSend && !r.expired(now):
-			dues = append(dues, due{session: session})
-		case head == heldHeadUnclear:
-			dues = append(dues, due{session: session, unclear: true, checked: r.checked})
+		if r, head := h.headLocked(machine, session); head != heldHeadNone {
+			dues = append(dues, due{session, head, *r})
 		}
 	}
 	h.mu.Unlock()
@@ -570,10 +600,7 @@ func (d *Devices) heldWake(machine string) {
 	}
 	dues = slices.DeleteFunc(dues, func(e due) bool { // not under h.mu
 		listed, ready := m.heldOn(e.session)
-		if e.unclear {
-			return listed.IsZero() || listed.Equal(e.checked)
-		}
-		return !ready
+		return heldActOn(&e.row, e.head, listed, ready, now) == heldDoNothing
 	})
 	var start []string
 	h.mu.Lock()
@@ -591,6 +618,40 @@ func (d *Devices) heldWake(machine string) {
 			d.heldSend(ctx, machine, session)
 		}()
 	}
+}
+
+// heldAction is what a session's held messages need now (heldActOn).
+type heldAction int
+
+const (
+	heldDoNothing heldAction = iota
+	heldDoSend               // send its head
+	heldDoCheck              // read the transcript for its head first
+)
+
+// heldActOn is what the session's head r (headLocked) needs now, given what its node offers (heldOn). One that may
+// have arrived has the transcript read on a connection that lists its session: failed (unclear), once per connection;
+// retried after that (checkFirst), before it goes, and it goes only when the read showed it is not there. An expired
+// one is left to heldExpire.
+func heldActOn(r *heldRow, head heldHead, listed time.Time, ready bool, now time.Time) heldAction {
+	switch {
+	case head == heldHeadUnclear:
+		if !listed.IsZero() && !listed.Equal(r.checked) {
+			return heldDoCheck
+		}
+	case head != heldHeadSend || r.expired(now):
+	case r.checkFirst():
+		switch {
+		case listed.IsZero():
+		case !listed.Equal(r.checked):
+			return heldDoCheck
+		default: // read on this connection, and not there
+			return heldDoSend
+		}
+	case ready:
+		return heldDoSend
+	}
+	return heldDoNothing
 }
 
 // heldOn is what m's node offers a held message to session now. listed: the start of the connection whose current
@@ -652,15 +713,11 @@ func (d *Devices) heldSend(ctx context.Context, machine, session string) {
 		now := h.clock()
 		h.mu.Lock()
 		r, head := h.headLocked(machine, session)
-		act := heldHeadNone
-		switch {
-		case ctx.Err() != nil:
-		case head == heldHeadSend && ready && !r.expired(now):
-			act = heldHeadSend
-		case head == heldHeadUnclear && !listed.IsZero() && !listed.Equal(r.checked):
-			act, r.checked = heldHeadUnclear, listed // read once on this connection, whatever comes of it
+		act := heldDoNothing
+		if ctx.Err() == nil && r != nil {
+			act = heldActOn(r, head, listed, ready, now)
 		}
-		if act == heldHeadNone {
+		if act == heldDoNothing {
 			delete(h.sending, key) // decided with the rows locked: what comes after this goes with the next wake
 			h.mu.Unlock()
 			if m != nil && head != heldHeadNone && ctx.Err() == nil {
@@ -670,18 +727,35 @@ func (d *Devices) heldSend(ctx context.Context, machine, session string) {
 			}
 			return
 		}
-		seq, id, call, lang := r.Seq, r.OpID, r.Call, r.Lang
-		if act == heldHeadUnclear {
+		seq, id, lang := r.Seq, r.OpID, r.Lang
+		if act == heldDoCheck {
+			retried := r.checkFirst()
+			r.busy = true // the owner's Retry or Delete meanwhile answers 409 rather than racing the read
+			if !retried {
+				r.checked = listed // a failed one: read once on this connection, whatever comes of it
+			}
 			h.mu.Unlock()
-			// Whatever it finds, the head is looked at again: arrived, the next ones go; not, it stays (read once on
-			// this connection) unless the owner retried or deleted it meanwhile, whose wake found this one running.
-			d.heldLanded(ctx, m, machine, session, seq, id)
-			continue
+			read := d.heldLanded(ctx, m, machine, session, seq, id)
+			h.mu.Lock()
+			if r := h.rowLocked(machine, seq); r != nil {
+				r.busy = false
+				if read {
+					r.checked = listed // read on this connection: a retried one not there goes now
+				}
+			}
+			if retried && !read { // not read: it does not go; the next wake reads again
+				delete(h.sending, key)
+				h.mu.Unlock()
+				d.heldChanged(machine)
+				return
+			}
+			h.mu.Unlock()
+			continue // the head is looked at again: arrived, the next ones go
 		}
 		r.State = db.HeldSending // from now on Delete answers that it is being sent
 		h.mu.Unlock()
 		sctx, cancel := heldStoreCtx(ctx)
-		claimed, err := st.ClaimHeldOperation(sctx, seq, now)
+		claim, claimed, err := st.ClaimHeldOperation(sctx, seq, now)
 		cancel()
 		if err != nil || !claimed {
 			// Not marked as being sent: it must not go. A store that has it otherwise is followed (heldSync): being
@@ -704,11 +778,11 @@ func (d *Devices) heldSend(ctx context.Context, machine, session string) {
 		}
 		h.mu.Lock()
 		if r := h.rowLocked(machine, seq); r != nil {
-			r.TriedAt, r.Attempts = now, r.Attempts+1
+			r.TriedAt, r.Attempts = claim.TriedAt, claim.Attempts // the store's: this try's name for its writes
 		}
 		h.mu.Unlock()
 		d.heldChanged(machine)
-		outcome, reason := d.heldDeliver(ctx, call, lang)
+		outcome, reason := d.heldDeliver(ctx, claim.Call, lang)
 		if !d.heldSettle(ctx, machine, session, seq, outcome, reason) {
 			h.mu.Lock()
 			delete(h.sending, key)
@@ -720,12 +794,12 @@ func (d *Devices) heldSend(ctx context.Context, machine, session string) {
 
 // heldLanded reads the session's latest turns for message id (seq), which may have arrived: a user line the node tied
 // to its client_msg_id there (the node ties a typed line to the message it typed by its words, node/echo.go
-// echoFits; nothing here compares words), it did arrive and leaves the rows as sent. Not there, or the turns not read:
-// it stays for the owner, and the later ones wait behind it. The store having it otherwise (gone, or a Retry took it
-// meanwhile): followed. Nothing is sent.
-func (d *Devices) heldLanded(ctx context.Context, m *Machine, machine, session string, seq int64, id string) {
+// echoFits; nothing here compares words), it did arrive and leaves the rows as sent, failed or retried. Not there: it
+// stays (a retried one goes then). read false: the turns could not be read. The store having it otherwise: followed.
+// Nothing is sent here; the caller marks the row busy meanwhile.
+func (d *Devices) heldLanded(ctx context.Context, m *Machine, machine, session string, seq int64, id string) (read bool) {
 	if m == nil {
-		return
+		return false
 	}
 	cctx, cancel := context.WithTimeout(ctx, heldCheckWait)
 	var res struct {
@@ -735,22 +809,23 @@ func (d *Devices) heldLanded(ctx context.Context, m *Machine, machine, session s
 	cancel()
 	if err != nil {
 		d.logf("[%s] %s: a held message that may have arrived: its transcript could not be read: %v", machine, session, err)
-		return
+		return false
 	}
 	if !slices.ContainsFunc(res.Items, func(it proto.Item) bool { return it.Role == "user" && it.ClientMsgID == id }) {
-		d.logf("[%s] %s: a held message that may have arrived is not in its transcript: left to the owner", machine, session)
-		return
+		d.logf("[%s] %s: a held message that may have arrived is not in its transcript", machine, session)
+		return true
 	}
 	sctx, scancel := heldStoreCtx(ctx)
 	defer scancel()
-	ok, err := d.heldStore().DeleteHeldOperation(sctx, seq, db.HeldFailed)
+	// Failed, or waiting after the owner's Retry: either way it is there, and never sent again.
+	ok, err := d.heldStore().DeleteHeldOperation(sctx, seq, db.HeldFailed, db.HeldWaiting)
 	if err != nil {
 		d.logf("[%s] %s: a held message that arrived stays: %v", machine, session, err)
-		return
+		return true
 	}
 	if !ok {
 		d.heldSync(ctx, machine, seq)
-		return
+		return true
 	}
 	h := &d.held
 	h.mu.Lock()
@@ -758,6 +833,7 @@ func (d *Devices) heldLanded(ctx context.Context, m *Machine, machine, session s
 	h.mu.Unlock()
 	d.logf("[%s] %s: a held message that may have arrived is in its transcript: taken as sent", machine, session)
 	d.heldChanged(machine)
+	return true
 }
 
 // heldTry is a held message's delivery, in its context (heldDeliveryKey): callNode notes whether it called the node
@@ -861,9 +937,9 @@ func (d *Devices) heldSettle(ctx context.Context, machine, session string, seq i
 	defer cancel()
 	defer d.heldChanged(machine)
 	h.mu.Lock()
-	attempts := 0 // the try this was (its writes touch only that try: never a newer claim)
+	attempts, check := 0, false // the try this was (its writes touch only that try: never a newer claim)
 	if r := h.rowLocked(machine, seq); r != nil {
-		attempts = r.Attempts
+		attempts, check = r.Attempts, r.Failure == db.HeldUnclear // retried after one that may have arrived
 	}
 	h.mu.Unlock()
 	if outcome == heldDelivered {
@@ -890,6 +966,9 @@ func (d *Devices) heldSettle(ctx context.Context, machine, session string, seq i
 	switch outcome {
 	case heldNotSent:
 		state, reason = db.HeldWaiting, ""
+		if check {
+			failure = db.HeldUnclear // still to be looked for before it goes
+		}
 	case heldRefused:
 		failure = db.HeldRefused
 	default:
@@ -1043,15 +1122,19 @@ func (d *Devices) heldRetry(ctx context.Context, machine, sid, msg string) (bool
 		return err != nil, err
 	}
 	now := h.clock()
-	held, wrote := true, false
+	held, wrote, check := true, false, false
 	if r.State != db.HeldWaiting { // a waiting one is only woken: nothing to write
-		held, wrote, err = d.heldRetryStore(ctx, r, now)
+		held, wrote, check, err = d.heldRetryStore(ctx, r, now)
 	}
 	h.mu.Lock()
 	if row := h.rowLocked(r.MachineID, r.Seq); row != nil {
 		row.busy = false
+		row.checked = time.Time{} // one that may have arrived is looked for again before it goes
 		if wrote {
 			row.State, row.Failure, row.Error, row.HeldAt, row.stale = db.HeldWaiting, "", "", now, false
+			if check {
+				row.Failure = db.HeldUnclear
+			}
 		}
 	}
 	h.mu.Unlock()
@@ -1072,34 +1155,35 @@ func (d *Devices) heldRetry(ctx context.Context, machine, sid, msg string) (bool
 }
 
 // heldRetryStore writes the owner's Retry of failed r. held false: the store no longer has it; wrote: it waits again
-// there. A store that has it otherwise is followed (heldMirror); one it has as being sent by a try that is over gets
-// that try written as unclear first, then the Retry, never over a newer try; else errHeldSendingNow.
-func (d *Devices) heldRetryStore(ctx context.Context, r *heldRow, now time.Time) (held, wrote bool, err error) {
+// there, check: to be looked for in the transcript before it goes (it may have arrived). A store that has it otherwise
+// is followed (heldMirror); one it has as being sent by a try that is over gets that try written as unclear first,
+// then the Retry, never over a newer try; else errHeldSendingNow.
+func (d *Devices) heldRetryStore(ctx context.Context, r *heldRow, now time.Time) (held, wrote, check bool, err error) {
 	st := d.heldStore()
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
-	ok, err := st.RetryHeldOperation(sctx, r.Seq, now)
+	ok, check, err := st.RetryHeldOperation(sctx, r.Seq, now)
 	if err != nil || ok {
-		return true, ok, err
+		return true, ok, check, err
 	}
 	held, stale, attempts, err := d.heldMirror(ctx, r) // only a failed one is retried
 	if err != nil || !stale {
-		return held, false, err
+		return held, false, false, err
 	}
 	settled, err := st.SettleHeldTry(sctx, r.Seq, attempts, db.HeldFailed, db.HeldUnclear, "")
 	if err == nil && settled {
-		if ok, err = st.RetryHeldOperation(sctx, r.Seq, now); err == nil && ok {
-			return true, true, nil
+		if ok, check, err = st.RetryHeldOperation(sctx, r.Seq, now); err == nil && ok {
+			return true, true, check, nil
 		}
 	}
 	if err != nil {
-		return true, false, err
+		return true, false, false, err
 	}
 	// The store changed meanwhile (a newer try, or another change): answered from what it has now.
 	if held, _, _, err = d.heldMirror(ctx, r); err == nil && held {
 		err = errHeldSendingNow
 	}
-	return held, false, err
+	return held, false, false, err
 }
 
 // heldDelete is the owner's Delete on a message that waits or failed; errHeldSendingNow while it is being sent.
@@ -1114,6 +1198,7 @@ func (d *Devices) heldDelete(ctx context.Context, machine, sid, msg string) (boo
 	}
 	sctx, cancel := heldStoreCtx(ctx)
 	defer cancel()
+	receipt := d.heldReceipt(sctx, r) // read while the row is there: its call is not kept here
 	gone, err := d.heldDeleteStore(ctx, sctx, r)
 	h.mu.Lock()
 	if err == nil && !gone {
@@ -1134,7 +1219,7 @@ func (d *Devices) heldDelete(ctx context.Context, machine, sid, msg string) (boo
 	}
 	h.dropLocked(r.MachineID, r.Seq)
 	h.mu.Unlock()
-	d.heldUnshare(sctx, r)
+	d.heldUnshare(sctx, r, receipt)
 	d.logf("[%s] %s: a held message deleted by the owner", r.MachineID, sid)
 	d.heldChanged(r.MachineID)
 	d.heldWake(r.MachineID) // the ones it held back go now
@@ -1241,8 +1326,8 @@ func (d *Devices) heldSync(ctx context.Context, machine string, seq int64) {
 	}
 }
 
-// heldRepair writes what was decided of the messages the store still has as being sent (stale), and deletes the
-// rows of ones sent whose delete failed: once no delivery of the session runs here and the try is over (at once for
+// heldRepair writes what was decided of the messages the store still has as being sent (stale), deletes the rows of
+// ones sent whose delete failed, and drops holds the store may have kept though the app was told they failed (unsure): once no delivery of the session runs here and the try is over (at once for
 // this manager's own). Each write touches only the try it was judged on, never a newer claim; a row the owner is
 // changing is left for later, and one being written is busy meanwhile (the owner's change answers 409). It never sends
 // anything.
@@ -1261,8 +1346,29 @@ func (d *Devices) heldRepair(ctx context.Context) {
 		}
 	}
 	maps.Copy(gone, h.gone)
+	var unsure []heldKey
+	for k := range h.unsure {
+		if slices.ContainsFunc(h.rows[k.machine], func(r *heldRow) bool { return r.SessionID == k.session && r.OpID == k.id }) {
+			delete(h.unsure, k) // held here since
+			continue
+		}
+		unsure = append(unsure, k)
+	}
 	h.mu.Unlock()
 	st := d.heldStore()
+	for _, k := range unsure {
+		sctx, cancel := heldStoreCtx(ctx)
+		ok, err := st.DeleteUnsureHeld(sctx, db.HeldKindMessage, k.machine, k.session, k.id)
+		cancel()
+		if err == nil { // dropped, or not there (never kept, or held since and tried)
+			h.mu.Lock()
+			delete(h.unsure, k)
+			h.mu.Unlock()
+			if ok {
+				d.logf("[%s] %s: a message the app was told failed, kept all the same, dropped", k.machine, k.session)
+			}
+		}
+	}
 	for seq, attempts := range gone {
 		sctx, cancel := heldStoreCtx(ctx)
 		_, err := st.DeleteHeldTry(sctx, seq, attempts)
@@ -1302,17 +1408,27 @@ func (d *Devices) heldRepair(ctx context.Context) {
 	}
 }
 
-// heldUnshare settles a deleted message's share receipt, which its hold left open, as never delivered.
-func (d *Devices) heldUnshare(ctx context.Context, r *heldRow) {
-	store := d.shareDB()
-	if store == nil {
-		return
+// heldReceipt is the share receipt r's call names (its submission, the machine it went to), read from the store; nil
+// when there is none or no share store.
+func (d *Devices) heldReceipt(ctx context.Context, r *heldRow) *devicewire.NodeCall {
+	if d.shareDB() == nil {
+		return nil
 	}
+	op, found, err := d.heldStore().HeldOperationOf(ctx, r.Kind, r.MachineID, r.SessionID, r.OpID)
 	var p devicewire.NodeCall
-	if json.Unmarshal(r.Call, &p) != nil || p.Submission == nil || p.Submission.ID == "" {
+	if err != nil || !found || json.Unmarshal(op.Call, &p) != nil || p.Submission == nil || p.Submission.ID == "" {
+		return nil
+	}
+	return &p
+}
+
+// heldUnshare settles a deleted message's share receipt, which its hold left open, as never delivered.
+func (d *Devices) heldUnshare(ctx context.Context, r *heldRow, receipt *devicewire.NodeCall) {
+	store := d.shareDB()
+	if store == nil || receipt == nil {
 		return
 	}
-	_ = store.SettleShareSubmission(ctx, p.Submission.ID, p.MachineID, r.SessionID, "failed")
+	_ = store.SettleShareSubmission(ctx, receipt.Submission.ID, receipt.MachineID, r.SessionID, "failed")
 }
 
 // heldRPCError is a Retry's or Delete's error for the assistant's routes: coded, in ctx's language.

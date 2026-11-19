@@ -30,9 +30,11 @@ const (
 )
 
 // HeldOperation is a row of held_operations: an operation the owner sent to a computer while it was away, held by its
-// manager. Call is the devicewire.NodeCall as the hub sent it, caller and submission included. SentAt is when the
-// owner sent it, HeldAt when it began to wait (a Retry starts it again), TriedAt when its latest try began (zero:
-// never tried).
+// manager. Call is the devicewire.NodeCall as the hub sent it, caller and submission included (HeldOperations leaves it
+// out: a held message's pictures are read only when it goes); Text and Images are what its row shows of it (its
+// params' text, how many pictures). SentAt is when the owner sent it, HeldAt when it began to wait (a Retry starts it
+// again), TriedAt when its latest try began (zero: never tried). A waiting one whose Failure is HeldUnclear was retried
+// by the owner after a try that may have arrived: its session's transcript is looked at before it goes.
 type HeldOperation struct {
 	Seq       int64
 	Kind      string
@@ -48,15 +50,21 @@ type HeldOperation struct {
 	HeldAt    time.Time
 	TriedAt   time.Time
 	Attempts  int
+	Text      string
+	Images    int
 }
 
-const heldColumns = `seq, kind, op_id, machine_id, session_id, call, lang, state, failure, error, sent_at, held_at, tried_at, attempts`
+// heldShown is what a row shows of its call, read in the database (a held message's pictures never leave it for that).
+const heldShown = `coalesce(call->'params'->>'text', ''),
+	CASE WHEN jsonb_typeof(call->'params'->'images') = 'array' THEN jsonb_array_length(call->'params'->'images') ELSE 0 END`
+
+const heldColumns = `seq, kind, op_id, machine_id, session_id, call, lang, state, failure, error, sent_at, held_at, tried_at, attempts, ` + heldShown
 
 func scanHeld(row pgx.Row) (HeldOperation, error) {
 	var o HeldOperation
 	var tried *time.Time
 	err := row.Scan(&o.Seq, &o.Kind, &o.OpID, &o.MachineID, &o.SessionID, &o.Call, &o.Lang, &o.State, &o.Failure, &o.Error,
-		&o.SentAt, &o.HeldAt, &tried, &o.Attempts)
+		&o.SentAt, &o.HeldAt, &tried, &o.Attempts, &o.Text, &o.Images)
 	if tried != nil {
 		o.TriedAt = *tried
 	}
@@ -99,9 +107,11 @@ func (d *DB) HeldOperationOf(ctx context.Context, kind, machine, session, opID s
 	return held, err == nil, err
 }
 
-// HeldOperations are every held operation of kind, in the order they were held.
+// HeldOperations are every held operation of kind, in the order they were held, without their Call (Text and Images
+// say what their rows show).
 func (d *DB) HeldOperations(ctx context.Context, kind string) ([]HeldOperation, error) {
-	rows, err := d.pool.Query(ctx, `SELECT `+heldColumns+` FROM held_operations WHERE kind = $1 ORDER BY seq`, kind)
+	rows, err := d.pool.Query(ctx, `SELECT seq, kind, op_id, machine_id, session_id, NULL::jsonb, lang, state, failure,
+		error, sent_at, held_at, tried_at, attempts, `+heldShown+` FROM held_operations WHERE kind = $1 ORDER BY seq`, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -116,12 +126,16 @@ func (d *DB) RecoverHeldOperations(ctx context.Context, kind string) (int64, err
 	return tag.RowsAffected(), err
 }
 
-// ClaimHeldOperation marks waiting operation seq as being sent from at, before its try: false when it is not waiting
-// (gone, or taken already), and then it must not be sent.
-func (d *DB) ClaimHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error) {
-	tag, err := d.pool.Exec(ctx, `UPDATE held_operations SET state = 'sending', tried_at = $2, attempts = attempts + 1
-		WHERE seq = $1 AND state = 'waiting'`, seq, at.UTC())
-	return tag.RowsAffected() == 1, err
+// ClaimHeldOperation marks waiting operation seq as being sent from at, before its try, and gives back the row as it
+// is now (its Call to send, the attempts that name this try): false when it is not waiting (gone, or taken already),
+// and then it must not be sent.
+func (d *DB) ClaimHeldOperation(ctx context.Context, seq int64, at time.Time) (HeldOperation, bool, error) {
+	held, err := scanHeld(d.pool.QueryRow(ctx, `UPDATE held_operations SET state = 'sending', tried_at = $2,
+		attempts = attempts + 1 WHERE seq = $1 AND state = 'waiting' RETURNING `+heldColumns, seq, at.UTC()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return HeldOperation{}, false, nil
+	}
+	return held, err == nil, err
 }
 
 // SettleHeldOperation moves operation seq from state from to state (with why it failed and the computer's words):
@@ -147,12 +161,27 @@ func (d *DB) DeleteHeldTry(ctx context.Context, seq int64, attempts int) (bool, 
 	return tag.RowsAffected() == 1, err
 }
 
-// RetryHeldOperation is the owner's Retry on failed operation seq: waiting again, a new wait from at. False when it is
-// not failed (gone, waiting, or being sent: another manager on the same database in a switch-over may be sending it,
-// and it must not be made to wait again and go twice).
-func (d *DB) RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (bool, error) {
-	tag, err := d.pool.Exec(ctx, `UPDATE held_operations SET state = 'waiting', failure = '', error = '', held_at = $2
-		WHERE seq = $1 AND state = 'failed'`, seq, at.UTC())
+// RetryHeldOperation is the owner's Retry on failed operation seq: waiting again, a new wait from at. One whose try
+// may have arrived (HeldUnclear) keeps that mark while it waits (check true): its transcript is looked at before it
+// goes, so it is never sent twice. ok false when it is not failed (gone, waiting, or being sent: another manager on
+// the same database in a switch-over may be sending it, and it must not be made to wait again and go twice).
+func (d *DB) RetryHeldOperation(ctx context.Context, seq int64, at time.Time) (ok, check bool, err error) {
+	var failure string
+	err = d.pool.QueryRow(ctx, `UPDATE held_operations SET state = 'waiting', error = '', held_at = $2,
+		failure = CASE WHEN failure = 'unclear' THEN 'unclear' ELSE '' END
+		WHERE seq = $1 AND state = 'failed' RETURNING failure`, seq, at.UTC()).Scan(&failure)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	return err == nil, failure == HeldUnclear, err
+}
+
+// DeleteUnsureHeld drops an operation of kind for machine, session and op id whose hold the manager could not confirm
+// (the insert's answer and the look-up after it both failed): only while it waits untried, so a hold confirmed since
+// (a retry of the same id) or a try begun is never touched. False when there is no such row.
+func (d *DB) DeleteUnsureHeld(ctx context.Context, kind, machine, session, opID string) (bool, error) {
+	tag, err := d.pool.Exec(ctx, `DELETE FROM held_operations WHERE kind = $1 AND machine_id = $2 AND session_id = $3
+		AND op_id = $4 AND state = 'waiting' AND attempts = 0`, kind, machine, session, opID)
 	return tag.RowsAffected() == 1, err
 }
 

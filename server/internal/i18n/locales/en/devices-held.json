@@ -2,7 +2,7 @@
   "waiting": "Will send when {name} is back",
   "behind": "Waits behind the message above",
   "sending": "Sending…",
-  "unclear": "May have arrived before the connection dropped. Check the chat, then retry or delete.",
+  "unclear": "Might not have arrived. Retry sends it only if the chat doesn't have it yet.",
   "refused": "Not sent: {reason}",
   "no_reason": "the computer didn't say why",
   "expired": "Not sent: {name} was away for 24 hours",
@@ -12,5 +12,7 @@
   "read_only": "This device can't change messages waiting to be sent.",
   "store_failed": "Couldn't change this message right now. Try again in a moment.",
   "not_prepared": "Persona couldn't get it ready to send",
-  "ahead": "Earlier messages to this Agent are still waiting to be sent. Send this one after them."
+  "ahead": "Earlier messages to this Agent are still waiting to be sent. Send this one after them.",
+  "check": "Will check and send when {name} is back",
+  "full": "Too many messages are waiting for this Agent. Delete some, or send this one when the computer is back."
 }
