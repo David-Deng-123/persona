@@ -106,7 +106,9 @@ func hubHealthy(ctx context.Context, client *http.Client, base string) bool {
 	if err != nil || req.URL.Scheme != "https" || req.URL.Host == "" {
 		return false
 	}
+	// net/http can derive Basic authentication from URL user info when it sends the request.
 	req.URL.User = nil
+	req.Header.Del("Authorization")
 	resp, err := client.Do(req)
 	if err != nil {
 		return false

@@ -245,6 +245,27 @@ func TestWaitCanStillWakeWhileAProbeIsRunning(t *testing.T) {
 	}
 }
 
+func TestHubReachableStripsEndpointCredentials(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != healthPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if len(r.Header.Values("Authorization")) != 0 {
+			t.Error("health probe sent an Authorization header")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	endpoint := strings.Replace(srv.URL, "https://", "https://user:pass@", 1)
+	c := &Config{FP: pinOf(srv), Proxy: ProxyOff, Endpoints: []Endpoint{{URL: endpoint}}}
+	if !hubReachable(t.Context(), c, "") {
+		t.Fatal("probe did not receive a successful unauthenticated health response")
+	}
+}
+
 func TestHubReachableThroughProxy(t *testing.T) {
 	hub := newSSHTestHub(t, "/hub")
 	proxy := newConnectProxy(t, hub.target, nil)
