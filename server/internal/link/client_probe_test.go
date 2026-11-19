@@ -117,7 +117,7 @@ func TestWaitKeepsItsDeadlineUnlessTheHubRecovers(t *testing.T) {
 				var probes int
 				o := Options{Logf: t.Logf}
 				start := time.Now()
-				o.wait(t.Context(), tc.wait, time.Time{}, func(context.Context) bool {
+				o.waitWithProbe(t.Context(), tc.wait, time.Time{}, func(context.Context) bool {
 					probes++
 					return tc.answer(probes)
 				})
@@ -213,7 +213,7 @@ func TestWaitCanStillWakeWhileAProbeIsRunning(t *testing.T) {
 				start := time.Now()
 				go func() {
 					defer close(done)
-					o.wait(ctx, time.Minute, stampOf(path), func(ctx context.Context) bool {
+					o.waitWithProbe(ctx, time.Minute, stampOf(path), func(ctx context.Context) bool {
 						close(started)
 						<-ctx.Done()
 						close(canceled)

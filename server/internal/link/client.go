@@ -228,6 +228,7 @@ func Run(ctx context.Context, o Options) error {
 	if o.Logf == nil {
 		o.Logf = func(string, ...any) {}
 	}
+	ctx = context.WithValue(ctx, diagnosticLogKey{}, o.Logf)
 	if o.PingEvery <= 0 || o.PingTimeout <= 0 {
 		o.PingEvery, o.PingTimeout = PingEvery, PingTimeout
 	}
@@ -304,7 +305,7 @@ func runActive(ctx context.Context, o Options, rep *reporter, b backoff) {
 			} else {
 				rep.set(func(s *Status) { *s = Status{State: "waiting", Error: err.Error()} })
 			}
-			o.wait(ctx, time.Hour, was, nil)
+			o.wait(ctx, time.Hour, was)
 			continue
 		}
 		if c.Token != lastToken || !c.SSH.Equal(lastSSHConfig) || c.Proxy != lastProxy {
@@ -387,7 +388,7 @@ func runActive(ctx context.Context, o Options, rep *reporter, b backoff) {
 			*s = Status{State: state, Machine: c.Machine, HubName: c.HubName, MachineName: c.MachineName, Error: summary(end),
 				SSHError: sshStatusOf(end), Retry: &retry, Trust: trustOf(c), Endpoints: ranked(c.Endpoints), SSH: cloneSSH(c.SSH)}
 		})
-		o.wait(ctx, wait, was, reach)
+		o.waitWithProbe(ctx, wait, was, reach)
 	}
 }
 
@@ -454,9 +455,20 @@ func tryRoutes[T any](order []string, try func(kind string) (T, error), stop fun
 
 // wait sleeps up to d, less if the network changed, a reconnect was asked for or link.json changed (paired again,
 // an address added) since was: the stamp (stampOf) from when the attempt read it, so a change that landed during the
-// attempt (a new credential written while the hub refused the old one) ends the wait at its first poll. With reach
-// set, a long wait also ends when the hub goes from unreachable at the start of the wait to reachable.
-func (o Options) wait(ctx context.Context, d time.Duration, was time.Time, reach func(context.Context) bool) {
+// attempt (a new credential written while the hub refused the old one) ends the wait at its first poll.
+func (o Options) wait(ctx context.Context, d time.Duration, was time.Time) {
+	o.waitWithProbe(ctx, d, was, nil)
+}
+
+// waitWithProbe also ends a long wait when reach reports that the hub has gone from unreachable at the start of
+// the wait to reachable. A nil reach leaves the wake conditions of wait in place.
+func (o Options) waitWithProbe(ctx context.Context, d time.Duration, was time.Time, reach func(context.Context) bool) {
+	start, reason := time.Now(), "timer"
+	defer func() {
+		if o.Logf != nil {
+			o.Logf("link: retry_wait planned_us=%d actual_us=%d wake=%s", max(d, 0).Microseconds(), time.Since(start).Microseconds(), reason)
+		}
+	}()
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	poll := time.NewTicker(cmp.Or(o.PairCheck, pairCheck))
@@ -470,18 +482,25 @@ func (o Options) wait(ctx context.Context, d time.Duration, was time.Time, reach
 	for {
 		select {
 		case <-ctx.Done():
+			reason = "canceled"
 			return
 		case <-timer.C:
 			return
 		case <-o.Check:
+			reason = "network_check"
 			return
 		case <-o.Redial:
+			reason = "redial"
 			return
 		case <-recovered:
-			o.Logf("link: the hub answers again; trying now")
+			reason = "hub_reachable"
+			if o.Logf != nil {
+				o.Logf("link: the hub answers again; trying now")
+			}
 			return
 		case <-poll.C:
 			if !stampOf(o.Path).Equal(was) {
+				reason = "config_changed"
 				return
 			}
 		}
