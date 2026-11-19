@@ -27,6 +27,9 @@ const (
 // relayMsgID is the once_id every try of message msg to conversation to goes under: made from the message, so
 // the same after the manager restarts and for messages queued before ids existed, and different for any other one.
 func relayMsgID(to string, msg relayMsg) string {
+	if msg.OnceID != "" {
+		return msg.OnceID
+	}
 	h := sha256.New()
 	for _, part := range []string{to, msg.From, msg.Tool, msg.State, msg.At.UTC().Format(time.RFC3339Nano), msg.Text} {
 		h.Write([]byte(part))
@@ -115,7 +118,7 @@ func (s *Service) lookForRelay(machine, to string, msg *relayMsg) bool {
 	if err != nil {
 		s.logf("relay to %s: transcript check failed: %v", short(to), err)
 	}
-	msg.Looks++
+	msg.Looks = min(msg.Looks+1, relayLookLimit)
 	msg.LookAfter = time.Now().UTC().Add(relayLookGap)
 	return false
 }
@@ -136,20 +139,16 @@ func (s *Service) tryDirectRelay(ctx context.Context, machine, to string, msg *r
 	return err
 }
 
-// tryQueuedRelay checks any earlier try before sending. A positive wait keeps the message queued for another drain.
-func (s *Service) tryQueuedRelay(ctx context.Context, machine, to string, msg relayMsg) (relayMsg, time.Duration, error) {
-	previous := msg
-	if !msg.TriedAt.IsZero() {
-		if s.lookForRelay(machine, to, &msg) {
-			return msg, 0, nil
-		}
-		if msg.Looks < relayLookLimit {
-			return msg, relayLookGap, nil
-		}
-		// A duplicate relay is less harmful than a lost one when there is no owner to ask. Retry under the same id.
-		s.logf("relay to %s: no match after %d transcript checks; trying again", short(to), msg.Looks)
-	} else {
+// tryQueuedRelay sends the queue head after reconciliation and updates head to its saved pre-send state.
+// A positive wait keeps the returned message queued for another drain.
+func (s *Service) tryQueuedRelay(ctx context.Context, machine, to string, head *relayMsg) (relayMsg, time.Duration, error) {
+	previous := *head
+	msg := previous
+	if msg.TriedAt.IsZero() {
 		msg.TriedAt = time.Now().UTC()
+	} else {
+		// A duplicate relay is less harmful than a lost one when there is no owner to ask. Retry under the same id.
+		s.logf("relay to %s: no match after %d transcript checks; trying again", short(to), relayLookLimit)
 	}
 	msg.Looks, msg.LookAfter = 0, time.Time{}
 
@@ -166,6 +165,7 @@ func (s *Service) tryQueuedRelay(ctx context.Context, machine, to string, msg re
 	if err != nil {
 		return previous, relayRetryGap, err
 	}
+	*head = msg
 	err = s.deliverRelay(ctx, machine, to, msg)
 	if !relayInDoubt(err) {
 		// A refusal does not add any doubt. Retain the earlier try's mark, if there was one.
