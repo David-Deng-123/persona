@@ -575,9 +575,22 @@ type echoCheck struct {
 	after    echoAfter
 }
 
-// checkEcho refreshes and matches the transcript for a specific send. A negative answer requires a complete read
-// from the original send's baseline and an attempt that was neither acknowledged nor still running.
+// checkEcho reads the evidence for a send and checks that its RPC attempt is no longer in flight.
 func (n *Node) checkEcho(ctx context.Context, id, clientMsgID string) echoCheck {
+	check := n.readEcho(ctx, id, clientMsgID)
+	if check.state == proto.EchoKnownUnseen {
+		previous, canRetry := n.sends.completed(clientMsgID)
+		if !canRetry {
+			return echoCheck{state: proto.EchoUnknown}
+		}
+		check.previous = previous
+	}
+	return check
+}
+
+// readEcho requires a live, idle agent and a complete transcript through a turn that ended after the send before
+// reporting absence. A queued prompt can be written only when the turn ends.
+func (n *Node) readEcho(ctx context.Context, id, clientMsgID string) echoCheck {
 	unknown := echoCheck{state: proto.EchoUnknown}
 	r, ok := n.echoes.record(id, clientMsgID)
 	if !ok || time.Since(r.SentAt) > echoKeep {
@@ -611,17 +624,37 @@ func (n *Node) checkEcho(ctx context.Context, id, clientMsgID string) echoCheck 
 	if _, terminalOnly := n.terminalOnly(id); terminalOnly {
 		return unknown
 	}
-	if a, live := n.agent(id); live && (a.Agent == cursorAgent || a.Agent == agyAgent) {
+	a, live := n.agent(id)
+	if !live || a.AgentStatus != proto.StatusIdle || a.Agent == cursorAgent || a.Agent == agyAgent {
 		return unknown
 	}
-	previous, canRetry := n.sends.completed(clientMsgID)
-	if !canRetry || current.Accepted || ctx.Err() != nil || !f.CoversAfter(end, r.History, r.AfterSeq) {
+	if current.Accepted || ctx.Err() != nil || !f.CoversClosedTurnAfter(end, r.History, r.AfterSeq, r.SentAt) {
 		return unknown
 	}
 	return echoCheck{
-		state: proto.EchoKnownUnseen, record: current, previous: previous,
+		state: proto.EchoKnownUnseen, record: current,
 		after: echoAfter{seq: end.To, in: echoInTranscript, history: end.History},
 	}
+}
+
+// sendUnseen checks the original attempt again after acquiring the input lock. Another send can start a turn while
+// this one waits for that lock.
+func (n *Node) sendUnseen(ctx context.Context, id, text string, images []proto.Image, opts sendOpts, previous echoRecord) error {
+	unlock, err := n.inputTurn(ctx, id)
+	if err != nil {
+		return echoUnconfirmed()
+	}
+	defer unlock()
+	check := n.readEcho(ctx, id, opts.ClientMsgID)
+	if check.state == proto.EchoSeen {
+		return nil
+	}
+	if check.state != proto.EchoKnownUnseen || !check.record.SentAt.Equal(previous.SentAt) {
+		return echoUnconfirmed()
+	}
+	return n.sendWithEcho(id, opts.ClientMsgID, text, len(images), check.after, &check.record, func() error {
+		return n.sendLocked(ctx, id, text, images, opts)
+	})
 }
 
 func echoUnconfirmed() error {

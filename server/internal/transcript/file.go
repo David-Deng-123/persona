@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/nwverse/persona/server/internal/proto"
 )
@@ -432,10 +433,15 @@ func (f *File) End() Span {
 	return Span{History: f.history(), To: f.lines}
 }
 
-// CoversAfter reports whether the checked end still covers every line after seq in history.
-func (f *File) CoversAfter(end Span, history string, seq int) bool {
+// CoversClosedTurnAfter reports whether the checked end still covers every line after seq in history and the latest
+// turn ended after the send. An open turn or a closing record on a discarded branch cannot establish that.
+func (f *File) CoversClosedTurnAfter(end Span, history string, seq int, sentAt time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !f.meta.TurnClosed || f.meta.turnEndSeq <= seq || !f.meta.turnEndedAt.After(sentAt) ||
+		f.tree != nil && f.tree.hidden[f.meta.turnEndLine] {
+		return false
+	}
 	if history == "" || history != end.History || end.History != f.history() || end.To != f.lines || f.base > seq || seq > f.lines || len(f.partial) != 0 {
 		return false
 	}

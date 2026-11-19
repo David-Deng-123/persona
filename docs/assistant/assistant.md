@@ -1433,8 +1433,9 @@ manager that connects the computer holds it and sends it once the computer is ba
   or Delete. Once per connection that lists the Agent, the manager checks whether the node saw a line tied to the
   message's `client_msg_id`. A match removes the message and lets the next ones go. Retry keeps the message waiting
   without expiring until the check can run (the Agent is listed again, or the node has been connected for two minutes).
-  If the node still has the record and can confirm it is unseen, the same Retry sends the message after a second
-  check on the node (#10790). With an unknown result or an older node, a matching ID in the latest turns still proves
+  If the Agent is idle and the node can confirm from the transcript that the message remained unseen through a turn
+  that ended after the send, the same Retry sends the message after a second check (#10790). With an unknown result
+  or an older node, a matching ID in the latest turns still proves
   arrival. Otherwise the owner sees "Couldn't confirm it arrived. Retry to send it anyway, or delete it", with the
   later messages still waiting. That next Retry sends as before. Three failed reads in a row also leave the message
   unconfirmed after Retry. During a check, another Retry returns a conflict and Delete is allowed. A node that refused it

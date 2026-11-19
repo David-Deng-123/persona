@@ -483,7 +483,11 @@ func (l *sentLog) onceReplacing(id string, previous *sendRecord, send func() err
 	if r.err != nil && !maybeDelivered(r.err) {
 		l.mu.Lock()
 		if l.sent[id] == r {
-			delete(l.sent, id)
+			if previous != nil && rpcCode(r.err) == proto.CodeEchoUnconfirmed {
+				l.sent[id] = previous // the recheck declined before replacing the ambiguous attempt
+			} else {
+				delete(l.sent, id)
+			}
 		}
 		l.mu.Unlock()
 	}

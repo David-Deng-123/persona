@@ -1587,14 +1587,13 @@ func (n *Node) handle(ctx context.Context, method string, params json.RawMessage
 		_ = json.Unmarshal(params, &opts)
 		var retry *echoRecord
 		var previous *sendRecord
-		var after echoAfter
 		if method == proto.MethodSessionSendUnseen {
 			check := n.checkEcho(ctx, p.SessionID, opts.ClientMsgID)
 			switch check.state {
 			case proto.EchoSeen:
 				return ok(nil)
 			case proto.EchoKnownUnseen:
-				retry, previous, after = &check.record, check.previous, check.after
+				retry, previous = &check.record, check.previous
 			default:
 				return nil, echoUnconfirmed()
 			}
@@ -1607,10 +1606,14 @@ func (n *Node) handle(ctx context.Context, method string, params json.RawMessage
 			ctx, owner = withOwnerDelivery(ctx) // ccplugin.go: which way the owner's message went in
 		}
 		err := n.sends.onceReplacing(opts.ClientMsgID, previous, func() error {
-			if retry == nil && opts.ClientMsgID != "" {
+			if retry != nil {
+				return n.sendUnseen(ctx, p.SessionID, p.Text, p.Images, opts, *retry)
+			}
+			var after echoAfter
+			if opts.ClientMsgID != "" {
 				after = n.echoBase(p.SessionID)
 			}
-			return n.sendWithEcho(p.SessionID, opts.ClientMsgID, p.Text, len(p.Images), after, retry, func() error { // echo.go
+			return n.sendEchoed(p.SessionID, opts.ClientMsgID, p.Text, len(p.Images), after, func() error { // echo.go
 				if n.isAssistantSession(p.SessionID) {
 					_, err := n.assistantSend(withSkillOwner(withClientMsgID(ctx, opts.ClientMsgID), p.SkillOwner), p.SessionID, "", p.Launcher, p.Text, p.Images, "", "", (modelExecution{PlanThen: p.PlanThen, Model: p.Model, Effort: p.Effort, UseEffort: p.ModelFingerprint != "", Fingerprint: p.ModelFingerprint, Runtime: n.externalRuntime(p.SessionID, p.Launcher, p.Runtime), External: p.External, IsMain: p.IsMain, MainCompactWindow: p.MainCompact, FollowsSetting: p.FollowsSetting, ConfigDir: p.ConfigDir, Interject: p.Interject}).withSupervision(p.SupervisionInstructions))
 					return err
