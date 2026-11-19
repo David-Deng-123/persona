@@ -557,6 +557,18 @@ final class AppModel {
         var machine: MachineRef
         var manager: String?
     }
+    /// Only the assistant settings that decide whose launcher catalog and effective default the picker shows. Volatile
+    /// conversation and preference fields are deliberately not part of this signature.
+    nonisolated struct AssistantLauncherSignature: Equatable, Sendable {
+        var group: String
+        var requestedManager: String?
+        var respondingManager: String?
+        var machineID: String
+        var launcher: String
+    }
+    nonisolated static let assistantLauncherRecheckInterval: TimeInterval = 10 * 60
+    @ObservationIgnored private var lastAssistantLauncherSignature: AssistantLauncherSignature?
+    @ObservationIgnored private var lastAssistantLauncherInvalidation: Date?
     @ObservationIgnored private(set) var assistantLauncherCache: [AssistantLauncherScope: APIClient.LaunchersResponse] = [:]
     @ObservationIgnored private var assistantLauncherReads: [AssistantLauncherScope: Int] = [:]
     @ObservationIgnored private var assistantLauncherReadID = 0
@@ -989,6 +1001,9 @@ final class AppModel {
         sessionLists.forget()
         pendingSessions = [:]
         interactions = [:]
+        // Pairing a real hub after Demo Mode must not reuse a same-scoped demo signature.
+        lastAssistantLauncherSignature = nil
+        lastAssistantLauncherInvalidation = nil
     }
 
     /// What the demo's conversations left behind: drafts, and cached chats (a new demo starts over).
@@ -1032,6 +1047,9 @@ final class AppModel {
         for g in Set(registry.groups).union(PushCrypto.allKeys().map(\.group)) { PushCrypto.removeKey(group: g) }
         links = []
         registry = HubRegistry()
+        // A later pairing's first snapshot must invalidate even when it has the same assistant scope.
+        lastAssistantLauncherSignature = nil
+        lastAssistantLauncherInvalidation = nil
         saveRegistry(registry)
         // The watch drops the credential it holds only when told (#1870): an empty push, as `removeGroup` sends for one group.
         pushWatchConfigs()
@@ -1282,6 +1300,17 @@ final class AppModel {
         st.timezonePicked != true && !zone.isEmpty && st.timezone != zone
     }
 
+    /// Whether an assistant snapshot must wake the launcher's readers: first sight, a scope change, an empty cache
+    /// (a failed read must retry), or the periodic recheck for changes made on another device (there is no
+    /// launcher-settings live event for apps).
+    nonisolated static func shouldInvalidateAssistantLaunchers(signature: AssistantLauncherSignature,
+                                                               lastSignature: AssistantLauncherSignature?,
+                                                               lastInvalidation: Date?, hasCachedLaunchers: Bool,
+                                                               now: Date) -> Bool {
+        guard hasCachedLaunchers, lastSignature == signature, let lastInvalidation else { return true }
+        return now.timeIntervalSince(lastInvalidation) >= assistantLauncherRecheckInterval
+    }
+
     /// Loads the assistant config; with no remembered conversation, picks up the newest one.
     func refreshAssistant() async {
         guard let api else { return }
@@ -1303,9 +1332,19 @@ final class AppModel {
             // Assistant snapshots are the settings-level refresh signal. Session.rev is deliberately not used here:
             // it ticks during transcript streaming and is not published through SessionCell to the composer.
             // Invalidate only the assistant picker; New Chat and Model Providers use launchersRevision instead.
-            assistantLauncherCache = [:]
-            assistantStarterCache.clear()
-            assistantLauncherRequestRevision += 1
+            let signature = AssistantLauncherSignature(group: api.group, requestedManager: assistantManagerID,
+                                                       respondingManager: st.manager, machineID: st.machineID,
+                                                       launcher: st.launcher)
+            let now = Date()
+            if Self.shouldInvalidateAssistantLaunchers(signature: signature, lastSignature: lastAssistantLauncherSignature,
+                                                       lastInvalidation: lastAssistantLauncherInvalidation,
+                                                       hasCachedLaunchers: !assistantLauncherCache.isEmpty, now: now) {
+                assistantLauncherCache = [:]
+                assistantStarterCache.clear()
+                assistantLauncherRequestRevision += 1
+                lastAssistantLauncherSignature = signature
+                lastAssistantLauncherInvalidation = now
+            }
             if sessionLists.lists[api.group]?.paged == true { landSessionSummaries(api.stamp(st.conversations), group: api.group) }
             // Only on the very first launch: after New Chat the key exists but is empty, and the home page stays.
             let neverChosen = UserDefaults.standard.object(forKey: "assistant.current") == nil
@@ -2400,6 +2439,7 @@ final class AppModel {
                 InboxStore.shared.reload()
                 TodoStore.shared.reload()
                 TasksStore.shared.reconnected()
+                SavedPromptStore.shared.reload()
             }
         }
         if plan.refetch { AgentSync.shared.schedule() }
@@ -2600,6 +2640,7 @@ final class AppModel {
             olds.append((old, list))
         }
         if lists != sessionsByMachine { sessionsByMachine = lists }
+        // WatchSync drops unchanged content; repeated calls still drive its freshness resend and the widget writer.
         summariesChanged()
         for (old, new) in olds {
             for session in new where session.status != .working {
@@ -2845,6 +2886,9 @@ final class AppModel {
             if isHub { InboxStore.shared.reload() }
         case .todos:
             if isHub { TodoStore.shared.reload() }
+        case .savedPrompts(let manager):
+            // another device changed the list: only the shown assistant's is read again (#9436)
+            if isHub, SavedPromptStore.concerns(eventManager: manager, shownManager: api?.shownManager) { SavedPromptStore.shared.reload() }
         case .personas:
             // The new tier's package is downloaded whole before the face changes (PersonaStore.load). The list changed
             // just now: a refresh already under way may have asked before, so it is read again after that one (#2405).
@@ -3013,6 +3057,7 @@ final class AppModel {
         case .agents: "agents"
         case .inbox: "inbox"
         case .todos: "todos"
+        case .savedPrompts: "assistant_saved_prompts"
         case .personas: "personas"
         case .look: "look"
         case .managers: "managers"
@@ -4307,6 +4352,8 @@ final class AppModel {
         InboxStore.shared.reload()
         TodoStore.shared.forget()
         TodoStore.shared.reload()
+        SavedPromptStore.shared.forget()
+        SavedPromptStore.shared.reload()
         followScope()
         // The avatar is the new hub's from now, before its list is read below: a card tapped meanwhile goes to it.
         personas.switchHub(api)
@@ -4342,6 +4389,9 @@ final class AppModel {
         if switched {
             if let a = assistantCurrent, let s = session(a), s.assistant, !s.isHealth, !assistantShows(s.manager) { assistantCurrent = assistantMain }
             assistantSwitches += 1
+            // the "/" list offers the new assistant's saved prompts, never the one before's (#9436)
+            SavedPromptStore.shared.forget()
+            SavedPromptStore.shared.reload()
         }
         let newChat = assistantNewChat
         Task {

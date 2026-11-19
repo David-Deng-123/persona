@@ -91,6 +91,11 @@ Changing trust does not erase context already delivered to a computer or termina
 | About Me | App edits go to settings `assistant.notes`, override `assistant.notes` in the manager's `manager.json`, and append to CLAUDE.md |
 | Phone not in foreground | No phone connected during a `phone_*` call → hub sends a silent push (`content-available`, `persona_wake`) → App connects WS in the background to execute, disconnects after 25 seconds; wait up to 20 seconds. The App proactively disconnects WS on backgrounding, or a suspended socket makes hub think it is online and calls wait 2 minutes. Once disconnected, nothing else in the background reopens it (network recovery, refresh completion, reconnect backoff, `LiveConnection.suspended`, 2026-11-02); only this silent push (`wake()`) connects. The same push with `persona_wake: "widgets"` wakes a phone whose Home Screen widgets show other agent counts than the hub's (`server/internal/hub/widget_wake.go`, #5721): the app connects, writes the widgets again and disconnects |
 
+`agent_start`, `agent_send` and an immediately dispatchable single-task `task_plan` accept optional integer `wait_seconds` (0 by default, capped at 50). This observation budget begins after the existing launch/send receipt: dispatch and owner feedback run first. Approval cards, multi-task plans and task-leader worker plans keep their immediate receipts. Negative and non-integer values are rejected before dispatch.
+
+A wait appends an `Inline observation` JSON record with `input_id`, known machine/session/link, the last observed `agent_state` when available, and one state: `completed` with this input's final `reply`, `question` with the existing question and `interaction_id`, or `timeout`, `cancelled`, `unavailable`, `interrupted`, `failed`. An exact input echo and fresh idle/done snapshot are required. Historical text and old idle snapshots cannot satisfy it. Missing echo support, a large exchange outside the bounded recent window, or later ambiguous input can time out. A question remains unanswered. Expiry, cancellation and a lost connection never resend input or cancel dispatched work. Supervision, conclusion delivery and `task_review` continue unchanged; an inline reply does not accept the task.
+
+
 The "their computers" section in the instructions (`~/.persona/assistant/CLAUDE.md`) reflects the assistant's **actual machine** (fixed 2026-10-31; previously recognized only kind local):
 - For the assistant's own computer, regardless of kind: "This is the machine you are on; run commands directly."
 - `ssh_host` is an ssh alias on the hub machine, so commands `ssh <alias> '<command>'` for other ssh computers are supplied only when the assistant runs locally on hub (kind local).
@@ -1516,16 +1521,15 @@ manager that connects the computer holds it and sends it once the computer is ba
 - **Never sent twice by itself.** A try whose outcome is unknown (the connection dropped during it, no answer in time,
   the node said it may have typed it, the manager stopped during it) is not tried again: it fails with "Might not have
   arrived. Retry checks the chat first", and the Agent's later held messages wait behind it until the owner picks Retry
-  or Delete. Once per connection that lists the Agent, the manager reads its latest turns: a line there that the node
-  tied to its `client_msg_id` (the node ties a typed line to its message by its words) shows it did arrive: it leaves
-  the row, and the next ones go. The node does not drop a second send of an id, so a Retry of such a message keeps that
-  mark while it waits ("Will check the chat when <computer> is back"), and does not expire: the turns are read when the
-  computer is back (the Agent listed again, or two minutes into the connection if it never is; the later ones wait
-  behind it meanwhile and do not expire). Found, it leaves the row and is not sent. Not found is no proof it did not arrive (the hub hands a
-  restarted node its ties for a day, the node keeps them a day, only the latest turns are read, some runtimes never
-  tie a line; #10790 would let the node say), so nothing is sent: it goes back to the owner, "Couldn't confirm it arrived. Retry to send it anyway,
-  or delete it", still holding the later ones back; that Retry sends it as it is. Three reads in a row that fail end
-  the same way. While the turns are read, a Retry of it answers that it is being sent; a Delete goes. A node that refused it
+  or Delete. Once per connection that lists the Agent, the manager checks whether the node saw a line tied to the
+  message's `client_msg_id`. A match removes the message and lets the next ones go. Retry keeps the message waiting
+  without expiring until the check can run (the Agent is listed again, or the node has been connected for two minutes).
+  If the Agent is idle and the node can confirm from the transcript that the message remained unseen through a turn
+  that ended after the send, the same Retry sends the message after a second check (#10790). With an unknown result
+  or an older node, a matching ID in the latest turns still proves
+  arrival. Otherwise the owner sees "Couldn't confirm it arrived. Retry to send it anyway, or delete it", with the
+  later messages still waiting. That next Retry sends as before. Three failed reads in a row also leave the message
+  unconfirmed after Retry. During a check, another Retry returns a conflict and Delete is allowed. A node that refused it
   (nothing typed), or a message that could not be made ready to send before the node was asked, fails with the reason
   and the next one goes; once the node took a message it counts as delivered, whatever came after. A message the owner
   is retrying or deleting holds the later ones back meanwhile.
@@ -1947,6 +1951,13 @@ Assistant MCP tools (`assistant/conversations.go`, descriptions `prompts/mcp/ass
   - **Queue while running**: if target is running, already queued, or the owner is talking in it, persist in hub settings `assistant.relay` (survives restart), displayed above the input like typed queues
     (session `queued`). After its turn ends (no longer working) and the owner's hold is over, hub sends one at a time, by rank ("Messages from the system wait for the owner"). Don't write into running processes: Codex merges through `turn/steer`, not queueing.
     They come after the user's own queued messages, and `queued_relayed` counts them: the apps only show and copy them.
+  - **A queued send in doubt (#10690).** The manager saves the attempt time before sending. If the answer is lost or
+    the manager stops, it checks the most recent three turns for the relay before sending again. It makes up to
+    three checks, each with a 15-second timeout, and waits 10 seconds between checks. A match removes the relay
+    from the queue. If the last check fails or still finds no match, the manager retries with the same `once_id`.
+    An uncertain supervision digest stays queued if rechecking its tasks would change the text or destination.
+    The node keeps that id for ten minutes or until it restarts. When there is no owner to ask, a possible duplicate
+    is preferable to silently losing the relay.
 - **The user's own queue** (#4342): a message the user sends while a chat works goes to its headless Claude at once and waits in Claude Code's
   queue until the next step takes it in. The transcript notes that wait without the words, so the node gives each message an id and follows
   Claude Code's `command_lifecycle` for it (`server/internal/node/assistant_queue.go`); the waiting ones are the session's `queued`. The queue

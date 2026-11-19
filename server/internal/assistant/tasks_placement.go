@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nwverse/persona/server/internal/devicewire"
 	"github.com/nwverse/persona/server/internal/i18n"
 	"github.com/nwverse/persona/server/internal/prompts"
 	"github.com/nwverse/persona/server/internal/proto"
@@ -352,6 +353,9 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 		prompt = withAttachments(prompt, s.handAttachments(ctx, t.AttachFrom, m.ID, t.Attachments, t.Mentioned))
 	}
 	params["cwd"], params["prompt"], params["tab_name"] = t.Cwd, prompt, s.tabName(ctx, t.Title)
+	if t.WaitInputID != "" {
+		params["client_msg_id"] = t.WaitInputID
+	}
 	if t.WorkspaceResolved != nil && t.WorkspaceResolved.WorkspaceID != "" {
 		params["workspace_id"] = t.WorkspaceResolved.WorkspaceID
 	}
@@ -372,11 +376,18 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 		params["in_pane"] = t.inPane
 	}
 	var res struct {
-		Session proto.Session `json:"session"`
+		Session  proto.Session            `json:"session"`
+		Terminal *devicewire.TaskTerminal `json:"task_terminal,omitempty"`
 		// What an engine that runs only its own launchers ran in place of what was asked (#8140).
 		Instead *proto.StartInstead `json:"instead"`
 	}
 	picked, _ := params["launcher"].(string)
+	t.TerminalTarget = taskTerminalTarget{}
+	terminalToken := ""
+	if t.CloseTabOnAccept && !retry && t.inPane == "" {
+		terminalToken = newStartSessionID()
+		params["task_terminal_token"] = terminalToken
+	}
 	// Remember the sessions already there, so a start whose answer never comes back can adopt only the session it
 	// created (the same reconciliation agent_start gets, tools.go): a slow link can leave the node building the tab
 	// after the hub's wait ends (#6540). Its own short bound keeps a slow list out of the start's wait.
@@ -456,6 +467,10 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 	}
 	if res.Session.SessionID == "" || res.Session.MachineID != "" && res.Session.MachineID != m.ID {
 		return "", "", &rpc.Error{Code: "identity_conflict", Message: i18n.T(s.lang(ctx), "assistant-tasks.start_identity_conflict")}
+	}
+	if terminalToken != "" && res.Terminal != nil && res.Terminal.Token == terminalToken &&
+		res.Terminal.SessionID == res.Session.SessionID && res.Terminal.PaneID == res.Session.PaneID && !res.Session.Starting {
+		t.TerminalTarget = taskTerminalTarget{Machine: m.ID, TaskTerminal: *res.Terminal}
 	}
 	ran := ranLauncher(s.startLauncher(ctx, picked), res.Instead, res.Session)
 	if res.Session.StartError != "" || res.Session.Starting {

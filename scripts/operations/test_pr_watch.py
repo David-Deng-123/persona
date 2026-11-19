@@ -1657,17 +1657,87 @@ class WatcherTests(unittest.TestCase):
             commands = pr_watch_verify.persona_checks(".", pr(title="test: update an argument-driven check"), 1, {})
         self.assertEqual(commands[0], ("CI scripts", ["bash", "scripts/ci/scripts.sh"]))
 
+    def test_documentation_guards_use_base_not_stale_watcher_or_pr_source(self):
+        import pr_watch_test_guards
+        base_source = (
+            "from pathlib import Path\n"
+            "import unittest\n"
+            "ROOT = Path(__file__).resolve().parent\n"
+            "class BaseGuard(unittest.TestCase):\n"
+            "    def test_base_revision(self):\n"
+            "        self.assertTrue((ROOT / 'base-ok').is_file())\n"
+        )
+        section_source = (
+            "from pathlib import Path\n"
+            "import sys\n"
+            "import unittest\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parent))\n"
+            "ROOT = Path(__file__).resolve().parent\n"
+            "KNOWN = Path(__file__).resolve().with_name('doc_sections_known.txt')\n"
+            "class BaseGuard(unittest.TestCase):\n"
+            "    def test_base_revision(self):\n"
+            "        self.assertTrue((ROOT / 'base-ok').is_file())\n"
+            "        self.assertEqual('', KNOWN.read_text())\n"
+            "        self.assertEqual('doc_sections_known.txt', KNOWN.relative_to(ROOT).name)\n"
+        )
+        stale_source = (
+            "import unittest\n"
+            "class StaleGuard(unittest.TestCase):\n"
+            "    def test_stale_watcher(self):\n"
+            "        self.fail('stale watcher guard ran')\n"
+        )
+        relatives = ("test_doc_paths.py", "test_doc_go_paths.py", "test_doc_sections.py", "test_doc_wire.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            watcher = root / "watcher"
+            checkout = root / "pr"
+            for base in (watcher, checkout):
+                tests = base / "scripts/test"
+                tests.mkdir(parents=True)
+                for relative in relatives:
+                    (tests / relative).write_text(stale_source)
+            (checkout / "base-ok").write_text("")
+            (checkout / "scripts/test/doc_sections_known.txt").write_text("x\ty\tz\n")
+            shown = []
+
+            def fake_checked(argv, **kwargs):
+                if argv[:2] == ["git", "show"]:
+                    if not argv[2].startswith(SHA_BASE + ":scripts/test/"):
+                        raise AssertionError("guard source did not come from the exact base: " + argv[2])
+                    shown.append(argv[2])
+                    if argv[2].endswith("doc_sections_known.txt"):
+                        return ""
+                    if argv[2].endswith("test_doc_sections.py"):
+                        return section_source
+                    return base_source
+                return ""
+
+            original_path = sys.path.copy()
+            with patch.dict(sys.modules), \
+                    patch.object(pr_watch_test_guards, "ROOT", watcher), \
+                    patch.object(pr_watch_test_guards, "privacy_environment", return_value={}), \
+                    patch.object(pr_watch_test_guards, "checked", side_effect=fake_checked):
+                self.assertEqual(0, pr_watch_test_guards.main([
+                    "--base", SHA_BASE, "--head", SHA_A, "--worktree", str(checkout), "--repository-guards",
+                ]))
+            self.assertEqual(original_path, sys.path)
+            expected = {SHA_BASE + ":scripts/test/" + name
+                        for name in relatives + ("doc_sections_known.txt",)}
+            self.assertEqual(expected, set(shown))
+
     def test_documentation_guard_reads_pr_not_watcher_root(self):
         import pr_watch_test_guards
         module = type("Guard", (), {"ROOT": None, "checked_root": None})
         module.TestRepository = type("TestRepository", (unittest.TestCase,), {
             "test_root": lambda self: setattr(module, "checked_root", module.ROOT)
         })
-        with patch.object(pr_watch_test_guards, "load_guard", return_value=module):
-            pr_watch_test_guards.documentation_guard("test_doc_paths.py", Path("/tmp/pr-root"))
+        with patch.object(pr_watch_test_guards, "load_guard", return_value=module), \
+                patch.object(pr_watch_test_guards, "checked", return_value=""):
+            pr_watch_test_guards.documentation_guard("test_doc_paths.py", Path("/tmp/pr-root"), SHA_BASE)
         self.assertEqual(module.checked_root, Path("/tmp/pr-root"))
-        with patch.object(pr_watch_test_guards, "load_guard", return_value=module):
-            pr_watch_test_guards.documentation_guard("test_doc_paths.py", Path("/tmp/watcher-root"))
+        with patch.object(pr_watch_test_guards, "load_guard", return_value=module), \
+                patch.object(pr_watch_test_guards, "checked", return_value=""):
+            pr_watch_test_guards.documentation_guard("test_doc_paths.py", Path("/tmp/watcher-root"), SHA_BASE)
         self.assertEqual(module.checked_root, Path("/tmp/watcher-root"))
 
     def test_go_format_guard_checks_each_changed_file(self):
@@ -2204,6 +2274,59 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(checked.call_args.kwargs["input_text"], payload)
         self.assertEqual(checked.call_args.args[0], ["gh", "api", "repos/example/one/pulls", "--input", "-"])
 
+    def test_open_continuation_matches_title_or_body(self):
+        fork = pr(isCrossRepository=True)
+        for title, body in (("fix: continue #7 verification repair", ""),
+                            ("fix: verification repair", "Continuation of https://github.com/example/one/pull/7.")):
+            with self.subTest(title=title, body=body):
+                candidates = [
+                    dict(pr(), title=title, body=body),  # The fork itself.
+                    dict(pr(), number=8, title="fix: continue #70 verification repair", body="Refs #7"),
+                    dict(pr(), number=9, title=title, body=body, state="CLOSED"),
+                    dict(pr(), number=10, title=title, body=body, state="MERGED", mergedAt="2026-11-16T00:00:00Z"),
+                    dict(pr(), number=11, title=title, body=body),
+                ]
+                with patch.object(pr_watch_repair, "gh_json", return_value=candidates) as search, \
+                        patch.object(pr_watch_repair, "checked") as checked:
+                    self.assertEqual(pr_watch_repair.find_continuation("example/one", fork), 11)
+                self.assertIn('"7" in:title,body', search.call_args.args[0])
+                checked.assert_not_called()
+
+    def test_merged_continuation_must_postdate_current_fork_head(self):
+        continuation = dict(pr(), number=9, title="fix: continue #7 verification repair",
+                            state="MERGED", mergedAt="2026-11-16T00:00:00Z")
+        with patch.object(pr_watch_repair, "gh_json", return_value=[continuation]), \
+                patch.object(pr_watch_repair, "checked", side_effect=["2026-11-15T00:00:00Z\n",
+                                                                     "2026-11-17T00:00:00Z\n"]) as checked:
+            self.assertEqual(pr_watch_repair.find_continuation("example/one", pr(isCrossRepository=True)), 9)
+            self.assertIsNone(pr_watch_repair.find_continuation("example/one", pr(head=SHA_B, isCrossRepository=True)))
+        self.assertIn("repos/example/one/commits/" + SHA_A, checked.call_args_list[0].args[0])
+        self.assertIn("repos/example/one/commits/" + SHA_B, checked.call_args_list[1].args[0])
+
+    def test_reused_continuation_survives_restart_and_base_change(self):
+        repo = "example/one"
+        fork = pr(isCrossRepository=True)
+        findings = [{"severity": "P0", "path": "file.py", "line": 1, "summary": "bad", "suggestion": "fix"}]
+        evidence = repo + "#7@" + SHA_BASE + ".." + SHA_A
+        self.watcher.state.put(repo, 7, SHA_A, evidence_key=evidence)
+        with patch.object(pr_watch, "pr_snapshot", return_value=fork), \
+                patch.object(pr_watch, "checked"), \
+                patch.object(pr_watch_repair, "repair_with_model"), \
+                patch.object(pr_watch_repair, "commit_and_push_repair", return_value=(9, None)):
+            self.watcher.repair_findings(self.config["repositories"][0], fork, self.root, findings)
+        self.assertEqual(self.comments, [])
+
+        restarted = pr_watch.Watcher(self.config, verbose=False)
+        record = restarted.state.get(repo, 7)
+        self.assertEqual((record["head"], record["outcome"], record["continuation"]), (SHA_A, "continuation", 9))
+        with patch.object(pr_watch, "pr_snapshot", return_value=dict(fork, baseRefOid="d" * 40)), \
+                patch.object(restarted, "worktree") as worktree, \
+                patch.object(pr_watch_repair, "find_continuation") as search:
+            restarted.process(repo, 7)
+        worktree.assert_not_called()
+        search.assert_not_called()
+        self.assertEqual(restarted.state.get(repo, 7), record)
+
     def test_continuation_pr_links_original_issue(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2219,9 +2342,9 @@ class WatcherTests(unittest.TestCase):
                     patch.object(pr_watch_repair, "verify", return_value=[]), \
                     patch.object(pr_watch_repair, "checked", side_effect=fake_checked), \
                     patch.object(pr_watch_repair, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
-                    patch.object(pr_watch_repair, "gh_json", side_effect=[[], {"number": 9}]) as created:
+                    patch.object(pr_watch_repair, "gh_json", side_effect=[[], [], {"number": 9}]) as created:
                 pr_watch_repair.commit_and_push_repair("example/one", pr(isCrossRepository=True), root, SHA_BASE, "failure", {"profile": "commands", "commands": [["true"]]}, allow_merge_only=True)
-        self.assertIn("Refs #6", created.call_args_list[1].kwargs["input_text"])
+        self.assertIn("Refs #6", created.call_args.kwargs["input_text"])
 
     def test_every_failed_lane_must_reproduce_on_main(self):
         failures = [{"command": ["test", "one"], "output": "--- FAIL: TestA\n"},
