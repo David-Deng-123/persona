@@ -1303,6 +1303,11 @@ manager that connects the computer holds it and sends it once the computer is ba
   `held`; the hub answers the app 202 `{"delivered":"later","undelivered":{…}}`, as for a Persona chat, and records the
   send as `later` (a retry of the id is answered the same and sends nothing). An older manager ignores the mark, and a
   manager that cannot store it gives the failure as before.
+- **Never overtaken by an app that cannot show them.** A person's message from an app that does not declare the feature
+  (iOS, Android and HarmonyOS today) is never held, but carries `NodeCall.ordered`: while older messages of the same
+  Agent are held (waiting, being sent, unclear, or being changed) the manager refuses it without typing anything
+  (409 `held_ahead`, "Earlier messages to this Agent are still waiting to be sent. Send this one after them."), so it
+  never goes ahead of them; otherwise it goes as before.
 - **Shown everywhere.** The row's `undelivered` lists held messages with `computer` (the computer's name) and the whole
   line to show in `error`: "Will send when <computer> is back", "Sending…", "Waits behind the message above", or why it
   was not sent, with Delete, and Retry once it failed. Every client that draws `undelivered` shows them; the web sends
@@ -1324,6 +1329,9 @@ manager that connects the computer holds it and sends it once the computer is ba
   a message that could not be made ready to send before the node was asked, fails with the reason and the next one
   goes; once the node took a message it counts as delivered, whatever came after. A message the owner is retrying or
   deleting holds the later ones back meanwhile.
+- **Store and memory kept in step.** A write to Postgres that failed, or a claim whose answer was lost, leaves the
+  row as decided in memory and holds the Agent's later messages back; the manager writes it again on its next look,
+  never sending it as part of that, and the owner's Retry or Delete works once no try of it can still be running.
 - **Gives up after a day.** A message still waiting for its computer 24 hours after it was held fails with "Not sent:
   <computer> was away for 24 hours"; Retry starts a new day, Delete drops it. Delete is refused while that message is
   being sent. One held behind a message that may have arrived waits for the owner instead: it does not expire, and it
