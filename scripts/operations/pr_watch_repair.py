@@ -669,6 +669,16 @@ def continuation_title(number):
     return "fix: continue #%s verification repair" % number
 
 
+def continuation_contains_head(repo, fork_head, continuation_head):
+    if not isinstance(continuation_head, str) or not SHA.fullmatch(continuation_head):
+        raise WatchError("continuation PR has no valid head SHA")
+    if continuation_head == fork_head:
+        return True
+    status = checked(["gh", "api", "repos/%s/compare/%s...%s" % (repo, fork_head, continuation_head),
+                      "--jq", ".status"], timeout=90).strip()
+    return status in ("ahead", "identical")
+
+
 def existing_continuation(repo, pr):
     """An open or merged continuation of this fork PR that already contains its
     current head, whoever published it (#10881). Each watcher keeps private
@@ -687,11 +697,7 @@ def existing_continuation(repo, pr):
     # Prefer a continuation that is still open; a merged one also covers the head.
     candidates.sort(key=lambda item: (item["state"] != "OPEN", -item["number"]))
     for item in candidates:
-        if item["headRefOid"] == pr["headRefOid"]:
-            return item["number"]
-        status = checked(["gh", "api", "repos/%s/compare/%s...%s" % (repo, pr["headRefOid"], item["headRefOid"]),
-                          "--jq", ".status"], timeout=90).strip()
-        if status in ("ahead", "identical"):
+        if continuation_contains_head(repo, pr["headRefOid"], item["headRefOid"]):
             return item["number"]
     return None
 
@@ -709,14 +715,14 @@ def find_continuation(repo, fork):
                            % (target, target, number), re.I)
     candidates = gh_json(["pr", "list", "--repo", repo, "--state", "all", "--limit", "100",
                           "--search", '"%d" in:title,body' % number,
-                          "--json", "number,title,body,state,mergedAt"])
+                          "--json", "number,title,body,state,mergedAt,headRefOid"])
     if not isinstance(candidates, list):
         raise WatchError("continuation search did not return a list of PRs")
     merged = []
     for candidate in candidates:
         if candidate["number"] == number or not any(reference.search(candidate[field]) for field in ("title", "body")):
             continue
-        if candidate["state"] == "OPEN":
+        if candidate["state"] == "OPEN" and continuation_contains_head(repo, fork["headRefOid"], candidate.get("headRefOid")):
             return candidate["number"]
         if candidate["state"] == "MERGED":
             merged.append(candidate)
