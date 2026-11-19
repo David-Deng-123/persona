@@ -95,8 +95,8 @@ export interface PanelConfig {
 export interface PanelState {
   /** What runs now; null while unknown. */
   current: PanelConfig | null;
-  /** The current effort is shown from Model settings and is omitted from model picks. */
-  currentEffortDisplayOnly?: boolean;
+  /** The Model settings effort is display only for all picks or for AGY picks. */
+  currentEffortDisplayOnly?: "all" | "agy";
   /** A switch accepted for the next message (#5035, #5033). */
   pending?: PanelConfig | null;
   /** Providers whose models switch without a restart: the Recommended group is the current model, then their other models. */
@@ -214,8 +214,9 @@ const takes = (model: Pick<PanelModel, "efforts">, effort: string | undefined) =
 export function rowSetup(provider: Pick<PanelProvider, "id" | "models"> & { engine?: string }, model: PanelModel, state: Pick<PanelState, "current" | "currentEffortDisplayOnly" | "starting">, override?: PanelOverride): PanelConfig {
   const current = state.current;
   const now = runsNow(provider, model, current);
-  const currentEffort = state.currentEffortDisplayOnly ? undefined : current?.effort;
-  const inherited = state.starting && provider.engine === "agy" ? undefined : takes(model, currentEffort);
+  const displayOnly = state.currentEffortDisplayOnly === "all" || (state.currentEffortDisplayOnly === "agy" && provider.engine === "agy");
+  const currentEffort = displayOnly ? undefined : current?.effort;
+  const inherited = takes(model, currentEffort);
   const effort = now ? (state.starting ? takes(model, currentEffort) : currentEffort) : (takes(model, override?.effort) ?? inherited);
   // what runs is what runs: an unset Fast on the running model is Standard, not "unknown, take the override"
   const fast = model.fast ? (now ? current?.fast : override?.fast) : undefined;

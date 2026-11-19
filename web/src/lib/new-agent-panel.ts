@@ -177,7 +177,7 @@ export function newAgentPanel({ launchers, listOf, choice, configured, runs, tie
     recommended: [],
     starting: true,
   };
-  if (agent === "agy" && !choice.effort && inheritedEffort) state.currentEffortDisplayOnly = true;
+  if (!choice.effort && inheritedEffort) state.currentEffortDisplayOnly = agent === "agy" ? "all" : "agy";
 
   const presets = tiers.map((x): PanelPreset => {
     const list = listOf(x.launcher).list;
