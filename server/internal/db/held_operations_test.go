@@ -82,10 +82,11 @@ func TestHeldOperationStates(t *testing.T) {
 	a, b, c := hold("a"), hold("b"), hold("c")
 
 	tried := at.Add(time.Minute)
-	if ok, err := d.ClaimHeldOperation(ctx, a, tried); !ok || err != nil {
-		t.Fatalf("claim: %v %v", ok, err)
+	if op, ok, err := d.ClaimHeldOperation(ctx, a, tried); !ok || err != nil || op.Attempts != 1 || !op.TriedAt.Equal(tried) ||
+		op.State != HeldSending || string(op.Call) != "{}" {
+		t.Fatalf("claim: %+v %v %v", op, ok, err)
 	}
-	if ok, _ := d.ClaimHeldOperation(ctx, a, tried); ok {
+	if _, ok, _ := d.ClaimHeldOperation(ctx, a, tried); ok {
 		t.Fatal("claimed twice")
 	}
 	if op := get(a); op.State != HeldSending || !op.TriedAt.Equal(tried) || op.Attempts != 1 {
@@ -101,7 +102,7 @@ func TestHeldOperationStates(t *testing.T) {
 		t.Fatalf("settled %+v", op)
 	}
 	again := at.Add(time.Hour)
-	if ok, err := d.RetryHeldOperation(ctx, a, again); !ok || err != nil {
+	if ok, _, err := d.RetryHeldOperation(ctx, a, again); !ok || err != nil {
 		t.Fatalf("retry: %v %v", ok, err)
 	}
 	if op := get(a); op.State != HeldWaiting || op.Failure != "" || op.Error != "" || !op.HeldAt.Equal(again) || !op.SentAt.Equal(at) ||
@@ -111,10 +112,10 @@ func TestHeldOperationStates(t *testing.T) {
 
 	// b being sent (by another manager on the same database, in a switch-over): the owner's Retry and Delete leave it,
 	// and so does a Retry of one that waits.
-	if ok, _ := d.ClaimHeldOperation(ctx, b, tried); !ok {
+	if _, ok, _ := d.ClaimHeldOperation(ctx, b, tried); !ok {
 		t.Fatal("claim b")
 	}
-	if ok, err := d.RetryHeldOperation(ctx, b, again); ok || err != nil {
+	if ok, _, err := d.RetryHeldOperation(ctx, b, again); ok || err != nil {
 		t.Fatalf("retried one being sent: %v %v", ok, err)
 	}
 	if ok, err := d.DeleteHeldOperation(ctx, b); ok || err != nil {
@@ -123,7 +124,7 @@ func TestHeldOperationStates(t *testing.T) {
 	if op := get(b); op.State != HeldSending {
 		t.Fatalf("b %+v", op)
 	}
-	if ok, _ := d.RetryHeldOperation(ctx, c, again); ok {
+	if ok, _, _ := d.RetryHeldOperation(ctx, c, again); ok {
 		t.Fatal("retried a waiting one")
 	}
 	if op, found, err := d.HeldOperationOf(ctx, HeldKindMessage, "mac", "s1", "b"); !found || err != nil || op.Seq != b || op.State != HeldSending {
@@ -178,10 +179,10 @@ func TestHeldOperationStates(t *testing.T) {
 	if ok, _ := d.DeleteHeldOperation(ctx, c); ok {
 		t.Fatal("deleted twice")
 	}
-	if ok, _ := d.RetryHeldOperation(ctx, c, again); ok {
+	if ok, _, _ := d.RetryHeldOperation(ctx, c, again); ok {
 		t.Fatal("retried a deleted one")
 	}
-	if ok, _ := d.ClaimHeldOperation(ctx, a, tried); !ok {
+	if _, ok, _ := d.ClaimHeldOperation(ctx, a, tried); !ok {
 		t.Fatal("claim a again")
 	}
 	if ok, err := d.SettleHeldTry(ctx, a, get(a).Attempts, HeldFailed, HeldUnclear, ""); !ok || err != nil {
@@ -190,10 +191,10 @@ func TestHeldOperationStates(t *testing.T) {
 	if op := get(a); op.State != HeldFailed || op.Failure != HeldUnclear {
 		t.Fatalf("a settled %+v", op)
 	}
-	if ok, _ := d.RetryHeldOperation(ctx, a, again); !ok {
+	if ok, _, _ := d.RetryHeldOperation(ctx, a, again); !ok {
 		t.Fatal("retry a")
 	}
-	if ok, _ := d.ClaimHeldOperation(ctx, a, tried); !ok {
+	if _, ok, _ := d.ClaimHeldOperation(ctx, a, tried); !ok {
 		t.Fatal("claim a once more")
 	}
 	if ok, err := d.DeleteHeldTry(ctx, a, get(a).Attempts-1); ok || err != nil {
@@ -209,6 +210,67 @@ func TestHeldOperationStates(t *testing.T) {
 		t.Fatalf("delete b from failed: %v %v", ok, err)
 	}
 	if ops, _ := d.HeldOperations(ctx, HeldKindMessage); len(ops) != 0 {
+		t.Fatalf("left %+v", ops)
+	}
+}
+
+// A held message's row shows its words and how many pictures it has without its call being read (HeldOperations
+// leaves the call out); a Retry of one whose try may have arrived keeps that mark while it waits, a refused one's
+// does not; a hold the manager could not confirm is dropped only while it waits untried.
+func TestHeldOperationsShownRetriedAndUnsure(t *testing.T) {
+	d, ctx := openHeld(t), context.Background()
+	at := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	hold := func(id string, call string) int64 {
+		t.Helper()
+		op, _, err := d.HoldOperation(ctx, HeldOperation{Kind: HeldKindMessage, OpID: id, MachineID: "mac", SessionID: "s1",
+			Call: json.RawMessage(call), SentAt: at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return op.Seq
+	}
+	a := hold("a", `{"params":{"text":"hello","images":[{"data":"x"},{"data":"y"}]}}`)
+	b := hold("b", `{"params":{"images":"not a list"}}`)
+	ops, err := d.HeldOperations(ctx, HeldKindMessage)
+	if err != nil || len(ops) != 2 {
+		t.Fatalf("list %+v %v", ops, err)
+	}
+	if ops[0].Text != "hello" || ops[0].Images != 2 || ops[0].Call != nil || ops[1].Text != "" || ops[1].Images != 0 {
+		t.Fatalf("shown %+v", ops)
+	}
+	if op, found, err := d.HeldOperationOf(ctx, HeldKindMessage, "mac", "s1", "a"); !found || err != nil || op.Call == nil || op.Images != 2 {
+		t.Fatalf("by key %+v %v %v", op, found, err)
+	}
+	for seq, failure := range map[int64]string{a: HeldUnclear, b: HeldRefused} {
+		if _, ok, _ := d.ClaimHeldOperation(ctx, seq, at); !ok {
+			t.Fatal("claim")
+		}
+		if ok, _ := d.SettleHeldOperation(ctx, seq, HeldSending, HeldFailed, failure, ""); !ok {
+			t.Fatal("settle")
+		}
+	}
+	if ok, check, err := d.RetryHeldOperation(ctx, a, at); !ok || !check || err != nil {
+		t.Fatalf("retry unclear: %v %v %v", ok, check, err)
+	}
+	if ok, check, err := d.RetryHeldOperation(ctx, b, at); !ok || check || err != nil {
+		t.Fatalf("retry refused: %v %v %v", ok, check, err)
+	}
+	ops, _ = d.HeldOperations(ctx, HeldKindMessage)
+	if ops[0].State != HeldWaiting || ops[0].Failure != HeldUnclear || ops[1].State != HeldWaiting || ops[1].Failure != "" {
+		t.Fatalf("retried %+v", ops)
+	}
+	// Unsure holds: c waits untried (dropped); a waits but was tried (kept); none for another session.
+	hold("c", `{}`)
+	if ok, err := d.DeleteUnsureHeld(ctx, HeldKindMessage, "mac", "s1", "a"); ok || err != nil {
+		t.Fatalf("dropped a tried one: %v %v", ok, err)
+	}
+	if ok, err := d.DeleteUnsureHeld(ctx, HeldKindMessage, "mac", "s2", "c"); ok || err != nil {
+		t.Fatalf("dropped another session's: %v %v", ok, err)
+	}
+	if ok, err := d.DeleteUnsureHeld(ctx, HeldKindMessage, "mac", "s1", "c"); !ok || err != nil {
+		t.Fatalf("unsure c: %v %v", ok, err)
+	}
+	if ops, _ := d.HeldOperations(ctx, HeldKindMessage); len(ops) != 2 {
 		t.Fatalf("left %+v", ops)
 	}
 }

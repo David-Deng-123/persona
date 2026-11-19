@@ -36,8 +36,9 @@ type heldMem struct {
 	loads     int
 	retryGate chan struct{}
 	retrying  chan struct{}
-	// holdErr fails a hold, nothing kept; committedErr fails one that was kept (its answer lost after the commit).
-	holdErr, committedErr error
+	// holdErr fails a hold, nothing kept; committedErr fails one that was kept (its answer lost after the commit);
+	// lookupErr fails every look-up by key.
+	holdErr, committedErr, lookupErr error
 	// claimLost: the next claim is taken but answers an error (its answer lost); settleErr fails the next write from
 	// being sent; retryErr fails Retries.
 	claimLost bool
@@ -67,7 +68,7 @@ func (s *heldMem) HoldOperation(_ context.Context, op db.HeldOperation) (db.Held
 		return db.HeldOperation{}, false, s.holdErr
 	}
 	if s.committedErr != nil {
-		defer func() { s.seq++; op.Seq, op.State = s.seq, db.HeldWaiting; s.rows[op.Seq] = op }()
+		defer func() { s.seq++; op.Seq, op.State = s.seq, db.HeldWaiting; s.rows[op.Seq] = heldShownOf(op) }()
 		return db.HeldOperation{}, false, s.committedErr
 	}
 	for _, r := range s.rows {
@@ -78,8 +79,25 @@ func (s *heldMem) HoldOperation(_ context.Context, op db.HeldOperation) (db.Held
 	s.seq++
 	op.Seq, op.State, op.Failure, op.Error, op.Attempts, op.TriedAt = s.seq, db.HeldWaiting, "", "", 0, time.Time{}
 	op.Call = slices.Clone(op.Call)
+	op = heldShownOf(op)
 	s.rows[op.Seq] = op
 	return op, true, nil
+}
+
+// heldShownOf is op with what its row shows of its call (as db.DB reads it in the database).
+func heldShownOf(op db.HeldOperation) db.HeldOperation {
+	var c struct {
+		Params struct {
+			Text   string `json:"text"`
+			Images any    `json:"images"`
+		} `json:"params"`
+	}
+	_ = json.Unmarshal(op.Call, &c)
+	op.Text, op.Images = c.Params.Text, 0
+	if list, ok := c.Params.Images.([]any); ok {
+		op.Images = len(list)
+	}
+	return op
 }
 
 func (s *heldMem) HeldOperationOf(_ context.Context, kind, machine, session, opID string) (db.HeldOperation, bool, error) {
@@ -88,12 +106,30 @@ func (s *heldMem) HeldOperationOf(_ context.Context, kind, machine, session, opI
 	if s.fail != nil {
 		return db.HeldOperation{}, false, s.fail
 	}
+	if s.lookupErr != nil {
+		return db.HeldOperation{}, false, s.lookupErr
+	}
 	for _, r := range s.rows {
 		if r.Kind == kind && r.MachineID == machine && r.SessionID == session && r.OpID == opID {
 			return r, true, nil
 		}
 	}
 	return db.HeldOperation{}, false, nil
+}
+
+func (s *heldMem) DeleteUnsureHeld(_ context.Context, kind, machine, session, opID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail != nil {
+		return false, s.fail
+	}
+	for seq, r := range s.rows {
+		if r.Kind == kind && r.MachineID == machine && r.SessionID == session && r.OpID == opID && r.State == db.HeldWaiting && r.Attempts == 0 {
+			delete(s.rows, seq)
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *heldMem) HeldOperations(_ context.Context, kind string) ([]db.HeldOperation, error) {
@@ -105,6 +141,7 @@ func (s *heldMem) HeldOperations(_ context.Context, kind string) ([]db.HeldOpera
 	var out []db.HeldOperation
 	for _, r := range s.rows {
 		if r.Kind == kind {
+			r.Call = nil // as db.DB lists them
 			out = append(out, r)
 		}
 	}
@@ -130,23 +167,23 @@ func (s *heldMem) RecoverHeldOperations(_ context.Context, kind string) (int64, 
 	return n, nil
 }
 
-func (s *heldMem) ClaimHeldOperation(_ context.Context, seq int64, at time.Time) (bool, error) {
+func (s *heldMem) ClaimHeldOperation(_ context.Context, seq int64, at time.Time) (db.HeldOperation, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fail != nil {
-		return false, s.fail
+		return db.HeldOperation{}, false, s.fail
 	}
 	r, ok := s.rows[seq]
 	if !ok || r.State != db.HeldWaiting {
-		return false, nil
+		return db.HeldOperation{}, false, nil
 	}
 	r.State, r.TriedAt, r.Attempts = db.HeldSending, at, r.Attempts+1
 	s.rows[seq] = r
 	if s.claimLost {
 		s.claimLost = false
-		return false, errors.New("the claim's answer was lost")
+		return db.HeldOperation{}, false, errors.New("the claim's answer was lost")
 	}
-	return true, nil
+	return r, true, nil
 }
 
 func (s *heldMem) SettleHeldOperation(_ context.Context, seq int64, from, state, failure, reason string) (bool, error) {
@@ -217,7 +254,7 @@ func (s *heldMem) DeleteHeldTry(_ context.Context, seq int64, attempts int) (boo
 	return true, nil
 }
 
-func (s *heldMem) RetryHeldOperation(_ context.Context, seq int64, at time.Time) (bool, error) {
+func (s *heldMem) RetryHeldOperation(_ context.Context, seq int64, at time.Time) (bool, bool, error) {
 	s.mu.Lock()
 	gate, retrying := s.retryGate, s.retrying
 	s.mu.Unlock()
@@ -228,18 +265,22 @@ func (s *heldMem) RetryHeldOperation(_ context.Context, seq int64, at time.Time)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fail != nil {
-		return false, s.fail
+		return false, false, s.fail
 	}
 	if s.retryErr != nil {
-		return false, s.retryErr
+		return false, false, s.retryErr
 	}
 	r, ok := s.rows[seq]
 	if !ok || r.State != db.HeldFailed {
-		return false, nil
+		return false, false, nil
 	}
+	check := r.Failure == db.HeldUnclear
 	r.State, r.Failure, r.Error, r.HeldAt = db.HeldWaiting, "", "", at
+	if check {
+		r.Failure = db.HeldUnclear
+	}
 	s.rows[seq] = r
-	return true, nil
+	return true, check, nil
 }
 
 func (s *heldMem) RenewHeldOperation(_ context.Context, seq int64, at time.Time) (bool, error) {
@@ -281,9 +322,13 @@ func (s *heldMem) DeleteHeldOperation(_ context.Context, seq int64, states ...st
 	return true, nil
 }
 
-// all are the rows, in order.
+// all are the rows, in order, their calls with them.
 func (s *heldMem) all() []db.HeldOperation {
-	out, _ := (&heldMem{rows: s.snapshot()}).HeldOperations(context.Background(), db.HeldKindMessage)
+	var out []db.HeldOperation
+	for _, r := range s.snapshot() {
+		out = append(out, r)
+	}
+	slices.SortFunc(out, func(a, b db.HeldOperation) int { return cmp.Compare(a.Seq, b.Seq) })
 	return out
 }
 
@@ -313,9 +358,13 @@ type heldNode struct {
 	gate   chan struct{}
 	answer func(params map[string]any) (any, error)
 	listed []string // the sessions it lists; nil: s1 and s2
-	// items are what session.items answers, by session; reads counts those calls.
-	items map[string][]proto.Item
-	reads int
+	// items are what session.items answers, by session; reads counts those calls. itemsGate, when set, holds a read
+	// until it is closed (reading is told when one waits there); itemsErr fails the next read.
+	items     map[string][]proto.Item
+	reads     int
+	itemsGate chan struct{}
+	reading   chan struct{}
+	itemsErr  error
 }
 
 func (n *heldNode) itemReads() int {
@@ -363,6 +412,17 @@ func (n *heldNode) dial(context.Context) (net.Conn, error) {
 			_ = json.Unmarshal(params, &q)
 			n.mu.Lock()
 			n.reads++
+			gate, reading, fail := n.itemsGate, n.reading, n.itemsErr
+			n.itemsErr = nil
+			n.mu.Unlock()
+			if gate != nil {
+				reading <- struct{}{}
+				<-gate
+			}
+			if fail != nil {
+				return nil, fail
+			}
+			n.mu.Lock()
 			items := n.items[q.SessionID]
 			n.mu.Unlock()
 			return map[string]any{"items": items}, nil
@@ -669,7 +729,7 @@ func TestHeldUnclearIsNotSentAgain(t *testing.T) {
 		return len(rows) == 2 && rows[0].State == db.HeldFailed && rows[0].Failure == db.HeldUnclear
 	})
 	list := d.HeldMessages("mac", i18n.En)["s1"]
-	if list[0].State != proto.UndeliveredFailed || list[0].Error != "May have arrived before the connection dropped. Check the chat, then retry or delete." ||
+	if list[0].State != proto.UndeliveredFailed || list[0].Error != "Might not have arrived. Retry sends it only if the chat doesn't have it yet." ||
 		list[1].State != proto.UndeliveredWaiting || list[1].Error != "Waits behind the message above" {
 		t.Fatalf("rows %+v", list)
 	}
@@ -855,7 +915,7 @@ func TestHeldAcrossARestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if ok, _ := st.ClaimHeldOperation(context.Background(), 1, at); !ok { // the last manager stopped while sending a
+	if _, ok, _ := st.ClaimHeldOperation(context.Background(), 1, at); !ok { // the last manager stopped while sending a
 		t.Fatal("claim")
 	}
 	d, _ := heldDevices(t, st, time.Hour)
@@ -941,6 +1001,7 @@ func TestHeldLinesInEveryLanguage(t *testing.T) {
 	for _, l := range i18n.Langs {
 		for _, r := range []heldRow{
 			{HeldOperation: db.HeldOperation{State: db.HeldWaiting}},
+			{HeldOperation: db.HeldOperation{State: db.HeldWaiting, Failure: db.HeldUnclear}},
 			{HeldOperation: db.HeldOperation{State: db.HeldSending}},
 			{HeldOperation: db.HeldOperation{State: db.HeldFailed, Failure: db.HeldUnclear}},
 			{HeldOperation: db.HeldOperation{State: db.HeldFailed, Failure: db.HeldRefused, Error: "REASON"}},
@@ -953,6 +1014,11 @@ func TestHeldLinesInEveryLanguage(t *testing.T) {
 			}
 			if (r.State == db.HeldWaiting || r.Failure == db.HeldExpired) && !strings.Contains(m.Error, "NAME") {
 				t.Errorf("%s %+v: %q has no computer", l, r.HeldOperation, m.Error)
+			}
+			// A retried one that may have arrived says it is looked for first, not only that it waits.
+			plain := (&heldRow{HeldOperation: db.HeldOperation{State: db.HeldWaiting}}).wire(l, "NAME", false).Error
+			if r.State == db.HeldWaiting && r.Failure == db.HeldUnclear && m.Error == plain {
+				t.Errorf("%s %+v: %q is the plain waiting line", l, r.HeldOperation, m.Error)
 			}
 			if r.Error != "" && !strings.Contains(m.Error, "REASON") {
 				t.Errorf("%s: %q has no reason", l, m.Error)
@@ -1451,6 +1517,13 @@ func TestHeldLostClaimIsRepairedOnTheTick(t *testing.T) {
 	if got := n.sent(); len(got) != 0 {
 		t.Fatalf("the repair sent %v", got)
 	}
+	// Unclear now, it is looked for in the transcript (busy meanwhile: a Retry then answers 409): after that read.
+	eventually(t, 5*time.Second, "looked for", func() bool {
+		d.held.mu.Lock()
+		defer d.held.mu.Unlock()
+		r := d.held.rows["mac"][0]
+		return n.itemReads() == 1 && !r.busy
+	})
 	if code, body := personCall(t, mux, "POST", "/api/v1/sessions/mac/s1/held/a/retry"); code != http.StatusOK {
 		t.Fatalf("retry: %d %v", code, body)
 	}
@@ -1604,9 +1677,9 @@ func TestHeldFailedRetryLetsTheNextOneGo(t *testing.T) {
 	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) })
 }
 
-// A message found in the transcript whose row the store no longer has as failed (another manager's Retry took it
-// meanwhile) is followed and its session looked at again: it waits again there, so it goes, then the next one.
-func TestHeldLandedButRetriedElsewhereGoesOn(t *testing.T) {
+// A message found in the transcript whose row the store has as waiting by then (another manager's Retry took it
+// meanwhile) is dropped all the same: it arrived, and is never sent again; the next one goes.
+func TestHeldLandedThoughRetriedElsewhereIsNotSentAgain(t *testing.T) {
 	st := newHeldMem()
 	at := time.Now().Add(-time.Hour)
 	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
@@ -1623,7 +1696,11 @@ func TestHeldLandedButRetriedElsewhereGoesOn(t *testing.T) {
 	up := make(chan struct{})
 	laterMachine(t, d, "mac", "Studio Mac", n, up)
 	close(up)
-	eventually(t, 5*time.Second, "a and b sent", func() bool { return slices.Equal(n.sent(), []string{"a", "b"}) && len(st.all()) == 0 })
+	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 0 })
+	time.Sleep(100 * time.Millisecond)
+	if got := n.sent(); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("sent %v", got)
+	}
 }
 
 // A message the hub sent with both Hold and Ordered (every declaring app's is) is held, and once its computer is back
@@ -1891,7 +1968,7 @@ func TestHeldOwnOutcomeNeverOverwritesANewerTry(t *testing.T) {
 	eventually(t, 5*time.Second, "a tried", func() bool { return len(n.sent()) == 1 })
 	eventually(t, 5*time.Second, "followed", func() bool {
 		l := d.HeldMessages("mac", i18n.En)["s1"]
-		return len(l) == 1 && l[0].Error == "May have arrived before the connection dropped. Check the chat, then retry or delete."
+		return len(l) == 1 && l[0].Error == "Might not have arrived. Retry sends it only if the chat doesn't have it yet."
 	})
 	if r := st.all()[0]; r.State != db.HeldSending || r.Attempts != 2 {
 		t.Fatalf("a newer try overwritten: %+v", r)
@@ -1916,5 +1993,233 @@ func TestHeldSentDeleteFailedIsDeletedLater(t *testing.T) {
 	d.heldRepair(context.Background())
 	if rows := st.all(); len(rows) != 0 {
 		t.Fatalf("left %+v", rows)
+	}
+}
+
+// retryAway is a message a that may have arrived, retried by the owner while its computer is away, and b behind it;
+// the node's transcript has items; the computer comes back once the test closes up.
+func retryAway(t *testing.T, items []proto.Item) (*Devices, *heldMem, *heldNode, chan struct{}) {
+	t.Helper()
+	st := newHeldMem()
+	at := time.Now().Add(-time.Hour)
+	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
+	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{items: map[string][]proto.Item{"s1": items}}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	if found, err := d.HeldRetry(context.Background(), "s1", "a"); !found || err != nil {
+		t.Fatalf("retry: %v %v", found, err)
+	}
+	if r := st.all()[0]; r.State != db.HeldWaiting || r.Failure != db.HeldUnclear {
+		t.Fatalf("retried %+v", r)
+	}
+	if l := d.HeldMessages("mac", i18n.En)["s1"]; l[0].State != proto.UndeliveredWaiting || l[0].Error != "Will check and send when Studio Mac is back" {
+		t.Fatalf("row %+v", l)
+	}
+	return d, st, n, up
+}
+
+// The owner's Retry of a message that may have arrived looks for it before it goes: in the transcript, it is not
+// sent again (the Retry is done), and the next one goes.
+func TestHeldRetriedUnclearInTheTranscriptIsNotSentAgain(t *testing.T) {
+	_, st, n, up := retryAway(t, []proto.Item{{Role: "user", Text: "a", ClientMsgID: "a"}})
+	close(up)
+	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 0 })
+	time.Sleep(100 * time.Millisecond)
+	if got, reads := n.sent(), n.itemReads(); !slices.Equal(got, []string{"b"}) || reads != 1 {
+		t.Fatalf("sent %v, %d reads", got, reads)
+	}
+}
+
+// Not in the transcript: it is sent, once, then the next one.
+func TestHeldRetriedUnclearNotInTheTranscriptIsSentOnce(t *testing.T) {
+	_, st, n, up := retryAway(t, []proto.Item{{Role: "user", Text: "a"}}) // the words, not the node's tie
+	close(up)
+	eventually(t, 5*time.Second, "a and b sent", func() bool { return slices.Equal(n.sent(), []string{"a", "b"}) && len(st.all()) == 0 })
+	if reads := n.itemReads(); reads != 1 {
+		t.Fatalf("%d reads", reads)
+	}
+}
+
+// The transcript not read: it is not sent; it waits, and the next look reads it again before it goes.
+func TestHeldRetriedUnclearUnreadIsNotSent(t *testing.T) {
+	d, st, n, up := retryAway(t, nil)
+	n.mu.Lock()
+	n.itemsErr = errors.New("transcript not found")
+	n.mu.Unlock()
+	close(up)
+	eventually(t, 5*time.Second, "read once", func() bool { return n.itemReads() == 1 })
+	time.Sleep(100 * time.Millisecond)
+	if got := n.sent(); len(got) != 0 || st.all()[0].State != db.HeldWaiting {
+		t.Fatalf("sent %v, stored %+v", got, st.all())
+	}
+	d.heldWake("mac") // a tick
+	eventually(t, 5*time.Second, "a and b sent", func() bool { return slices.Equal(n.sent(), []string{"a", "b"}) && n.itemReads() == 2 })
+}
+
+// While the transcript is read for a message the owner's Retry and Delete answer 409: nothing races the read, and
+// nothing is sent twice.
+func TestHeldCheckHoldsOffTheOwner(t *testing.T) {
+	st := newHeldMem()
+	at := time.Now().Add(-time.Hour)
+	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
+	putHeld(t, st, "s1", "b", db.HeldWaiting, "", at)
+	d, _ := heldDevices(t, st, time.Hour)
+	gate, reading := make(chan struct{}), make(chan struct{}, 1)
+	n := &heldNode{items: map[string][]proto.Item{"s1": {{Role: "user", Text: "a", ClientMsgID: "a"}}}, itemsGate: gate, reading: reading}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	close(up)
+	<-reading
+	mux := d.Handler(http.NotFoundHandler())
+	for _, c := range []struct{ method, path string }{{"POST", "/api/v1/sessions/mac/s1/held/a/retry"}, {"DELETE", "/api/v1/sessions/mac/s1/held/a"}} {
+		if code, body := personCall(t, mux, c.method, c.path); code != http.StatusConflict {
+			t.Fatalf("%s during the read: %d %v", c.method, code, body)
+		}
+	}
+	n.mu.Lock()
+	n.itemsGate = nil
+	n.mu.Unlock()
+	close(gate)
+	eventually(t, 5*time.Second, "b sent", func() bool { return slices.Equal(n.sent(), []string{"b"}) && len(st.all()) == 0 })
+}
+
+// A Retry looks for it again on the same connection: read once already (not there then), it may be there by now.
+func TestHeldRetryRechecksOnTheSameConnection(t *testing.T) {
+	st := newHeldMem()
+	at := time.Now().Add(-time.Hour)
+	putHeld(t, st, "s1", "a", db.HeldFailed, db.HeldUnclear, at)
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	close(up)
+	eventually(t, 5*time.Second, "read on connecting", func() bool { return n.itemReads() == 1 })
+	n.mu.Lock() // the try that was cut off shows up in the transcript after all
+	n.items = map[string][]proto.Item{"s1": {{Role: "user", Text: "a", ClientMsgID: "a"}}}
+	n.mu.Unlock()
+	if found, err := d.HeldRetry(context.Background(), "s1", "a"); !found || err != nil {
+		t.Fatalf("retry: %v %v", found, err)
+	}
+	eventually(t, 5*time.Second, "looked for again", func() bool { return len(st.all()) == 0 })
+	if got, reads := n.sent(), n.itemReads(); len(got) != 0 || reads != 2 {
+		t.Fatalf("sent %v, %d reads", got, reads)
+	}
+}
+
+// A hold the store may have kept though its answer and the look-up after it both failed (the app was told it failed)
+// is dropped by the repair, untried; nothing sends it. One held since (the app sent the same message again) stays.
+func TestHeldUnsureHoldIsDropped(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	ctx := context.Background()
+	unsure := func(id string) {
+		t.Helper()
+		st.set(func(s *heldMem) {
+			s.committedErr, s.lookupErr = errors.New("timeout"), errors.New("connection refused")
+		})
+		var re *rpc.Error
+		if _, err := d.Call(ctx, heldSend("mac", "s1", id, id)); !errors.As(err, &re) || re.Code != devicewire.CodeMachineOffline {
+			t.Fatalf("%s: %v", id, err)
+		}
+		st.set(func(s *heldMem) { s.committedErr, s.lookupErr = nil, nil })
+	}
+	unsure("a")
+	unsure("b")
+	out, err := d.Call(ctx, heldSend("mac", "s1", "b", "b")) // the app sends b again: held now
+	if held := heldAnswerOf(t, out, err); held.ID != "b" {
+		t.Fatalf("b: %+v", held)
+	}
+	if rows := st.all(); len(rows) != 2 || d.HeldMessages("mac", i18n.En)["s1"][0].ID != "b" {
+		t.Fatalf("stored %+v", rows)
+	}
+	d.heldRepair(ctx)
+	if rows := st.all(); len(rows) != 1 || rows[0].OpID != "b" {
+		t.Fatalf("after the repair %+v", rows)
+	}
+	close(up)
+	eventually(t, 5*time.Second, "b sent", func() bool { return len(st.all()) == 0 })
+	if got := n.sent(); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("sent %v", got)
+	}
+}
+
+// A claim names its try by the store's attempts, not this manager's count: after another manager's tries the
+// delivery's writes still find it (no stale row, no message taken as unclear).
+func TestHeldClaimTakesTheStoresAttempts(t *testing.T) {
+	st := newHeldMem()
+	a := putHeld(t, st, "s1", "a", db.HeldWaiting, "", time.Now())
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	st.set(func(s *heldMem) { r := s.rows[a]; r.Attempts = 5; s.rows[a] = r }) // tried elsewhere since this one read it
+	close(up)
+	eventually(t, 5*time.Second, "a sent and gone", func() bool { return len(n.sent()) == 1 && len(st.all()) == 0 })
+	if d.HeldMessages("mac", i18n.En) != nil {
+		t.Fatalf("still shown: %+v", d.HeldMessages("mac", i18n.En))
+	}
+}
+
+// A session holds heldPerSession messages at most: one more is refused in words, nothing kept; another session, or the
+// same message again, is not.
+func TestHeldCapPerSession(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	offlineMachine(d, "mac", "Studio Mac")
+	ctx := i18n.With(context.Background(), i18n.En)
+	for i := range heldPerSession {
+		out, err := d.Call(ctx, heldSend("mac", "s1", fmt.Sprintf("m%d", i), "x"))
+		heldAnswerOf(t, out, err)
+	}
+	var re *rpc.Error
+	if _, err := d.Call(ctx, heldSend("mac", "s1", "one-more", "x")); !errors.As(err, &re) || re.Code != "held_full" ||
+		re.Message != "Too many messages are waiting for this Agent. Delete some, or send this one when the computer is back." ||
+		string(re.Data) != `{"delivered":"none"}` {
+		t.Fatalf("one more: %v", err)
+	}
+	out, err := d.Call(ctx, heldSend("mac", "s1", "m0", "x"))
+	if held := heldAnswerOf(t, out, err); held.ID != "m0" {
+		t.Fatalf("again: %+v", held)
+	}
+	out, err = d.Call(ctx, heldSend("mac", "s2", "other", "x"))
+	heldAnswerOf(t, out, err)
+	if n := len(st.all()); n != heldPerSession+1 {
+		t.Fatalf("%d stored", n)
+	}
+}
+
+// What is kept in memory of a held message is what its row shows, not its call (pictures up to 16 MiB): the call is
+// read from the store when it goes, pictures and all.
+func TestHeldRowsKeepNoCall(t *testing.T) {
+	st := newHeldMem()
+	d, _ := heldDevices(t, st, time.Hour)
+	n := &heldNode{}
+	up := make(chan struct{})
+	laterMachine(t, d, "mac", "Studio Mac", n, up)
+	p := heldSend("mac", "s1", "a", "look")
+	p.Params = json.RawMessage(`{"session_id":"s1","client_msg_id":"a","text":"look","images":[{"data":"aGVsbG8="},{"data":"d29ybGQ="}]}`)
+	out, err := d.Call(context.Background(), p)
+	if held := heldAnswerOf(t, out, err); held.Text != "look" || held.Images != 2 {
+		t.Fatalf("held %+v", held)
+	}
+	d.held.mu.Lock()
+	for _, r := range d.held.rows["mac"] {
+		if r.Call != nil {
+			t.Errorf("kept the call in memory: %s", r.Call)
+		}
+	}
+	d.held.mu.Unlock()
+	close(up)
+	eventually(t, 5*time.Second, "a sent", func() bool { return len(n.sent()) == 1 })
+	n.mu.Lock()
+	images, _ := n.sends[0]["images"].([]any)
+	n.mu.Unlock()
+	if len(images) != 2 {
+		t.Fatalf("sent without its pictures: %d", len(images))
 	}
 }
