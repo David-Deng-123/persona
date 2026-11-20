@@ -962,6 +962,145 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     expect(document.activeElement).toBe(field);
   });
 
+  it("keeps a blurred dirty selection bar registered so opening another editor yields and saves it", () => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 1;
+    });
+    const origCreateRange = document.createRange.bind(document);
+    vi.spyOn(document, "createRange").mockImplementation(() => {
+      const r = origCreateRange();
+      mockRangeRect(r, new DOMRect(60, 40, 40, 18));
+      return r;
+    });
+
+    function YieldAfterBlurHarness({ showLine }: { showLine: boolean }) {
+      const scroller = useRef<HTMLDivElement>(null);
+      return (
+        <ChatActionsContext.Provider value={{ draftKey, title: "Test", canCompose: true, speaker: "Persona", images: () => [] }}>
+          <div ref={scroller} style={{ position: "relative", height: 400 }}>
+            <div>
+              <div data-items="msg-1">
+                <p>alpha beta gamma delta</p>
+              </div>
+            </div>
+            <CommentMarks scroller={scroller} />
+          </div>
+          {showLine && (
+            <LineBox
+              where="src/app.ts:4"
+              anchor={{ x: 100, top: 100, bottom: 120 }}
+              onAdd={() => {}}
+              onCancel={() => {}}
+            />
+          )}
+        </ChatActionsContext.Provider>
+      );
+    }
+
+    try {
+      act(() => root.render(<YieldAfterBlurHarness showLine={false} />));
+      const scroller = host.firstElementChild as HTMLDivElement;
+      scroller.getBoundingClientRect = () => new DOMRect(0, 0, 800, 400);
+
+      const textNode = host.querySelector("p")!.firstChild as Text;
+      const range = document.createRange();
+      range.setStart(textNode, 6);
+      range.setEnd(textNode, 10);
+      const sel = document.getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      act(() => {
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+
+      const field = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+      act(() => {
+        field.focus();
+        setInputValue(field, "blurred dirty note");
+        field.blur();
+      });
+      expect(document.activeElement).not.toBe(field);
+
+      // Opening a LineBox while the dirty selection bar is blurred triggers yield -> saves the dirty selection comment
+      act(() => root.render(<YieldAfterBlurHarness showLine />));
+      expect(getQuotes(draftKey).list).toHaveLength(1);
+      expect(getQuotes(draftKey).list[0].text).toBe("beta");
+      expect(getQuotes(draftKey).list[0].comment?.body).toBe("blurred dirty note");
+      expect(document.querySelectorAll("[data-comment-bar]")).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not discard a blurred dirty selection draft on transcript pointerdown", () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 1;
+    });
+    const origCreateRange = document.createRange.bind(document);
+    vi.spyOn(document, "createRange").mockImplementation(() => {
+      const r = origCreateRange();
+      mockRangeRect(r, new DOMRect(60, 40, 40, 18));
+      return r;
+    });
+
+    function DirtyTranscriptHarness() {
+      const scroller = useRef<HTMLDivElement>(null);
+      return (
+        <ChatActionsContext.Provider value={{ draftKey, title: "Test", canCompose: true, speaker: "Persona", images: () => [] }}>
+          <div ref={scroller} style={{ position: "relative", height: 400 }}>
+            <div>
+              <div data-items="msg-1">
+                <p>alpha beta gamma delta</p>
+              </div>
+            </div>
+            <CommentMarks scroller={scroller} />
+          </div>
+        </ChatActionsContext.Provider>
+      );
+    }
+
+    act(() => root.render(<DirtyTranscriptHarness />));
+    const scroller = host.firstElementChild as HTMLDivElement;
+    scroller.getBoundingClientRect = () => new DOMRect(0, 0, 800, 400);
+
+    const p = host.querySelector("p")!;
+    const textNode = p.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 6);
+    range.setEnd(textNode, 10);
+    const sel = document.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    act(() => {
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+
+    const field = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+    act(() => {
+      field.focus();
+      setInputValue(field, "keep me alive");
+      field.blur();
+    });
+
+    // Clicking inside the transcript while blurred + dirty must keep the bar open with its note intact
+    act(() => {
+      p.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+    const stillThere = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea");
+    expect(stillThere).toBeTruthy();
+    expect(stillThere!.value).toBe("keep me alive");
+  });
+
   it("does not query another mounted file's gutter when scopeRef is missing or disconnected", () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
       cb(0);

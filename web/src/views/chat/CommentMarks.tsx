@@ -89,10 +89,10 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     if (!el) return;
     const bounds = el.getBoundingClientRect();
     const curDraft = draftRef.current;
-    if (curDraft?.focused) {
+    if (curDraft && (curDraft.focused || draftNoteRef.current !== "")) {
       const r = (curDraft.anchor ? rangeFor(el, curDraft.anchor) : null) ?? curDraft.range;
       const nextRect = r ? rectInBounds(r, bounds) : null;
-      setDraft((prev) => (prev && prev.focused && !sameAnchor(prev.rect, nextRect) ? { ...prev, rect: nextRect } : prev));
+      setDraft((prev) => (prev && !sameAnchor(prev.rect, nextRect) ? { ...prev, rect: nextRect } : prev));
     }
     const curPin = editingPinRef.current;
     if (curPin) {
@@ -109,8 +109,8 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
   const read = useCallback(() => {
     const el = scroller.current;
     const sel = document.getSelection();
-    // Keep the bar open while the user is typing in it or editing an existing pin; only re-measure its anchor on scroll/resize.
-    if (draftRef.current?.focused || editingPinRef.current) {
+    // Keep the bar open while the user is typing in it, has an unsaved note, or is editing an existing pin; only re-measure on scroll/resize.
+    if (draftRef.current?.focused || (draftRef.current && draftNoteRef.current !== "") || editingPinRef.current) {
       reposition();
       return;
     }
@@ -143,7 +143,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     const down = (e: PointerEvent) => {
       if (e.target instanceof Node && scroller.current?.contains(e.target)) {
         dragging.current = true;
-        if (!draftRef.current?.focused) setDraft(null);
+        if (!draftRef.current?.focused && draftNoteRef.current === "") setDraft(null);
       }
     };
     const up = () => {

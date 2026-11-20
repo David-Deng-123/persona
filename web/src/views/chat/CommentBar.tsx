@@ -124,6 +124,8 @@ export function CommentBar({
   onYieldRef.current = onYield;
   const [focused, setFocused] = useState(autoFocus);
   const active = focused || captureEscape;
+  // Keep a mounted dirty bar registered across blur until it is saved, cancelled, or yielded to another bar.
+  const ownsBar = active || body !== initialValue;
   const barRef = useRef<HTMLDivElement>(null);
   const localInput = useRef<HTMLTextAreaElement>(null);
   const field = inputRef ?? localInput;
@@ -143,7 +145,7 @@ export function CommentBar({
   }, [initialValue]);
 
   useLayoutEffect(() => {
-    if (!active) return;
+    if (!ownsBar) return;
     const id = Symbol();
     const prev = activeBar;
     const mine: ActiveBar = {
@@ -159,7 +161,7 @@ export function CommentBar({
     return () => {
       if (activeBar?.id === id) activeBar = null;
     };
-  }, [active]);
+  }, [ownsBar]);
 
   useLayoutEffect(() => {
     if (!autoFocus) return;
