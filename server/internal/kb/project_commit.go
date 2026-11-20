@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
-	"reflect"
 	"strings"
 	"time"
 
@@ -44,7 +43,7 @@ func (e *Engine) commitProject(snapshot *Project, input projectInput, d projectD
 	// while the model works is not a change to the source data it read.
 	currentInput := e.projectInput(current)
 	currentInput.Language = input.Language
-	if !bytes.Equal(before, frozen) || !reflect.DeepEqual(currentInput.cutoff, input.cutoff) ||
+	if !bytes.Equal(before, frozen) || !sameProjectCutoff(currentInput.cutoff, input.cutoff) ||
 		currentInput.timelineHash != input.timelineHash || currentInput.timelineOK != input.timelineOK ||
 		prompts.RenderKBProjectInput(currentInput.KBProjectInput) != prompts.RenderKBProjectInput(input.KBProjectInput) {
 		return nil

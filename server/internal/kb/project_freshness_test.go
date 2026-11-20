@@ -309,3 +309,82 @@ func TestProjectCanonicalDeliveryAcrossViews(t *testing.T) {
 	projectViews(t, e, "delivery")
 	projectViews(t, e, "verification")
 }
+
+func TestProjectSourceURLPreservesExistingCoverage(t *testing.T) {
+	ctx := context.Background()
+	model := &scriptModel{replies: []string{`{"summary":"Delivery pending","one_line":"Pending"}`}}
+	e := testEngine(t, model)
+	sc := SourceChat{ID: "sample-garden-4", Kind: "pr", State: "open", StateAt: projectEvidenceTime}
+	c := &Chat{ID: ChatID("github", sc.ID), Source: "github", SourceID: sc.ID, Kind: sc.Kind,
+		State: sc.State, StateAt: sc.StateAt, Projects: []string{"garden"}}
+	if err := e.Store.PutChat(c); err != nil {
+		t.Fatal(err)
+	}
+	projectUpdateOK(t, e, "garden", Update{Chats: []string{c.ID}, Log: "Review requested"})
+	if n := e.RefreshProjects(ctx, 1); n != 1 {
+		t.Fatalf("initial refresh = %d", n)
+	}
+	_, initial := projectViews(t, e, "garden")
+	projectUpdateOK(t, e, "garden", Update{Summary: initial.Summary})
+	_, before := projectViews(t, e, "garden")
+	beforeSummary := before.Freshness.Fields["summary"]
+	if beforeSummary.LockReason != "field_locked" || beforeSummary.Cutoff == nil || len(beforeSummary.Cutoff.Sources) != 1 ||
+		beforeSummary.Cutoff.Sources[0].SourceID != "chats/"+c.ID {
+		t.Fatalf("expected a locked summary with pre-URL coverage: %+v", beforeSummary)
+	}
+
+	sc.SourceURL = "https://github.com/sample/garden/pull/4"
+	if _, err := e.Ingest(ctx, named("github"), sc, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, after := projectViews(t, e, "garden")
+	if len(after.Freshness.Evidence) != 1 || after.Freshness.Evidence[0].SourceID != "github:sample/garden#4" {
+		t.Fatalf("canonical source ID missing from current evidence: %+v", after.Freshness.Evidence)
+	}
+	for _, field := range []string{"summary", "one_line"} {
+		view := after.Freshness.Fields[field]
+		fieldReview(t, view, "", 0)
+		if !reflect.DeepEqual(view, before.Freshness.Fields[field]) {
+			t.Fatalf("%s coverage changed after recording the URL: %+v", field, view)
+		}
+	}
+	if after.Freshness.NeedsReview {
+		t.Fatal("recording the URL flagged the project for review")
+	}
+	if n := e.RefreshProjects(ctx, 1); n != 0 || model.calls != 1 {
+		t.Fatalf("recording the URL scheduled a refresh: %d projects, %d total model calls", n, model.calls)
+	}
+
+	sc.State, sc.StateAt = "merged", projectEvidenceTime.Add(time.Hour)
+	if _, err := e.Ingest(ctx, named("github"), sc, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, merged := projectViews(t, e, "garden")
+	fieldReview(t, merged.Freshness.Fields["summary"], "new_evidence", 1)
+	fieldReview(t, merged.Freshness.Fields["one_line"], "new_evidence", 1)
+}
+
+func TestProjectRefreshCommitsWhenSourceURLIsRecorded(t *testing.T) {
+	ctx := context.Background()
+	e := testEngine(t, nil)
+	sc := SourceChat{ID: "sample-garden-4", Kind: "pr", State: "open", StateAt: projectEvidenceTime,
+		SourceURL: "https://github.com/sample/garden/pull/4"}
+	c := &Chat{ID: ChatID("github", sc.ID), Source: "github", SourceID: sc.ID, Kind: sc.Kind,
+		State: sc.State, StateAt: sc.StateAt, Projects: []string{"garden"}}
+	if err := e.Store.PutChat(c); err != nil {
+		t.Fatal(err)
+	}
+	projectUpdateOK(t, e, "garden", Update{Chats: []string{c.ID}, Log: "Review requested"})
+	e.Model = knowledgeReplyModel{reply: `{"summary":"Delivery pending","one_line":"Pending"}`, call: func(_, _ string) {
+		if _, err := e.Ingest(ctx, named("github"), sc, nil); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	e.RefreshProjects(ctx, 1)
+	row, detail := projectViews(t, e, "garden")
+	if row.OneLine != "Pending" || !strings.Contains(detail.Summary, "Delivery pending") {
+		t.Fatalf("refresh was discarded when the URL was recorded: %+v / %q", row, detail.Summary)
+	}
+	fieldReview(t, detail.Freshness.Fields["summary"], "", 0)
+	fieldReview(t, detail.Freshness.Fields["one_line"], "", 0)
+}

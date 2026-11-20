@@ -8,27 +8,24 @@ import (
 // pull request merged or closed adds no message, so the chat records the state the source reports with every batch,
 // and the projects it belongs to are rewritten with it.
 
-// noteChatState puts the state sc reports on c; it reports whether that changed c's state. A source that reports no
-// state leaves c's as it is.
-func noteChatState(c *Chat, sc SourceChat, now time.Time) bool {
-	pointerChanged := false
+// noteChatSource applies the source observations and reports changes to delivery state and URL separately.
+func noteChatSource(c *Chat, sc SourceChat, now time.Time) (stateChanged, urlChanged bool) {
 	if _, link := canonicalSourceURL(sc.SourceURL); link != "" && link != c.SourceURL {
 		c.SourceURL = link
-		pointerChanged = true
+		urlChanged = true
 	}
 	if sc.State == "" || sc.State == c.State {
-		return pointerChanged
+		return false, urlChanged
 	}
 	c.State, c.StateAt = sc.State, sc.StateAt.UTC()
 	if c.StateAt.IsZero() {
 		c.StateAt = now.UTC()
 	}
-	return true
+	return true, urlChanged
 }
 
-// recordChatState records the state sc reports on the stored chat id when it changed: Ingest's path for a batch with
-// no new lines.
-func (e *Engine) recordChatState(id string, sc SourceChat) error {
+// recordChatSource saves changed source metadata when Ingest has no new lines.
+func (e *Engine) recordChatSource(id string, sc SourceChat) error {
 	if sc.State == "" && sc.SourceURL == "" {
 		return nil
 	}
@@ -38,16 +35,22 @@ func (e *Engine) recordChatState(id string, sc SourceChat) error {
 		return err
 	}
 	c, ok := e.Store.Chat(id)
-	if !ok || !noteChatState(c, sc, time.Now()) {
+	if !ok {
 		e.Store.chatMu.Unlock()
 		return nil
 	}
-	err := e.Store.PutChat(c)
+	stateChanged, urlChanged := noteChatSource(c, sc, time.Now())
+	var err error
+	if stateChanged || urlChanged {
+		err = e.Store.PutChat(c)
+	}
 	e.Store.chatMu.Unlock()
 	if err != nil {
 		return err
 	}
-	e.chatStateChanged(c)
+	if stateChanged {
+		e.chatStateChanged(c)
+	}
 	return nil
 }
 

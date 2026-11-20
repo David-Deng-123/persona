@@ -135,6 +135,16 @@ type projectInput struct {
 	timelineOK   bool
 }
 
+// sameProjectEvidenceRef compares revisions. SourceID is a navigation label that can be recorded later.
+func sameProjectEvidenceRef(a, b kbwire.ProjectEvidenceRef) bool {
+	return a.Ref == b.Ref && a.Position == b.Position
+}
+
+func sameProjectCutoff(a, b kbwire.ProjectCutoff) bool {
+	return a.TimelineFrom == b.TimelineFrom && a.TimelineThrough == b.TimelineThrough &&
+		a.TimelineTruncated == b.TimelineTruncated && slices.EqualFunc(a.Sources, b.Sources, sameProjectEvidenceRef)
+}
+
 // projectEvidence reads the same bounded input on the read and refresh paths.
 // Pending chat messages are reported separately because they were not in the prompt.
 func (e *Engine) projectEvidence(p *Project, timeline projectTimeline) (projectInput, []kbwire.ProjectEvidenceRef) {
@@ -256,7 +266,9 @@ func projectReview(field string, p *Project, rec projectFieldRecord, timeline pr
 	} else {
 		count = len(current) - len(rec.Cutoff.Sources)
 		for _, ref := range rec.Cutoff.Sources {
-			if !slices.Contains(current, ref) {
+			if !slices.ContainsFunc(current, func(candidate kbwire.ProjectEvidenceRef) bool {
+				return sameProjectEvidenceRef(ref, candidate)
+			}) {
 				count++
 			}
 		}
@@ -278,7 +290,7 @@ func projectReview(field string, p *Project, rec projectFieldRecord, timeline pr
 	if rec.Cutoff == nil {
 		return &count, false, reason
 	}
-	if !slices.Equal(rec.Cutoff.Sources, current) {
+	if !slices.EqualFunc(rec.Cutoff.Sources, current, sameProjectEvidenceRef) {
 		return &count, true, "evidence_changed"
 	}
 	return &count, false, ""

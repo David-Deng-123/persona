@@ -45,8 +45,8 @@ func (e *Engine) Ingest(ctx context.Context, src Source, sc SourceChat, msgs []S
 	selecting := sel != nil && facts.Selected()
 	unchanged := func() (int, error) {
 		if exists {
-			// No new lines, but the source may report a new state (a pull request merged): record it all the same.
-			if err := e.recordChatState(c.ID, sc); err != nil {
+			// The source can report a new URL or state without adding a message.
+			if err := e.recordChatSource(c.ID, sc); err != nil {
 				return 0, err
 			}
 			e.index(KindChat, c.ID, c.Name, c.Tagging, c.OneLine, c.LastAt)
@@ -178,7 +178,7 @@ func (e *Engine) Ingest(ctx context.Context, src Source, sc SourceChat, msgs []S
 	}
 	c.Messages += len(lines)
 	c.Pending += len(lines)
-	stateChanged := noteChatState(c, sc, time.Now())
+	stateChanged, _ := noteChatSource(c, sc, time.Now())
 	usual := ""
 	if selecting {
 		usual = sel.UsualRule(ret, facts)
