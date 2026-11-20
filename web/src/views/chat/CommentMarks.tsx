@@ -1,17 +1,15 @@
-// Comments in the transcript (#2437, Moshi's "Comment"): selecting words shows a small "Comment" pill under the
-// selection (the C key does the same), which puts the words above the input as a comment card to write the note in;
-// while the comment waits there, its words stay lit in the transcript with the card's number beside them. The marks
-// are drawn in the scroller's own content, so they scroll with it; they are measured again when the transcript
-// re-renders or resizes (streaming, a fold opening), and go with the card when it is removed or sent.
+// Comments in the transcript (#2437, #11585): selecting words opens a floating one-line comment bar anchored right at
+// the selection (pressing C focuses it immediately); Enter or ✓ saves (empty note allowed), Esc cancels. Saved comments
+// stay lit in the transcript with a numbered pin beside them; clicking a pin reopens the same floating bar anchored at
+// that pin to edit or delete in place without jumping focus down to the bottom composer.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { createPortal } from "react-dom";
 import { anchorOf, onJumpToComment, rangeFor } from "../../lib/comment-marks";
 import { textQuote, type TextAnchor } from "../../lib/comments";
-import { addQuote, editNote, useQuotes } from "../../lib/drafts";
+import { addQuote, removeQuote, setNote, useQuotes } from "../../lib/drafts";
 import { focusKind } from "../../lib/shortcuts";
-import { cx, EASE } from "../../ui/atoms";
-import { Icon } from "../../ui/icons";
+import { cx } from "../../ui/atoms";
 import { scrollBehavior } from "../../ui/stream/motion";
+import { CommentBar, type CommentBarAnchor } from "./CommentBar";
 import { NumberDot } from "./CommentCard";
 import { useChatActions } from "./chat-actions";
 import { t } from "../../i18n";
@@ -21,6 +19,18 @@ interface Box {
   id: string;
   n: number;
   rects: { x: number; y: number; w: number; h: number }[];
+}
+
+interface SelectionDraft {
+  text: string;
+  anchor: TextAnchor | null;
+  rect: CommentBarAnchor;
+  focused: boolean;
+}
+
+interface PinEdit {
+  id: string;
+  rect: CommentBarAnchor;
 }
 
 const DOT = 16;
@@ -34,31 +44,49 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
   const can = Boolean(chat?.canCompose);
   const { list } = useQuotes(key);
 
-  // ── the pill ──
-  const [pill, setPill] = useState<{ x: number; y: number } | null>(null);
-  const picked = useRef<{ text: string; anchor: TextAnchor | null } | null>(null);
+  // ── floating bar for new selection ──
+  const [draft, setDraft] = useState<SelectionDraft | null>(null);
+  const draftRef = useRef<SelectionDraft | null>(null);
+  draftRef.current = draft;
+  const barInputRef = useRef<HTMLInputElement>(null);
   const dragging = useRef(false);
+
+  // ── floating bar for editing an existing pin ──
+  const [editingPin, setEditingPin] = useState<PinEdit | null>(null);
+  const editingPinRef = useRef<PinEdit | null>(null);
+  editingPinRef.current = editingPin;
 
   const read = useCallback(() => {
     const el = scroller.current;
     const sel = document.getSelection();
-    const hide = () => {
-      picked.current = null;
-      setPill((p) => (p ? null : p));
-    };
+    // Keep the bar open while the user is typing in it or editing an existing pin (focusing the input clears DOM selection).
+    if (draftRef.current?.focused || editingPinRef.current) return;
+    const hide = () => setDraft((d) => (d ? null : d));
     if (!can || !el || !sel || sel.isCollapsed || sel.rangeCount === 0 || dragging.current) return hide();
     const range = sel.getRangeAt(0);
     const text = sel.toString().trim();
     if (!text || !el.contains(range.commonAncestorContainer)) return hide();
     const rects = range.getClientRects();
+    const first = rects.length ? rects[0] : range.getBoundingClientRect();
     const last = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
     const bounds = el.getBoundingClientRect();
-    // the end of the words is out of sight: nothing to hang the pill under
+    // the end of the words is out of sight: nothing to hang the bar under
     if (last.bottom < bounds.top || last.bottom > bounds.bottom - 4) return hide();
-    picked.current = { text, anchor: anchorOf(range) };
-    const x = Math.min(Math.max(last.right - 36, 8), window.innerWidth - 112);
-    const y = last.bottom + 6;
-    setPill((p) => (p && p.x === x && p.y === y ? p : { x, y }));
+    const next: SelectionDraft = {
+      text,
+      anchor: anchorOf(range),
+      rect: { x: (last.left + last.right) / 2, top: first.top, bottom: last.bottom },
+      focused: false,
+    };
+    setDraft((prev) =>
+      prev &&
+      prev.text === next.text &&
+      prev.rect.x === next.rect.x &&
+      prev.rect.top === next.rect.top &&
+      prev.rect.bottom === next.rect.bottom
+        ? prev
+        : next,
+    );
   }, [can, scroller]);
 
   useEffect(() => {
@@ -70,8 +98,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     const down = (e: PointerEvent) => {
       if (e.target instanceof Node && scroller.current?.contains(e.target)) {
         dragging.current = true;
-        picked.current = null;
-        setPill(null);
+        setDraft(null);
       }
     };
     const up = () => {
@@ -97,27 +124,37 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     };
   }, [read, scroller]);
 
-  const add = useCallback(() => {
-    const cur = picked.current;
-    if (!cur || !key) return;
-    addQuote(key, textQuote(cur.text, cur.anchor ?? undefined), true);
-    document.getSelection()?.removeAllRanges();
-    picked.current = null;
-    setPill(null);
-  }, [key]);
-
-  // C, with words picked and the keyboard not in a field
+  // C, with words picked and the keyboard not in a field: focus the floating bar right at the selection
   useEffect(() => {
-    if (!pill) return;
+    if (!draft || draft.focused) return;
     const press = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== "c" || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.repeat || composing(e)) return;
       if (focusKind(e.target) !== "page") return;
       e.preventDefault();
-      add();
+      setDraft((d) => (d ? { ...d, focused: true } : d));
+      barInputRef.current?.focus({ preventScroll: true });
     };
     window.addEventListener("keydown", press);
     return () => window.removeEventListener("keydown", press);
-  }, [pill, add]);
+  }, [draft]);
+
+  const saveDraft = useCallback(
+    (note: string) => {
+      const cur = draftRef.current;
+      if (!cur || !key) return;
+      const q = textQuote(cur.text, cur.anchor ?? undefined);
+      if (note) q.comment!.body = note;
+      // write = false: note was already written in the floating bar; focus never jumps to the bottom composer
+      addQuote(key, q, false);
+      document.getSelection()?.removeAllRanges();
+      setDraft(null);
+    },
+    [key],
+  );
+
+  const cancelDraft = useCallback(() => {
+    setDraft(null);
+  }, []);
 
   // ── the lit words ──
   const marks = useMemo(() => {
@@ -130,10 +167,27 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     }
     return out;
   }, [list]);
+  const nextCommentNumber = useMemo(() => list.filter((q) => q.comment).length + 1, [list]);
   const [boxes, setBoxes] = useState<Box[]>([]);
   const boxesNow = useRef(boxes);
   boxesNow.current = boxes;
   const [flash, setFlash] = useState<string | null>(null);
+
+  // Close the pin editor if its comment was removed from elsewhere (e.g. composer popover).
+  const editingQuote = useMemo(() => {
+    if (!editingPin) return null;
+    let n = 0;
+    for (const q of list) {
+      if (!q.comment) continue;
+      n++;
+      if (q.id === editingPin.id) return { quote: q, n };
+    }
+    return null;
+  }, [editingPin, list]);
+
+  useEffect(() => {
+    if (editingPin && !editingQuote) setEditingPin(null);
+  }, [editingPin, editingQuote]);
 
   const measure = useCallback(() => {
     const el = scroller.current;
@@ -177,7 +231,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     };
   }, [marks, measure, scroller]);
 
-  // the card's click: scroll to the words and pulse them
+  // the chip popover's click: scroll to the words and pulse them
   const marksNow = useRef(marks);
   marksNow.current = marks;
   useEffect(
@@ -197,6 +251,12 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     [scroller, jump],
   );
 
+  const openPin = (id: string, e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setDraft(null);
+    setEditingPin({ id, rect: { x: r.right, top: r.top, bottom: r.bottom } });
+  };
+
   return (
     <>
       {boxes.length > 0 && (
@@ -215,8 +275,9 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
                 <button
                   type="button"
                   tabIndex={-1}
+                  data-comment-pin={b.n}
                   aria-label={t("chat-comments.comment_n", { n: b.n })}
-                  onClick={() => key && editNote(key, b.id)}
+                  onClick={(e) => openPin(b.id, e)}
                   className="pointer-events-auto absolute flex cursor-pointer items-center justify-center rounded-full"
                   // like a footnote mark: after the words, a little above their line
                   style={{ left: last.x + last.w - 2, top: last.y - DOT / 2, width: DOT, height: DOT }}
@@ -228,24 +289,39 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
           })}
         </div>
       )}
-      {pill &&
-        createPortal(
-          <button
-            type="button"
-            data-comment-pill
-            aria-label={t("chat-comments.pill_label")}
-            onPointerDown={(e) => e.preventDefault()}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={add}
-            className="fixed z-40 flex h-8 items-center gap-1.5 rounded-full bg-tooltip-bg pr-2 pl-3 text-[12.5px] font-medium whitespace-nowrap text-tooltip-fg shadow-overlay"
-            style={{ left: pill.x, top: pill.y, animation: `pop-in 140ms ${EASE} both` }}
-          >
-            <Icon name="chat" size={13} />
-            {t("chat-comments.pill")}
-            <kbd className="rounded-[4px] border border-tooltip-border px-1 font-sans text-[10.5px] leading-[16px] text-tooltip-muted">C</kbd>
-          </button>,
-          document.body,
-        )}
+      {draft && !editingPin && (
+        <CommentBar
+          anchor={draft.rect}
+          number={nextCommentNumber}
+          context={draft.text}
+          inputRef={barInputRef}
+          autoFocus={draft.focused}
+          onInputFocus={() => setDraft((d) => (d && !d.focused ? { ...d, focused: true } : d))}
+          onSave={saveDraft}
+          onCancel={cancelDraft}
+          ariaLabel={t("chat-comments.note_label", { n: nextCommentNumber })}
+        />
+      )}
+      {editingPin && editingQuote && (
+        <CommentBar
+          key={editingPin.id}
+          anchor={editingPin.rect}
+          number={editingQuote.n}
+          context={editingQuote.quote.text}
+          initialValue={editingQuote.quote.comment?.body ?? ""}
+          autoFocus
+          onSave={(body) => {
+            if (key) setNote(key, editingPin.id, body, true);
+            setEditingPin(null);
+          }}
+          onCancel={() => setEditingPin(null)}
+          onDelete={() => {
+            if (key) removeQuote(key, editingPin.id);
+            setEditingPin(null);
+          }}
+          ariaLabel={t("chat-comments.note_label", { n: editingQuote.n })}
+        />
+      )}
     </>
   );
 }

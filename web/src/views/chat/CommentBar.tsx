@@ -1,0 +1,245 @@
+// Floating one-line comment bar (#11585): anchored at selected transcript words, a clicked pin, or a picked code line.
+// On narrow/touch viewports (~390px or coarse pointer) it docks cleanly above the bottom viewport / soft keyboard while
+// keeping the comment's number and context visible. Enter or ✓ saves (empty note allowed), Esc cancels, and editing an
+// existing pin offers an in-place delete button.
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { createPortal } from "react-dom";
+import { MAX_COMMENT_CHARS } from "../../lib/comments";
+import { composing } from "../../lib/send-history";
+import { NO_HOVER, PHONE, useMedia } from "../../lib/viewport";
+import { cx, EASE } from "../../ui/atoms";
+import { Icon } from "../../ui/icons";
+import { NumberDot } from "./CommentCard";
+import { t } from "../../i18n";
+
+export interface CommentBarAnchor {
+  /** Preferred left/right x coordinate in viewport pixels. */
+  x: number;
+  /** Top of the anchored selection/pin/line in viewport pixels. */
+  top: number;
+  /** Bottom of the anchored selection/pin/line in viewport pixels. */
+  bottom: number;
+}
+
+export interface CommentBarProps {
+  /** Viewport anchor for desktop floating placement; null/omitted docks cleanly at the bottom. */
+  anchor?: CommentBarAnchor | null;
+  /** Comment number badge (shown when editing a pin, or on narrow dock to keep context clear). */
+  number?: number;
+  /** Short context preview (selected words or `file:line` location). Shown on narrow dock and for code lines. */
+  context?: string;
+  /** Always show the context label even on desktop (e.g. code line `src/app.ts:12-14`). */
+  showContextOnDesktop?: boolean;
+  /** Initial note value (empty for new comment, existing note when editing a pin). */
+  initialValue?: string;
+  /** Auto-focus the input on mount (true for pin edit, code lines, or after C shortcut). */
+  autoFocus?: boolean;
+  /** Optional ref to the underlying text input so callers (e.g. C shortcut) can focus it. */
+  inputRef?: RefObject<HTMLInputElement | null>;
+  /** Called when the user focuses the input (e.g. so selectionchange does not dismiss a new selection bar). */
+  onInputFocus?: () => void;
+  /** Called on Enter or ✓ click with the trimmed note (empty string allowed). */
+  onSave: (body: string) => void;
+  /** Called on Esc or outside pointerdown. */
+  onCancel: () => void;
+  /** When editing an existing comment, shows an in-place delete button. */
+  onDelete?: () => void;
+  /** Accessible label for the input field. */
+  ariaLabel?: string;
+  /** Optional portal target; defaults to `document.body`. */
+  portal?: Element | null;
+}
+
+const BAR_MAX_W = 340;
+const EDGE = 8;
+const GAP = 8;
+
+/** Computes clamped viewport coordinates for the floating bar, flipping above the anchor if near the bottom. */
+export function placeCommentBar(anchor: CommentBarAnchor, width: number, height: number, vw: number, vh: number): { left: number; top: number } {
+  const w = Math.min(width, Math.max(160, vw - EDGE * 2));
+  const left = Math.min(Math.max(anchor.x - w / 2, EDGE), Math.max(EDGE, vw - w - EDGE));
+  const below = anchor.bottom + GAP;
+  const above = anchor.top - height - GAP;
+  const top = below + height <= vh - EDGE ? below : above >= EDGE ? above : Math.max(EDGE, vh - height - EDGE);
+  return { left: Math.round(left), top: Math.round(top) };
+}
+
+export function CommentBar({
+  anchor,
+  number,
+  context,
+  showContextOnDesktop = false,
+  initialValue = "",
+  autoFocus = false,
+  inputRef,
+  onInputFocus,
+  onSave,
+  onCancel,
+  onDelete,
+  ariaLabel,
+  portal,
+}: CommentBarProps) {
+  const [body, setBody] = useState(initialValue);
+  const barRef = useRef<HTMLDivElement>(null);
+  const localInput = useRef<HTMLInputElement>(null);
+  const field = inputRef ?? localInput;
+  const isPhone = useMedia(PHONE);
+  const isTouch = useMedia(NO_HOVER);
+  const narrow = isPhone || isTouch || (typeof window !== "undefined" && window.innerWidth <= 639);
+  const docked = narrow || !anchor;
+
+  const [pos, setPos] = useState<{ left: number; top: number }>(() =>
+    anchor && typeof window !== "undefined" ? placeCommentBar(anchor, BAR_MAX_W, 44, window.innerWidth, window.innerHeight) : { left: EDGE, top: EDGE },
+  );
+
+  useEffect(() => {
+    setBody(initialValue);
+  }, [initialValue]);
+
+  useLayoutEffect(() => {
+    if (!autoFocus) return;
+    const el = field.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [autoFocus, field]);
+
+  useLayoutEffect(() => {
+    if (docked || !anchor || !barRef.current || typeof window === "undefined") return;
+    // Use unscaled layout dimensions so CSS pop-in scale transforms do not under-measure width/height.
+    const w = barRef.current.offsetWidth || BAR_MAX_W;
+    const h = barRef.current.offsetHeight || 44;
+    setPos(placeCommentBar(anchor, w, h, window.innerWidth, window.innerHeight));
+  }, [anchor, docked, showContextOnDesktop, context]);
+
+  // Dismiss when clicking/tapping outside the bar (except when the caller handles selection drags itself).
+  useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      if (!(e.target instanceof Node)) return;
+      if (barRef.current?.contains(e.target)) return;
+      // Clicking a pin button lets the pin handler switch directly to that pin.
+      if (e.target instanceof Element && e.target.closest("[data-comment-pin]")) return;
+      onCancel();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onCancel();
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [onCancel]);
+
+  const submit = () => onSave(body.trim());
+  const showContext = Boolean(context) && (docked || showContextOnDesktop);
+  const cleanContext = context ? context.replace(/\s+/g, " ").trim() : "";
+
+  const node = (
+    <div
+      ref={barRef}
+      role="dialog"
+      aria-label={ariaLabel ?? t("chat-comments.placeholder")}
+      data-comment-bar
+      data-docked={docked ? "true" : undefined}
+      onPointerDown={(e) => e.stopPropagation()}
+      className={cx(
+        "fixed z-40 flex flex-col gap-1 rounded-[12px] border border-line-strong bg-surface p-1.5 text-ink shadow-overlay",
+        docked ? "inset-x-2 max-w-[calc(100vw-16px)]" : "w-[min(340px,calc(100vw-16px))]",
+      )}
+      style={
+        docked
+          ? {
+              // Ride above the visual viewport bottom (soft keyboard on iOS/Android) with safe-area padding.
+              bottom: "calc(100dvh - var(--kb-top, 0px) - var(--kb-h, 100dvh) + env(safe-area-inset-bottom, 0px) + 8px)",
+              animation: `pop-in 140ms ${EASE} both`,
+            }
+          : {
+              left: pos.left,
+              top: pos.top,
+              animation: `pop-in 140ms ${EASE} both`,
+            }
+      }
+    >
+      {showContext && (
+        <div className="flex min-w-0 items-center gap-1.5 px-1 text-[11.5px] text-ink-3" data-comment-bar-context>
+          {number !== undefined && <NumberDot n={number} />}
+          <span className={cx("min-w-0 flex-1 truncate", showContextOnDesktop && !docked ? "font-mono text-[11px]" : "")} title={cleanContext}>
+            {cleanContext}
+          </span>
+          {docked && (
+            <button
+              type="button"
+              aria-label={t("chat-comments.cancel")}
+              title={t("chat-comments.cancel")}
+              onPointerDown={(e) => e.preventDefault()}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={onCancel}
+              className="flex size-5 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-hover-2 hover:text-ink"
+            >
+              <Icon name="x" size={11} stroke={2.4} />
+            </button>
+          )}
+        </div>
+      )}
+      <div className="flex min-w-0 items-center gap-1.5">
+        {!showContext && number !== undefined && <NumberDot n={number} className="ml-1" />}
+        <input
+          ref={field}
+          type="text"
+          value={body}
+          maxLength={MAX_COMMENT_CHARS}
+          aria-label={ariaLabel ?? t("chat-comments.placeholder")}
+          placeholder={t("chat-comments.placeholder")}
+          onFocus={onInputFocus}
+          onChange={(e) => setBody(e.target.value)}
+          onKeyDown={(e) => {
+            if (composing(e.nativeEvent)) return;
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              onCancel();
+            }
+          }}
+          className="h-7 min-w-0 flex-1 bg-transparent px-1.5 text-[13px] leading-[1.4] text-ink outline-none placeholder:text-ink-3"
+        />
+        {onDelete && (
+          <button
+            type="button"
+            data-comment-delete
+            aria-label={t("chat-comments.remove")}
+            title={t("chat-comments.remove")}
+            onPointerDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={onDelete}
+            className="flex size-7 shrink-0 items-center justify-center rounded-[8px] text-ink-3 transition-colors hover:bg-hover-2 hover:text-red"
+          >
+            <Icon name="trash" size={13} />
+          </button>
+        )}
+        <button
+          type="button"
+          data-comment-save
+          aria-label={t("chat-comments.save")}
+          title={t("chat-comments.save")}
+          onPointerDown={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={submit}
+          className="flex size-7 shrink-0 items-center justify-center rounded-[8px] bg-accent-ink text-surface transition-[filter,transform] duration-150 hover:brightness-105 active:scale-[0.95]"
+        >
+          <Icon name="check" size={14} stroke={2.4} />
+        </button>
+      </div>
+    </div>
+  );
+
+  const target = portal ?? (typeof document !== "undefined" ? document.body : null);
+  return target ? createPortal(node, target) : node;
+}

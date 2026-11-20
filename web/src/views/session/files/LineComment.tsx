@@ -1,37 +1,48 @@
-// Comments on lines of a file or a diff (#2437, Moshi's code comments): the line number turns into a + when the pointer
-// is over the row, a click (or a drag, or shift-click, over several) picks the lines, and a box under the code takes
-// the note: ⌘↵ / "Add" puts it above the message box as a comment card with the location and the code, Esc cancels. The
-// box is pinned under the list rather than set between its rows: the lists only draw the rows on screen, at a fixed height.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { lineRange, MAX_COMMENT_CHARS } from "../../../lib/comments";
-import { Button, Kbd } from "../../../ui/atoms";
+// Comments on lines of a file or a diff (#2437, #11585): the line number turns into a + when the pointer is over the
+// row, a click (or a drag, or shift-click, over several) picks the lines, and the shared floating CommentBar opens
+// anchored at the picked line (Enter or ✓ saves, Esc cancels).
+import { useEffect, useRef, useState } from "react";
+import { lineRange } from "../../../lib/comments";
 import { Icon } from "../../../ui/icons";
+import { CommentBar, type CommentBarAnchor } from "../../chat/CommentBar";
 import { NumberDot } from "../../chat/CommentCard";
 import { t } from "../../../i18n";
-import { composing } from "../../../lib/send-history";
 
 export interface LinePick {
   /** The lines picked, once the pointer let go. */
   range: { from: number; to: number } | null;
-  /** The lines being swept right now (the box waits for the pointer). */
+  /** Viewport rect of the picked line's gutter button, so the floating bar anchors right at the line. */
+  anchor: CommentBarAnchor | null;
+  /** The lines being swept right now (the bar waits for the pointer). */
   sweeping: { from: number; to: number } | null;
   down: (n: number, e: React.PointerEvent) => void;
-  enter: (n: number) => void;
+  enter: (n: number, e?: React.PointerEvent) => void;
   clear: () => void;
+}
+
+function rectOf(el: EventTarget | null): CommentBarAnchor | null {
+  if (!(el instanceof Element)) return null;
+  const r = el.getBoundingClientRect();
+  return { x: r.right + 8, top: r.top, bottom: r.bottom };
 }
 
 /** Picking lines by their numbers: pointer down starts (shift extends), moving over other rows while it is down sweeps. */
 export function useLinePick(enabled: boolean): LinePick {
   const [range, setRange] = useState<{ from: number; to: number } | null>(null);
+  const [anchor, setAnchor] = useState<CommentBarAnchor | null>(null);
   const [sweeping, setSweeping] = useState<{ from: number; to: number } | null>(null);
-  const anchor = useRef<number | null>(null);
+  const startLine = useRef<number | null>(null);
+  const anchorRef = useRef<CommentBarAnchor | null>(null);
   const drag = useRef(false);
   useEffect(() => {
     const up = () => {
       if (!drag.current) return;
       drag.current = false;
       setSweeping((s) => {
-        if (s) setRange(s);
+        if (s) {
+          setRange(s);
+          setAnchor(anchorRef.current);
+        }
         return null;
       });
     };
@@ -44,30 +55,38 @@ export function useLinePick(enabled: boolean): LinePick {
   }, []);
   return {
     range,
+    anchor,
     sweeping,
     down: (n, e) => {
       if (!enabled || e.button !== 0) return;
       e.preventDefault(); // no text selection while sweeping the numbers
-      if (e.shiftKey && anchor.current !== null) setSweeping(lineRange(anchor.current, n));
+      anchorRef.current = rectOf(e.currentTarget);
+      if (e.shiftKey && startLine.current !== null) setSweeping(lineRange(startLine.current, n));
       else {
-        anchor.current = n;
+        startLine.current = n;
         setSweeping({ from: n, to: n });
       }
       setRange(null);
+      setAnchor(null);
       drag.current = true;
     },
-    enter: (n) => {
-      if (drag.current && anchor.current !== null) setSweeping(lineRange(anchor.current, n));
+    enter: (n, e) => {
+      if (drag.current && startLine.current !== null) {
+        if (e) anchorRef.current = rectOf(e.currentTarget) ?? anchorRef.current;
+        setSweeping(lineRange(startLine.current, n));
+      }
     },
     clear: () => {
-      anchor.current = null;
+      startLine.current = null;
+      anchorRef.current = null;
       setRange(null);
+      setAnchor(null);
       setSweeping(null);
     },
   };
 }
 
-/** A row's number: the digits, a + under the pointer, the card's number where a comment waits. */
+/** A row's number: the digits, a + under the pointer, the comment's number where one waits. */
 export function GutterNumber({ n, at = n, pick, marked, enabled, className, style }: { n: number | undefined; /** What the pick counts by when it is not the number itself (a diff counts rows). */ at?: number; pick: LinePick; marked?: number; enabled: boolean; className?: string; style?: React.CSSProperties }) {
   if (n === undefined || at === undefined || !enabled) return <span className={className} style={style}>{n ?? ""}</span>;
   return (
@@ -77,7 +96,7 @@ export function GutterNumber({ n, at = n, pick, marked, enabled, className, styl
       aria-label={marked ? t("chat-comments.gutter_marked", { n: marked }) : t("chat-comments.gutter_add", { line: n })}
       title={t("chat-comments.gutter_add", { line: n })}
       onPointerDown={(e) => pick.down(at, e)}
-      onPointerEnter={() => pick.enter(at)}
+      onPointerEnter={(e) => pick.enter(at, e)}
       className={`${className ?? ""} relative flex cursor-pointer items-center justify-end`}
       style={style}
       data-gutter={n}
@@ -90,59 +109,17 @@ export function GutterNumber({ n, at = n, pick, marked, enabled, className, styl
   );
 }
 
-/** The box that takes the note for the lines picked, under the code. */
-export function LineBox({ where, onAdd, onCancel }: { where: string; onAdd: (body: string) => void; onCancel: () => void }) {
-  const [body, setBody] = useState("");
-  const field = useRef<HTMLTextAreaElement>(null);
-  useLayoutEffect(() => {
-    field.current?.focus({ preventScroll: true });
-  }, [where]);
-  useLayoutEffect(() => {
-    const el = field.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-  }, [body]);
-  const mod = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘↵" : "Ctrl ↵";
+/** Floating one-line comment bar anchored at the picked code line (or docked on narrow screens / preview panel). */
+export function LineBox({ where, anchor, onAdd, onCancel }: { where: string; anchor?: CommentBarAnchor | null; onAdd: (body: string) => void; onCancel: () => void }) {
   return (
-    <div className="flex shrink-0 flex-col gap-2 border-t border-line bg-surface px-3 py-2.5" data-line-box>
-      <div className="flex min-w-0 items-center gap-1.5 text-[12px] font-medium text-ink-3">
-        <Icon name="chat" size={13} className="shrink-0" />
-        <span className="min-w-0 truncate font-mono text-[11.5px]" title={where}>
-          {t("chat-comments.box_title", { where })}
-        </span>
-      </div>
-      <textarea
-        ref={field}
-        value={body}
-        rows={2}
-        maxLength={MAX_COMMENT_CHARS}
-        aria-label={t("chat-comments.box_label")}
-        placeholder={t("chat-comments.placeholder")}
-        onChange={(e) => setBody(e.target.value)}
-        onKeyDown={(e) => {
-          if (composing(e.nativeEvent)) return;
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            onAdd(body.trim());
-          } else if (e.key === "Escape") {
-            // not the page's Esc (it stops a running agent)
-            e.preventDefault();
-            e.stopPropagation();
-            onCancel();
-          }
-        }}
-        className="w-full resize-none rounded-[8px] bg-inset px-2.5 py-1.5 text-[13px] leading-[1.5] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1.5px_var(--accent)]"
-      />
-      <div className="flex items-center justify-end gap-2">
-        <Button tone="quiet" onClick={onCancel}>
-          {t("chat-comments.box_cancel")}
-        </Button>
-        <Button tone="accent" onClick={() => onAdd(body.trim())}>
-          {t("chat-comments.box_add")}
-          <Kbd>{mod}</Kbd>
-        </Button>
-      </div>
-    </div>
+    <CommentBar
+      anchor={anchor ?? null}
+      context={where}
+      showContextOnDesktop
+      autoFocus
+      onSave={onAdd}
+      onCancel={onCancel}
+      ariaLabel={t("chat-comments.box_label")}
+    />
   );
 }
