@@ -14,8 +14,8 @@ import { QuoteBars } from "./Quote";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-function setInputValue(input: HTMLInputElement, value: string) {
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+function setInputValue(input: HTMLTextAreaElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
   setter.call(input, value);
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
@@ -72,7 +72,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
       root.render(<CommentBar anchor={{ x: 200, top: 100, bottom: 120 }} autoFocus onSave={onSave} onCancel={onCancel} />);
     });
 
-    const input = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+    const input = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
     expect(input).toBeTruthy();
     expect(input.placeholder).toBe(t("chat-comments.placeholder"));
     expect(document.activeElement).toBe(input);
@@ -252,7 +252,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     // Floating bar appears at selection
     const bar = document.querySelector<HTMLElement>("[data-comment-bar]")!;
     expect(bar).toBeTruthy();
-    const input = bar.querySelector("input")!;
+    const input = bar.querySelector("textarea")!;
 
     // Pressing C focuses the floating bar input
     act(() => {
@@ -278,7 +278,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
 
     // Clicking the pin reopens the floating bar with existing note
     act(() => pin.click());
-    const editInput = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+    const editInput = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
     expect(editInput.value).toBe("Clarify this");
 
     // Edit in place and save
@@ -316,7 +316,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     expect(bar).toBeTruthy();
     expect(bar.querySelector("[data-comment-bar-context]")!.textContent).toContain("src/app.ts:12-14 · unstaged");
 
-    const input = bar.querySelector("input")!;
+    const input = bar.querySelector("textarea")!;
     act(() => {
       setInputValue(input, "Extract helper");
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
@@ -501,7 +501,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
       );
     });
 
-    const input = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+    const input = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
 
     // Type a change -> dirty note must NOT be discarded on outside pointerdown
     act(() => {
@@ -576,6 +576,148 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     expect(bar().dataset.docked).toBe("true");
   });
 
+  it("preserves multiline notes through open and save (Enter submits, Shift+Enter does not)", () => {
+    const onSave = vi.fn();
+    act(() => {
+      root.render(
+        <CommentBar
+          anchor={{ x: 200, top: 100, bottom: 120 }}
+          initialValue={"line one\nline two"}
+          autoFocus
+          onSave={onSave}
+          onCancel={() => {}}
+        />,
+      );
+    });
+
+    const field = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+    expect(field.value).toBe("line one\nline two");
+
+    // Shift+Enter does not submit
+    act(() => {
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
+    });
+    expect(onSave).not.toHaveBeenCalled();
+
+    // Enter saves preserving the newline
+    act(() => {
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(onSave).toHaveBeenCalledWith("line one\nline two");
+  });
+
+  it("persists a dirty popover edit when clicking the comments chip", () => {
+    const restored = parseCommentBlock(["Comment 1", "Selected text:", "> passage", "", "initial note"].join("\n"))!;
+    const id = addQuote(draftKey, restored, false);
+
+    const renderBars = () => {
+      act(() => {
+        root.render(<QuoteBars draftKey={draftKey} quotes={getQuotes(draftKey).list} onRemove={(qid) => removeQuote(draftKey, qid)} />);
+      });
+    };
+
+    renderBars();
+    const chip = host.querySelector<HTMLButtonElement>("[data-comment-chip]")!;
+    act(() => chip.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-comment-edit="1"]')!.click());
+
+    const field = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+    act(() => setInputValue(field, "dirty note before chip click"));
+
+    // Clicking the chip flushes the dirty note instead of discarding it
+    act(() => chip.click());
+    expect(getQuotes(draftKey).list.find((q) => q.id === id)?.comment?.body).toBe("dirty note before chip click");
+  });
+
+  it("persists a dirty pin edit when switching directly to another pin", () => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+
+    const q1 = textQuote("alpha", { item: "msg-1", start: 0, end: 5, exact: "alpha", before: "" });
+    q1.comment!.body = "first original";
+    const q2 = textQuote("gamma", { item: "msg-1", start: 11, end: 16, exact: "gamma", before: "beta " });
+    q2.comment!.body = "second original";
+
+    const origCreateRange = document.createRange.bind(document);
+    vi.spyOn(document, "createRange").mockImplementation(() => {
+      const r = origCreateRange();
+      mockRangeRect(r, new DOMRect(60, 40, 80, 18));
+      return r;
+    });
+
+    function PinsHarness() {
+      const scroller = useRef<HTMLDivElement>(null);
+      return (
+        <ChatActionsContext.Provider value={{ draftKey, title: "Test", canCompose: true, speaker: "Persona", images: () => [] }}>
+          <div ref={scroller} style={{ position: "relative", height: 400 }}>
+            <div>
+              <div data-items="msg-1">
+                <p>alpha beta gamma delta</p>
+              </div>
+            </div>
+            <CommentMarks scroller={scroller} />
+          </div>
+        </ChatActionsContext.Provider>
+      );
+    }
+
+    try {
+      act(() => root.render(<PinsHarness />));
+      let id1 = "";
+      let id2 = "";
+      act(() => {
+        id1 = addQuote(draftKey, q1, false);
+        id2 = addQuote(draftKey, q2, false);
+      });
+      const pin1 = host.querySelector<HTMLButtonElement>('[data-comment-pin="1"]')!;
+      const pin2 = host.querySelector<HTMLButtonElement>('[data-comment-pin="2"]')!;
+      expect(pin1).toBeTruthy();
+      expect(pin2).toBeTruthy();
+
+      // Open pin 1 and type a dirty edit
+      act(() => pin1.click());
+      const field1 = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+      act(() => setInputValue(field1, "first updated before switch"));
+
+      // Click pin 2 directly -> pin 1's dirty edit is persisted and pin 2 opens
+      act(() => pin2.click());
+      expect(getQuotes(draftKey).list.find((q) => q.id === id1)?.comment?.body).toBe("first updated before switch");
+      expect(document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!.value).toBe("second original");
+      expect(id2).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("flips/clamps the floating bar when only viewport height shrinks on resize", () => {
+    act(() => {
+      root.render(
+        <CommentBar
+          anchor={{ x: 300, top: 520, bottom: 540 }}
+          autoFocus
+          onSave={() => {}}
+          onCancel={() => {}}
+        />,
+      );
+    });
+
+    const bar = () => document.querySelector<HTMLElement>("[data-comment-bar]")!;
+    // At innerHeight=800, bar sits below anchor: 540 + 8 = 548px
+    expect(bar().style.top).toBe("548px");
+
+    // Shrink ONLY viewport height (same innerWidth=1280) so below (548 + 44 = 592) overflows 560 -> flips above (520 - 44 - 8 = 468px)
+    act(() => {
+      Object.defineProperty(window, "innerHeight", { value: 560, configurable: true });
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(bar().style.top).toBe("468px");
+  });
+
   it("distinguishes unfocused selection bar state with shortcut hint and activates cleanly on click or focus", () => {
     const onCancel = vi.fn();
     const pageEscape = vi.fn();
@@ -595,8 +737,9 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
       });
 
       const bar = document.querySelector<HTMLElement>("[data-comment-bar]")!;
-      const input = bar.querySelector<HTMLInputElement>("input")!;
+      const input = bar.querySelector<HTMLTextAreaElement>("textarea")!;
       expect(bar.dataset.focused).toBe("false");
+      expect(bar.getAttribute("role")).toBeNull();
       expect(bar.querySelector("[data-comment-shortcut]")?.textContent).toBe("C");
 
       // While dormant, Escape still passes through to the page
@@ -606,12 +749,13 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
       expect(pageEscape).toHaveBeenCalledTimes(1);
       expect(onCancel).not.toHaveBeenCalled();
 
-      // Clicking the bar focuses the input, flips data-focused="true", and hides the dormant C keycap
+      // Clicking the bar focuses the textarea, flips data-focused="true", adds role="dialog", and hides the dormant C keycap
       act(() => {
         bar.click();
       });
       expect(document.activeElement).toBe(input);
       expect(bar.dataset.focused).toBe("true");
+      expect(bar.getAttribute("role")).toBe("dialog");
       expect(bar.querySelector("[data-comment-shortcut]")).toBeNull();
 
       // Once focused, Escape cancels the bar and stops propagation to the page
@@ -636,7 +780,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
         root.render(<CommentBar anchor={{ x: 200, top: 100, bottom: 120 }} autoFocus={false} onSave={() => {}} onCancel={onCancel} />);
       });
 
-      const input = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+      const input = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
       expect(document.activeElement).not.toBe(input);
 
       // Unfocused selection bar: Escape passes through to the page handler and does not cancel
@@ -700,7 +844,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     expect(editBtn).toBeTruthy();
     act(() => editBtn.click());
 
-    const input = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+    const input = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
     expect(input.value).toBe("original note");
 
     // Modify and cancel with Esc -> stored note stays unchanged
@@ -714,7 +858,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     // Reopen popover, edit again, and save with Enter -> stored note updates
     act(() => chip.click());
     act(() => document.querySelector<HTMLButtonElement>('[data-comment-edit="1"]')!.click());
-    const input2 = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+    const input2 = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
     act(() => {
       setInputValue(input2, "updated before resend");
       input2.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));

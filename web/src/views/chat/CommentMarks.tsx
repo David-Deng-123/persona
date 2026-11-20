@@ -64,13 +64,14 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
   const [draft, setDraft] = useState<SelectionDraft | null>(null);
   const draftRef = useRef<SelectionDraft | null>(null);
   draftRef.current = draft;
-  const barInputRef = useRef<HTMLInputElement>(null);
+  const barInputRef = useRef<HTMLTextAreaElement>(null);
   const dragging = useRef(false);
 
   // ── floating bar for editing an existing pin ──
   const [editingPin, setEditingPin] = useState<PinEdit | null>(null);
   const editingPinRef = useRef<PinEdit | null>(null);
   editingPinRef.current = editingPin;
+  const pinDraftRef = useRef<string | null>(null);
 
   const reposition = useCallback(() => {
     const el = scroller.current;
@@ -283,6 +284,17 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
   );
 
   const openPin = (id: string, e: React.MouseEvent<HTMLButtonElement>) => {
+    const prev = editingPinRef.current;
+    if (prev && prev.id === id) return;
+    // Persist any unsaved edit on the previous pin before switching to another pin.
+    if (prev && key && pinDraftRef.current !== null) {
+      const prevQuote = list.find((q) => q.id === prev.id);
+      if (prevQuote?.comment && pinDraftRef.current.trim() !== prevQuote.comment.body.trim()) {
+        setNote(key, prev.id, pinDraftRef.current.trim(), true);
+      }
+    }
+    const nextQuote = list.find((q) => q.id === id);
+    pinDraftRef.current = nextQuote?.comment?.body ?? "";
     const r = e.currentTarget.getBoundingClientRect();
     setDraft(null);
     setEditingPin({ id, rect: { x: r.right, top: r.top, bottom: r.bottom } });
@@ -344,13 +356,21 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
           initialValue={editingQuote.quote.comment?.body ?? ""}
           autoFocus
           captureEscape
+          onDraftChange={(next) => {
+            pinDraftRef.current = next;
+          }}
           onSave={(body) => {
             if (key) setNote(key, editingPin.id, body, true);
+            pinDraftRef.current = null;
             setEditingPin(null);
           }}
-          onCancel={() => setEditingPin(null)}
+          onCancel={() => {
+            pinDraftRef.current = null;
+            setEditingPin(null);
+          }}
           onDelete={() => {
             if (key) removeQuote(key, editingPin.id);
+            pinDraftRef.current = null;
             setEditingPin(null);
           }}
           ariaLabel={t("chat-comments.note_label", { n: editingQuote.n })}

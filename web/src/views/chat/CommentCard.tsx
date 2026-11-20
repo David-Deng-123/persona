@@ -104,6 +104,7 @@ const GAP = 6;
 export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: string; comments: readonly DraftQuote[]; onRemove: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<{ id: string; n: number; context: string; body: string; anchor: CommentBarAnchor | null } | null>(null);
+  const editingDraftRef = useRef<string | null>(null);
   const chipRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const [place, setPlace] = useState<{ left: number; bottom: number; maxHeight: number } | null>(null);
@@ -211,6 +212,7 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
                       onClick={() => {
                         const r = chipRef.current?.getBoundingClientRect();
                         setOpen(false);
+                        editingDraftRef.current = c.body;
                         setEditing({
                           id: q.id!,
                           n,
@@ -251,6 +253,10 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => {
+          if (editing && draftKey && editingDraftRef.current !== null && editingDraftRef.current.trim() !== editing.body.trim()) {
+            setNote(draftKey, editing.id, editingDraftRef.current.trim(), true);
+          }
+          editingDraftRef.current = null;
           setEditing(null);
           setOpen((o) => !o);
         }}
@@ -272,13 +278,21 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
           initialValue={editing.body}
           autoFocus
           captureEscape
+          onDraftChange={(next) => {
+            editingDraftRef.current = next;
+          }}
           onSave={(body) => {
             setNote(draftKey, editing.id, body, true);
+            editingDraftRef.current = null;
             setEditing(null);
           }}
-          onCancel={() => setEditing(null)}
+          onCancel={() => {
+            editingDraftRef.current = null;
+            setEditing(null);
+          }}
           onDelete={() => {
             onRemove(editing.id);
+            editingDraftRef.current = null;
             setEditing(null);
           }}
           ariaLabel={t("chat-comments.note_label", { n: editing.n })}

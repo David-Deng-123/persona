@@ -34,10 +34,12 @@ export interface CommentBarProps {
   initialValue?: string;
   /** Auto-focus the input on mount (true for pin edit, code lines, or after C shortcut). */
   autoFocus?: boolean;
-  /** Optional ref to the underlying text input so callers (e.g. C shortcut) can focus it. */
-  inputRef?: RefObject<HTMLInputElement | null>;
+  /** Optional ref to the underlying text field so callers (e.g. C shortcut) can focus it. */
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
   /** Called when the user focuses the input (e.g. so selectionchange does not dismiss a new selection bar). */
   onInputFocus?: () => void;
+  /** Called on every edit so callers can flush dirty notes before switching pins or toggling popovers. */
+  onDraftChange?: (body: string) => void;
   /** Called on Enter or ✓ click with the trimmed note (empty string allowed). */
   onSave: (body: string) => void;
   /** Called on Esc or outside pointerdown. */
@@ -70,6 +72,10 @@ function getViewportWidth() {
   return typeof window === "undefined" ? 1024 : window.innerWidth;
 }
 
+function getViewportHeight() {
+  return typeof window === "undefined" ? 800 : window.innerHeight;
+}
+
 /** Computes clamped viewport coordinates for the floating bar, flipping above the anchor if near the bottom. */
 export function placeCommentBar(anchor: CommentBarAnchor, width: number, height: number, vw: number, vh: number): { left: number; top: number } {
   const w = Math.min(width, Math.max(160, vw - EDGE * 2));
@@ -89,6 +95,7 @@ export function CommentBar({
   autoFocus = false,
   inputRef,
   onInputFocus,
+  onDraftChange,
   onSave,
   onCancel,
   onDelete,
@@ -105,16 +112,17 @@ export function CommentBar({
   initialRef.current = initialValue;
   const [focused, setFocused] = useState(autoFocus);
   const barRef = useRef<HTMLDivElement>(null);
-  const localInput = useRef<HTMLInputElement>(null);
+  const localInput = useRef<HTMLTextAreaElement>(null);
   const field = inputRef ?? localInput;
   const isPhone = useMedia(PHONE);
   const isTouch = useMedia(NO_HOVER);
   const viewportWidth = useSyncExternalStore(subscribeResize, getViewportWidth, () => 1024);
+  const viewportHeight = useSyncExternalStore(subscribeResize, getViewportHeight, () => 800);
   const narrow = isPhone || isTouch || viewportWidth <= 639;
   const docked = narrow || !anchor;
 
   const [pos, setPos] = useState<{ left: number; top: number }>(() =>
-    anchor && typeof window !== "undefined" ? placeCommentBar(anchor, BAR_MAX_W, 44, window.innerWidth, window.innerHeight) : { left: EDGE, top: EDGE },
+    anchor ? placeCommentBar(anchor, BAR_MAX_W, 44, viewportWidth, viewportHeight) : { left: EDGE, top: EDGE },
   );
 
   useEffect(() => {
@@ -130,12 +138,19 @@ export function CommentBar({
   }, [autoFocus, field]);
 
   useLayoutEffect(() => {
+    const el = field.current;
+    if (!el) return;
+    el.style.height = "auto";
+    if (el.scrollHeight > 0) el.style.height = `${Math.min(el.scrollHeight, 96)}px`;
+  }, [body, field]);
+
+  useLayoutEffect(() => {
     if (docked || !anchor || !barRef.current || typeof window === "undefined") return;
     // Use unscaled layout dimensions so CSS pop-in scale transforms do not under-measure width/height.
     const w = barRef.current.offsetWidth || BAR_MAX_W;
     const h = barRef.current.offsetHeight || 44;
-    setPos(placeCommentBar(anchor, w, h, viewportWidth, window.innerHeight));
-  }, [anchor, docked, showContextOnDesktop, context, viewportWidth]);
+    setPos(placeCommentBar(anchor, w, h, viewportWidth, viewportHeight));
+  }, [anchor, docked, showContextOnDesktop, context, viewportWidth, viewportHeight, body]);
 
   // Dismiss on outside click only when the note is empty or unchanged from initialValue so typed text is never lost.
   useEffect(() => {
@@ -170,14 +185,14 @@ export function CommentBar({
   const node = (
     <div
       ref={barRef}
-      role="dialog"
+      role={focused || captureEscape ? "dialog" : undefined}
       aria-label={ariaLabel ?? t("chat-comments.placeholder")}
       data-comment-bar
       data-focused={focused ? "true" : "false"}
       data-docked={docked ? "true" : undefined}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => {
-        if (e.target instanceof Element && e.target.closest("button, input")) return;
+        if (e.target instanceof Element && e.target.closest("button, textarea")) return;
         field.current?.focus({ preventScroll: true });
       }}
       className={cx(
@@ -224,9 +239,9 @@ export function CommentBar({
       )}
       <div className="flex min-w-0 items-center gap-1.5">
         {!showContext && number !== undefined && <NumberDot n={number} className="ml-1" />}
-        <input
+        <textarea
           ref={field}
-          type="text"
+          rows={1}
           value={body}
           maxLength={MAX_COMMENT_CHARS}
           aria-label={ariaLabel ?? t("chat-comments.placeholder")}
@@ -236,10 +251,13 @@ export function CommentBar({
             onInputFocus?.();
           }}
           onBlur={() => setFocused(false)}
-          onChange={(e) => setBody(e.target.value)}
+          onChange={(e) => {
+            setBody(e.target.value);
+            onDraftChange?.(e.target.value);
+          }}
           onKeyDown={(e) => {
             if (composing(e.nativeEvent)) return;
-            if (e.key === "Enter") {
+            if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               submit();
             } else if (e.key === "Escape") {
@@ -248,7 +266,7 @@ export function CommentBar({
               onCancel();
             }
           }}
-          className="h-7 min-w-0 flex-1 bg-transparent px-1.5 text-[13px] leading-[1.4] text-ink outline-none placeholder:text-ink-3"
+          className="max-h-24 min-h-7 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1.5 py-[5px] text-[13px] leading-[1.4] text-ink outline-none placeholder:text-ink-3"
         />
         {!focused && shortcutHint && !docked && (
           <kbd
