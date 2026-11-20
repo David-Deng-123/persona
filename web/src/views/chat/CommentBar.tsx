@@ -152,14 +152,13 @@ export function CommentBar({
     setPos(placeCommentBar(anchor, w, h, viewportWidth, viewportHeight));
   }, [anchor, docked, showContextOnDesktop, context, viewportWidth, viewportHeight, body]);
 
-  // Dismiss on outside click only when the note is empty or unchanged from initialValue so typed text is never lost.
+  // Dismiss on outside click only when the note is unchanged from initialValue (raw comparison so whitespace edits are kept).
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
       if (!(e.target instanceof Node)) return;
       if (barRef.current?.contains(e.target)) return;
-      // Clicking a pin button lets the pin handler switch directly to that pin; callers may also exempt elements like line gutters.
-      if (e.target instanceof Element && (e.target.closest("[data-comment-pin]") || ignoreOutside?.(e.target))) return;
-      if (bodyRef.current.trim() !== initialRef.current.trim()) return;
+      if (e.target instanceof Element && ignoreOutside?.(e.target)) return;
+      if (bodyRef.current !== initialRef.current) return;
       onCancel();
     };
     const onKeyDown = (e: KeyboardEvent) => {

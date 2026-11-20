@@ -103,8 +103,7 @@ const GAP = 6;
 /** Single compact `"N comments"` chip above the composer; clicking opens a popover list to jump to a pin, edit a note, or remove one. */
 export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: string; comments: readonly DraftQuote[]; onRemove: (id: string) => void }) {
   const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState<{ id: string; n: number; context: string; body: string; anchor: CommentBarAnchor | null } | null>(null);
-  const editingDraftRef = useRef<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; n: number; context: string; originalBody: string; anchor: CommentBarAnchor | null } | null>(null);
   const chipRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const [place, setPlace] = useState<{ left: number; bottom: number; maxHeight: number } | null>(null);
@@ -212,12 +211,11 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
                       onClick={() => {
                         const r = chipRef.current?.getBoundingClientRect();
                         setOpen(false);
-                        editingDraftRef.current = c.body;
                         setEditing({
                           id: q.id!,
                           n,
                           context: firstWords,
-                          body: c.body,
+                          originalBody: c.body,
                           anchor: r ? { x: (r.left + r.right) / 2, top: r.top, bottom: r.bottom } : null,
                         });
                       }}
@@ -253,10 +251,7 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => {
-          if (editing && draftKey && editingDraftRef.current !== null && editingDraftRef.current.trim() !== editing.body.trim()) {
-            setNote(draftKey, editing.id, editingDraftRef.current.trim(), true);
-          }
-          editingDraftRef.current = null;
+          // Edits are live-persisted to the quote store via onDraftChange, so closing the editor keeps any typed note.
           setEditing(null);
           setOpen((o) => !o);
         }}
@@ -275,24 +270,22 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
           number={editing.n}
           context={editing.context}
           showContextOnDesktop
-          initialValue={editing.body}
+          initialValue={editing.originalBody}
           autoFocus
           captureEscape
           onDraftChange={(next) => {
-            editingDraftRef.current = next;
+            setNote(draftKey, editing.id, next, true);
           }}
           onSave={(body) => {
             setNote(draftKey, editing.id, body, true);
-            editingDraftRef.current = null;
             setEditing(null);
           }}
           onCancel={() => {
-            editingDraftRef.current = null;
+            setNote(draftKey, editing.id, editing.originalBody, true);
             setEditing(null);
           }}
           onDelete={() => {
             onRemove(editing.id);
-            editingDraftRef.current = null;
             setEditing(null);
           }}
           ariaLabel={t("chat-comments.note_label", { n: editing.n })}

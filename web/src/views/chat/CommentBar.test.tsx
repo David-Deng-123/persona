@@ -679,18 +679,129 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
       expect(pin1).toBeTruthy();
       expect(pin2).toBeTruthy();
 
-      // Open pin 1 and type a dirty edit
+    // Open pin 1 and type a dirty edit -> immediately live-persisted in the quote store (e.g. if user hits Send)
       act(() => pin1.click());
       const field1 = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
-      act(() => setInputValue(field1, "first updated before switch"));
+      act(() => setInputValue(field1, "first updated live"));
+      expect(getQuotes(draftKey).list.find((q) => q.id === id1)?.comment?.body).toBe("first updated live");
 
-      // Click pin 2 directly -> pin 1's dirty edit is persisted and pin 2 opens
+      // Re-clicking the same pin preserves the typed textarea without resetting it
+      act(() => pin1.click());
+      expect(document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!.value).toBe("first updated live");
+
+      // Click pin 2 directly -> pin 1's live edit stays persisted and pin 2 opens
       act(() => pin2.click());
-      expect(getQuotes(draftKey).list.find((q) => q.id === id1)?.comment?.body).toBe("first updated before switch");
+      expect(getQuotes(draftKey).list.find((q) => q.id === id1)?.comment?.body).toBe("first updated live");
       expect(document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!.value).toBe("second original");
-      expect(id2).toBeTruthy();
+
+      // Typing in pin 2 live-persists, and explicit Esc restores pin 2's originalBody
+      const field2 = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+      act(() => setInputValue(field2, "second temporary edit"));
+      expect(getQuotes(draftKey).list.find((q) => q.id === id2)?.comment?.body).toBe("second temporary edit");
+      act(() => {
+        field2.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      expect(getQuotes(draftKey).list.find((q) => q.id === id2)?.comment?.body).toBe("second original");
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("treats whitespace-only edits as dirty and does not ignore [data-comment-pin] clicks from CommentsChip editor", () => {
+    const restored = parseCommentBlock(["Comment 1", "Selected text:", "> passage", "", "clean"].join("\n"))!;
+    const id = addQuote(draftKey, restored, false);
+
+    // Mount an unrelated pin button outside the chip editor
+    const pin = document.createElement("button");
+    pin.setAttribute("data-comment-pin", "1");
+    document.body.appendChild(pin);
+
+    try {
+      act(() => {
+        root.render(<QuoteBars draftKey={draftKey} quotes={getQuotes(draftKey).list} onRemove={(qid) => removeQuote(draftKey, qid)} />);
+      });
+      const chip = host.querySelector<HTMLButtonElement>("[data-comment-chip]")!;
+      act(() => chip.click());
+      act(() => document.querySelector<HTMLButtonElement>('[data-comment-edit="1"]')!.click());
+
+      // When clean, clicking an external [data-comment-pin] dismisses CommentsChip's editor (not unconditionally exempt)
+      act(() => {
+        pin.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      });
+      expect(document.querySelector("[data-comment-bar]")).toBeNull();
+
+      // Reopen and add trailing whitespace -> raw dirty comparison keeps the bar open on outside click and live-persists
+      act(() => chip.click());
+      act(() => document.querySelector<HTMLButtonElement>('[data-comment-edit="1"]')!.click());
+      const field = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+      act(() => setInputValue(field, "clean "));
+      expect(getQuotes(draftKey).list.find((q) => q.id === id)?.comment?.body).toBe("clean ");
+      act(() => {
+        pin.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      });
+      expect(document.querySelector("[data-comment-bar]")).toBeTruthy();
+
+      // Esc restores originalBody
+      act(() => {
+        field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      expect(getQuotes(draftKey).list.find((q) => q.id === id)?.comment?.body).toBe("clean");
+    } finally {
+      pin.remove();
+    }
+  });
+
+  it("does not query another mounted file's gutter when scopeRef is missing or disconnected", () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 1;
+    });
+
+    // Mount an unrelated file's gutter button with data-gutter-at="2" elsewhere in the document
+    const foreignGutter = document.createElement("button");
+    foreignGutter.setAttribute("data-gutter-at", "2");
+    foreignGutter.getBoundingClientRect = () => new DOMRect(500, 300, 32, 20);
+    document.body.appendChild(foreignGutter);
+
+    let latestAnchor: { x: number; top: number; bottom: number } | null = null;
+    function UnscopedHarness({ showRow }: { showRow: boolean }) {
+      const pick = useLinePick(true);
+      latestAnchor = pick.anchor;
+      return (
+        <div>
+          {showRow && <GutterNumber n={2} pick={pick} enabled />}
+          {pick.range && (
+            <LineBox
+              where={`src/app.ts:${pick.range.from}-${pick.range.to}`}
+              anchor={pick.anchor}
+              onAdd={() => pick.clear()}
+              onCancel={pick.clear}
+            />
+          )}
+        </div>
+      );
+    }
+
+    try {
+      act(() => root.render(<UnscopedHarness showRow />));
+      const line2 = host.querySelector<HTMLButtonElement>('[data-gutter="2"]')!;
+      line2.getBoundingClientRect = () => new DOMRect(10, 120, 32, 20);
+
+      act(() => {
+        line2.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
+        window.dispatchEvent(new Event("pointerup"));
+      });
+      expect(latestAnchor).toEqual({ x: 50, top: 120, bottom: 140 });
+
+      // Unmount our row (simulating virtualization) with no connected scopeRef -> scroll must dock (null), NOT latch onto foreignGutter
+      act(() => root.render(<UnscopedHarness showRow={false} />));
+      act(() => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+      expect(latestAnchor).toBeNull();
+      expect(document.querySelector<HTMLElement>("[data-comment-bar]")?.dataset.docked).toBe("true");
+    } finally {
+      foreignGutter.remove();
     }
   });
 

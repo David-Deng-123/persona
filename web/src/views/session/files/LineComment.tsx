@@ -77,9 +77,9 @@ export function useLinePick(enabled: boolean): LinePick {
     let frame = 0;
     const measure = () => {
       let el = anchorElRef.current;
-      if ((!el || !el.isConnected) && startLine.current !== null) {
-        const root = scopeRef.current?.isConnected ? scopeRef.current : document;
-        el = root.querySelector(`[data-gutter-at="${startLine.current}"]`);
+      // Only re-query within our own connected scroll container so another mounted file/diff gutter is never matched.
+      if ((!el || !el.isConnected) && startLine.current !== null && scopeRef.current?.isConnected) {
+        el = scopeRef.current.querySelector(`[data-gutter-at="${startLine.current}"]`);
         if (el) anchorElRef.current = el;
       }
       const next = visibleRectOf(el);
