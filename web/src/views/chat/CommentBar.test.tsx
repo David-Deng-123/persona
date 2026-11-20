@@ -486,6 +486,96 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     expect(bar().dataset.docked).toBeUndefined();
   });
 
+  it("keeps the bar open on outside pointerdown when the note is dirty, and dismisses when empty or unchanged", () => {
+    const onCancel = vi.fn();
+
+    act(() => {
+      root.render(
+        <CommentBar
+          anchor={{ x: 200, top: 100, bottom: 120 }}
+          initialValue="existing note"
+          autoFocus
+          onSave={() => {}}
+          onCancel={onCancel}
+        />,
+      );
+    });
+
+    const input = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+
+    // Type a change -> dirty note must NOT be discarded on outside pointerdown
+    act(() => {
+      setInputValue(input, "existing note updated");
+      document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    });
+    expect(onCancel).not.toHaveBeenCalled();
+
+    // Restore original value -> clean/unchanged note dismisses on outside pointerdown
+    act(() => {
+      setInputValue(input, "existing note");
+      document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-anchors LineBox on scroll and switches to docked placement when the start line scrolls out of view", () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 1;
+    });
+
+    function ScrollLineHarness() {
+      const pick = useLinePick(true);
+      return (
+        <div data-testid="file-code">
+          {[1, 2, 3].map((n) => (
+            <GutterNumber key={n} n={n} pick={pick} enabled />
+          ))}
+          {pick.range && (
+            <LineBox
+              where={`src/app.ts:${pick.range.from}-${pick.range.to}`}
+              anchor={pick.anchor}
+              onAdd={() => pick.clear()}
+              onCancel={pick.clear}
+            />
+          )}
+        </div>
+      );
+    }
+
+    act(() => root.render(<ScrollLineHarness />));
+
+    const container = host.querySelector<HTMLDivElement>('[data-testid="file-code"]')!;
+    container.getBoundingClientRect = () => new DOMRect(0, 100, 600, 400);
+    const line2 = host.querySelector<HTMLButtonElement>('[data-gutter="2"]')!;
+    let currentTop = 200;
+    line2.getBoundingClientRect = () => new DOMRect(10, currentTop, 32, 20);
+
+    // Pick line 2 -> opens floating near y=228 (200 + 20 + 8)
+    act(() => {
+      line2.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
+      window.dispatchEvent(new Event("pointerup"));
+    });
+    const bar = () => document.querySelector<HTMLElement>("[data-comment-bar]")!;
+    expect(bar().dataset.docked).toBeUndefined();
+    expect(bar().style.top).toBe("228px");
+
+    // Scroll container so line 2 moves up to y=140 -> bar follows to y=168
+    act(() => {
+      currentTop = 140;
+      container.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+    expect(bar().dataset.docked).toBeUndefined();
+    expect(bar().style.top).toBe("168px");
+
+    // Scroll container so line 2 leaves container bounds (above top=100) -> bar docks
+    act(() => {
+      currentTop = 40;
+      container.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+    expect(bar().dataset.docked).toBe("true");
+  });
+
   it("distinguishes unfocused selection bar state with shortcut hint and activates cleanly on click or focus", () => {
     const onCancel = vi.fn();
     const pageEscape = vi.fn();

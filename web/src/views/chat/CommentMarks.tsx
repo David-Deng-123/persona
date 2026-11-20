@@ -24,17 +24,33 @@ interface Box {
 interface SelectionDraft {
   text: string;
   anchor: TextAnchor | null;
-  rect: CommentBarAnchor;
+  range: Range;
+  rect: CommentBarAnchor | null;
   focused: boolean;
 }
 
 interface PinEdit {
   id: string;
-  rect: CommentBarAnchor;
+  rect: CommentBarAnchor | null;
 }
 
 const DOT = 16;
 const FLASH_MS = 1400;
+
+function sameAnchor(a: CommentBarAnchor | null, b: CommentBarAnchor | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.x === b.x && a.top === b.top && a.bottom === b.bottom;
+}
+
+function rectInBounds(range: Range, bounds: DOMRect): CommentBarAnchor | null {
+  const rects = range.getClientRects();
+  const first = rects.length ? rects[0] : range.getBoundingClientRect();
+  const last = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+  if (last.width === 0 && last.height === 0) return null;
+  if (last.bottom < bounds.top || first.top > bounds.bottom - 4) return null;
+  return { x: (last.left + last.right) / 2, top: first.top, bottom: last.bottom };
+}
 
 /** `jump`: brings words into view `topOffset` px from the top and keeps them there while the exchanges around them are
  *  drawn (ChatView landRow); without it, the scroller's own smooth scroll. */
@@ -56,38 +72,53 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
   const editingPinRef = useRef<PinEdit | null>(null);
   editingPinRef.current = editingPin;
 
+  const reposition = useCallback(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const bounds = el.getBoundingClientRect();
+    const curDraft = draftRef.current;
+    if (curDraft?.focused) {
+      const r = (curDraft.anchor ? rangeFor(el, curDraft.anchor) : null) ?? curDraft.range;
+      const nextRect = r ? rectInBounds(r, bounds) : null;
+      setDraft((prev) => (prev && prev.focused && !sameAnchor(prev.rect, nextRect) ? { ...prev, rect: nextRect } : prev));
+    }
+    const curPin = editingPinRef.current;
+    if (curPin) {
+      const btn = [...el.querySelectorAll<HTMLElement>("[data-comment-pin-id]")].find((node) => node.dataset.commentPinId === curPin.id);
+      let nextRect: CommentBarAnchor | null = null;
+      if (btn) {
+        const r = btn.getBoundingClientRect();
+        if (r.bottom >= bounds.top && r.top <= bounds.bottom) nextRect = { x: r.right, top: r.top, bottom: r.bottom };
+      }
+      setEditingPin((prev) => (prev && prev.id === curPin.id && !sameAnchor(prev.rect, nextRect) ? { ...prev, rect: nextRect } : prev));
+    }
+  }, [scroller]);
+
   const read = useCallback(() => {
     const el = scroller.current;
     const sel = document.getSelection();
-    // Keep the bar open while the user is typing in it or editing an existing pin (focusing the input clears DOM selection).
-    if (draftRef.current?.focused || editingPinRef.current) return;
+    // Keep the bar open while the user is typing in it or editing an existing pin; only re-measure its anchor on scroll/resize.
+    if (draftRef.current?.focused || editingPinRef.current) {
+      reposition();
+      return;
+    }
     const hide = () => setDraft((d) => (d ? null : d));
     if (!can || !el || !sel || sel.isCollapsed || sel.rangeCount === 0 || dragging.current) return hide();
     const range = sel.getRangeAt(0);
     const text = sel.toString().trim();
     if (!text || !el.contains(range.commonAncestorContainer)) return hide();
-    const rects = range.getClientRects();
-    const first = rects.length ? rects[0] : range.getBoundingClientRect();
-    const last = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
-    const bounds = el.getBoundingClientRect();
+    const rect = rectInBounds(range, el.getBoundingClientRect());
     // the end of the words is out of sight: nothing to hang the bar under
-    if (last.bottom < bounds.top || last.bottom > bounds.bottom - 4) return hide();
+    if (!rect) return hide();
     const next: SelectionDraft = {
       text,
       anchor: anchorOf(range),
-      rect: { x: (last.left + last.right) / 2, top: first.top, bottom: last.bottom },
+      range: range.cloneRange(),
+      rect,
       focused: false,
     };
-    setDraft((prev) =>
-      prev &&
-      prev.text === next.text &&
-      prev.rect.x === next.rect.x &&
-      prev.rect.top === next.rect.top &&
-      prev.rect.bottom === next.rect.bottom
-        ? prev
-        : next,
-    );
-  }, [can, scroller]);
+    setDraft((prev) => (prev && prev.text === next.text && sameAnchor(prev.rect, next.rect) ? prev : next));
+  }, [can, scroller, reposition]);
 
   useEffect(() => {
     let frame = 0;
@@ -98,7 +129,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     const down = (e: PointerEvent) => {
       if (e.target instanceof Node && scroller.current?.contains(e.target)) {
         dragging.current = true;
-        setDraft(null);
+        if (!draftRef.current?.focused) setDraft(null);
       }
     };
     const up = () => {
@@ -276,6 +307,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
                   type="button"
                   tabIndex={-1}
                   data-comment-pin={b.n}
+                  data-comment-pin-id={b.id}
                   aria-label={t("chat-comments.comment_n", { n: b.n })}
                   onClick={(e) => openPin(b.id, e)}
                   className="pointer-events-auto absolute flex cursor-pointer items-center justify-center rounded-full"

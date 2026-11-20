@@ -99,6 +99,10 @@ export function CommentBar({
   portal,
 }: CommentBarProps) {
   const [body, setBody] = useState(initialValue);
+  const bodyRef = useRef(body);
+  bodyRef.current = body;
+  const initialRef = useRef(initialValue);
+  initialRef.current = initialValue;
   const [focused, setFocused] = useState(autoFocus);
   const barRef = useRef<HTMLDivElement>(null);
   const localInput = useRef<HTMLInputElement>(null);
@@ -133,13 +137,14 @@ export function CommentBar({
     setPos(placeCommentBar(anchor, w, h, viewportWidth, window.innerHeight));
   }, [anchor, docked, showContextOnDesktop, context, viewportWidth]);
 
-  // Dismiss when clicking/tapping outside the bar (except when the caller handles selection drags itself).
+  // Dismiss on outside click only when the note is empty or unchanged from initialValue so typed text is never lost.
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
       if (!(e.target instanceof Node)) return;
       if (barRef.current?.contains(e.target)) return;
       // Clicking a pin button lets the pin handler switch directly to that pin; callers may also exempt elements like line gutters.
       if (e.target instanceof Element && (e.target.closest("[data-comment-pin]") || ignoreOutside?.(e.target))) return;
+      if (bodyRef.current.trim() !== initialRef.current.trim()) return;
       onCancel();
     };
     const onKeyDown = (e: KeyboardEvent) => {

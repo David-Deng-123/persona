@@ -26,6 +26,23 @@ function rectOf(el: EventTarget | null): CommentBarAnchor | null {
   return { x: r.right + 8, top: r.top, bottom: r.bottom };
 }
 
+function visibleRectOf(el: Element | null): CommentBarAnchor | null {
+  if (!el || !el.isConnected) return null;
+  const r = el.getBoundingClientRect();
+  if (r.width === 0 && r.height === 0) return null;
+  const scroller = el.closest("[data-testid='diff'], [data-testid='file-code']") ?? el.parentElement?.closest("[class*='overflow-']");
+  const bounds = scroller ? scroller.getBoundingClientRect() : new DOMRect(0, 0, window.innerWidth, window.innerHeight);
+  if (r.bottom < bounds.top || r.top > bounds.bottom) return null;
+  if (r.bottom < 0 || r.top > window.innerHeight) return null;
+  return { x: r.right + 8, top: r.top, bottom: r.bottom };
+}
+
+function sameAnchor(a: CommentBarAnchor | null, b: CommentBarAnchor | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.x === b.x && a.top === b.top && a.bottom === b.bottom;
+}
+
 /** Picking lines by their numbers: pointer down starts (shift extends), moving over other rows while it is down sweeps. */
 export function useLinePick(enabled: boolean): LinePick {
   const [range, setRange] = useState<{ from: number; to: number } | null>(null);
@@ -33,6 +50,8 @@ export function useLinePick(enabled: boolean): LinePick {
   const [sweeping, setSweeping] = useState<{ from: number; to: number } | null>(null);
   const startLine = useRef<number | null>(null);
   const anchorRef = useRef<CommentBarAnchor | null>(null);
+  const anchorElRef = useRef<Element | null>(null);
+  const scopeRef = useRef<Element | null>(null);
   const drag = useRef(false);
   useEffect(() => {
     const up = () => {
@@ -53,6 +72,32 @@ export function useLinePick(enabled: boolean): LinePick {
       window.removeEventListener("pointercancel", up);
     };
   }, []);
+  useEffect(() => {
+    if (!range) return;
+    let frame = 0;
+    const measure = () => {
+      let el = anchorElRef.current;
+      if ((!el || !el.isConnected) && startLine.current !== null) {
+        const root = scopeRef.current?.isConnected ? scopeRef.current : document;
+        el = root.querySelector(`[data-gutter-at="${startLine.current}"]`);
+        if (el) anchorElRef.current = el;
+      }
+      const next = visibleRectOf(el);
+      anchorRef.current = next;
+      setAnchor((prev) => (sameAnchor(prev, next) ? prev : next));
+    };
+    const soon = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    };
+    window.addEventListener("scroll", soon, true);
+    window.addEventListener("resize", soon);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", soon, true);
+      window.removeEventListener("resize", soon);
+    };
+  }, [range]);
   return {
     range,
     anchor,
@@ -61,10 +106,16 @@ export function useLinePick(enabled: boolean): LinePick {
       if (!enabled || e.button !== 0) return;
       e.preventDefault(); // no text selection while sweeping the numbers
       if (e.shiftKey && startLine.current !== null) {
-        if (!anchorRef.current) anchorRef.current = rectOf(e.currentTarget);
+        if (!anchorRef.current) {
+          anchorElRef.current = e.currentTarget;
+          scopeRef.current = e.currentTarget.closest("[data-testid='diff'], [data-testid='file-code']") ?? null;
+          anchorRef.current = rectOf(e.currentTarget);
+        }
         setSweeping(lineRange(startLine.current, n));
       } else {
         startLine.current = n;
+        anchorElRef.current = e.currentTarget;
+        scopeRef.current = e.currentTarget.closest("[data-testid='diff'], [data-testid='file-code']") ?? null;
         anchorRef.current = rectOf(e.currentTarget);
         setSweeping({ from: n, to: n });
       }
@@ -75,13 +126,18 @@ export function useLinePick(enabled: boolean): LinePick {
     enter: (n, e) => {
       if (drag.current && startLine.current !== null) {
         // Keep the anchor at the start line where the pick began; only populate if missing.
-        if (!anchorRef.current && e) anchorRef.current = rectOf(e.currentTarget);
+        if (!anchorRef.current && e) {
+          anchorElRef.current = e.currentTarget;
+          anchorRef.current = rectOf(e.currentTarget);
+        }
         setSweeping(lineRange(startLine.current, n));
       }
     },
     clear: () => {
       startLine.current = null;
       anchorRef.current = null;
+      anchorElRef.current = null;
+      scopeRef.current = null;
       setRange(null);
       setAnchor(null);
       setSweeping(null);
@@ -103,6 +159,7 @@ export function GutterNumber({ n, at = n, pick, marked, enabled, className, styl
       className={`${className ?? ""} relative flex cursor-pointer items-center justify-end`}
       style={style}
       data-gutter={n}
+      data-gutter-at={at}
     >
       <span className="[@media(hover:hover)]:group-hover/row:invisible">{marked ? <NumberDot n={marked} /> : n}</span>
       <span aria-hidden className="absolute inset-y-0 right-1.5 hidden items-center text-accent-ink [@media(hover:hover)]:group-hover/row:flex">
