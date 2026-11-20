@@ -3,6 +3,7 @@
   "placeholder": "Add optional comment…",
   "note_label": "Comment {n}",
   "save": "Save comment",
+  "edit": "Edit comment",
   "cancel": "Cancel",
   "count_one": "{count} comment",
   "count_other": "{count} comments",

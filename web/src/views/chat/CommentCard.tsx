@@ -7,9 +7,10 @@ import { jumpToComment } from "../../lib/comment-marks";
 import { codePreview, diffLabel, openSpot, rangeLabel, type CodeSpot, type ElementSpot } from "../../lib/comments";
 import { openPanel } from "../../lib/panel";
 import { addressOf } from "../../lib/preview";
-import type { DraftQuote } from "../../lib/drafts";
+import { setNote, type DraftQuote } from "../../lib/drafts";
 import { cx, EASE, toast } from "../../ui/atoms";
 import { Icon } from "../../ui/icons";
+import { CommentBar, type CommentBarAnchor } from "./CommentBar";
 import { t } from "../../i18n";
 
 /** `staged`, `unstaged`, `commit 1a2b3c4d`, worded for the reader. */
@@ -99,12 +100,17 @@ const POPOVER_MAX_W = 340;
 const EDGE = 8;
 const GAP = 6;
 
-/** Single compact `"N comments"` chip above the composer; clicking opens a popover list to jump to a pin or remove one. */
-export function CommentsChip({ comments, onRemove }: { comments: readonly DraftQuote[]; onRemove: (id: string) => void }) {
+/** Single compact `"N comments"` chip above the composer; clicking opens a popover list to jump to a pin, edit a note, or remove one. */
+export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: string; comments: readonly DraftQuote[]; onRemove: (id: string) => void }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<{ id: string; n: number; context: string; body: string; anchor: CommentBarAnchor | null } | null>(null);
   const chipRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const [place, setPlace] = useState<{ left: number; bottom: number; maxHeight: number } | null>(null);
+
+  useEffect(() => {
+    if (editing && !comments.some((q) => q.id === editing.id)) setEditing(null);
+  }, [editing, comments]);
 
   useLayoutEffect(() => {
     if (!open || !chipRef.current || typeof window === "undefined") return;
@@ -196,6 +202,28 @@ export function CommentsChip({ comments, onRemove }: { comments: readonly DraftQ
                       {note && <span className="truncate text-[12.5px] leading-[1.35] text-ink">{note}</span>}
                     </span>
                   </button>
+                  {draftKey && q.id && (
+                    <button
+                      type="button"
+                      data-comment-edit={n}
+                      aria-label={t("chat-comments.edit")}
+                      title={t("chat-comments.edit")}
+                      onClick={() => {
+                        const r = chipRef.current?.getBoundingClientRect();
+                        setOpen(false);
+                        setEditing({
+                          id: q.id!,
+                          n,
+                          context: firstWords,
+                          body: c.body,
+                          anchor: r ? { x: (r.left + r.right) / 2, top: r.top, bottom: r.bottom } : null,
+                        });
+                      }}
+                      className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-hover-2 hover:text-ink"
+                    >
+                      <Icon name="pencil" size={12} />
+                    </button>
+                  )}
                   <button
                     type="button"
                     data-comment-remove={n}
@@ -222,7 +250,10 @@ export function CommentsChip({ comments, onRemove }: { comments: readonly DraftQ
         data-comment-chip
         aria-expanded={open}
         aria-haspopup="dialog"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          setEditing(null);
+          setOpen((o) => !o);
+        }}
         className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-full bg-accent-tint px-2.5 text-[12px] font-medium whitespace-nowrap text-accent-ink transition-[filter,transform] duration-150 hover:brightness-95 active:scale-[0.98] dark:hover:brightness-110"
         style={{ animation: `pop-in 160ms ${EASE} both` }}
       >
@@ -231,6 +262,28 @@ export function CommentsChip({ comments, onRemove }: { comments: readonly DraftQ
         <Icon name="chevron" size={11} className={cx("shrink-0 transition-transform duration-150", open && "rotate-180")} />
       </button>
       {popover}
+      {editing && draftKey && (
+        <CommentBar
+          key={editing.id}
+          anchor={editing.anchor}
+          number={editing.n}
+          context={editing.context}
+          showContextOnDesktop
+          initialValue={editing.body}
+          autoFocus
+          captureEscape
+          onSave={(body) => {
+            setNote(draftKey, editing.id, body, true);
+            setEditing(null);
+          }}
+          onCancel={() => setEditing(null)}
+          onDelete={() => {
+            onRemove(editing.id);
+            setEditing(null);
+          }}
+          ariaLabel={t("chat-comments.note_label", { n: editing.n })}
+        />
+      )}
     </div>
   );
 }

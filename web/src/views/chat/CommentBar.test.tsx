@@ -3,10 +3,10 @@ import { act, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { onJumpToComment } from "../../lib/comment-marks";
-import { textQuote } from "../../lib/comments";
+import { textQuote, parseCommentBlock } from "../../lib/comments";
 import { addQuote, getQuotes, removeQuote, setQuotes, withQuoteBlock } from "../../lib/drafts";
 import { t } from "../../i18n";
-import { LineBox } from "../session/files/LineComment";
+import { GutterNumber, LineBox, useLinePick } from "../session/files/LineComment";
 import { ChatActionsContext } from "./chat-actions";
 import { CommentBar, placeCommentBar } from "./CommentBar";
 import { CommentMarks } from "./CommentMarks";
@@ -322,6 +322,143 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });
     expect(onAdd).toHaveBeenCalledWith("Extract helper");
+  });
+
+  it("extends the picked line range on shift-click even while LineBox is already open", () => {
+    function GutterHarness() {
+      const pick = useLinePick(true);
+      return (
+        <div>
+          {[1, 2, 3, 4, 5].map((n) => (
+            <GutterNumber key={n} n={n} pick={pick} enabled />
+          ))}
+          {pick.range && (
+            <LineBox
+              where={`src/app.ts:${pick.range.from}-${pick.range.to}`}
+              anchor={pick.anchor}
+              onAdd={() => pick.clear()}
+              onCancel={pick.clear}
+            />
+          )}
+        </div>
+      );
+    }
+
+    act(() => root.render(<GutterHarness />));
+
+    const line2 = host.querySelector<HTMLButtonElement>('[data-gutter="2"]')!;
+    const line5 = host.querySelector<HTMLButtonElement>('[data-gutter="5"]')!;
+
+    // Pick line 2 first -> opens LineBox at 2-2
+    act(() => {
+      line2.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
+      window.dispatchEvent(new Event("pointerup"));
+    });
+    expect(document.querySelector("[data-comment-bar-context]")?.textContent).toContain("src/app.ts:2-2");
+
+    // Shift-click line 5 while LineBox is open -> extends range to 2-5 instead of resetting startLine
+    act(() => {
+      line5.dispatchEvent(new MouseEvent("pointerdown", { button: 0, shiftKey: true, bubbles: true }));
+      window.dispatchEvent(new Event("pointerup"));
+    });
+    expect(document.querySelector("[data-comment-bar-context]")?.textContent).toContain("src/app.ts:2-5");
+  });
+
+  it("lets Escape pass through when selection bar is unfocused and ignores Escape during IME composition", () => {
+    const onCancel = vi.fn();
+    const pageEscape = vi.fn();
+    window.addEventListener("keydown", pageEscape);
+
+    try {
+      act(() => {
+        root.render(<CommentBar anchor={{ x: 200, top: 100, bottom: 120 }} autoFocus={false} onSave={() => {}} onCancel={onCancel} />);
+      });
+
+      const input = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+      expect(document.activeElement).not.toBe(input);
+
+      // Unfocused selection bar: Escape passes through to the page handler and does not cancel
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      expect(pageEscape).toHaveBeenCalledTimes(1);
+      expect(onCancel).not.toHaveBeenCalled();
+
+      // Focused bar during IME composition: Escape does not close the bar or lose input
+      act(() => {
+        input.focus();
+        setInputValue(input, "nihon");
+        const imeEsc = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+        Object.defineProperty(imeEsc, "isComposing", { value: true });
+        input.dispatchEvent(imeEsc);
+      });
+      expect(onCancel).not.toHaveBeenCalled();
+      expect(input.value).toBe("nihon");
+
+      // Focused bar with normal Escape: intercepts and cancels without reaching page listener
+      pageEscape.mockClear();
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      expect(pageEscape).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("keydown", pageEscape);
+    }
+  });
+
+  it("edits a pinless comment from the CommentsChip popover and preserves the original note on cancel", () => {
+    // Simulate a comment restored from a sent message (parseCommentBlock -> no transcript/gutter anchor)
+    const restored = parseCommentBlock(["Comment 1", "Selected text:", "> restored passage", "", "original note"].join("\n"))!;
+    expect(restored.comment?.anchor).toBeUndefined();
+    const id = addQuote(draftKey, restored, false);
+
+    const renderBars = () => {
+      const quotes = getQuotes(draftKey).list;
+      act(() => {
+        root.render(
+          <QuoteBars
+            draftKey={draftKey}
+            quotes={quotes}
+            onRemove={(qid) => {
+              removeQuote(draftKey, qid);
+              renderBars();
+            }}
+          />,
+        );
+      });
+    };
+
+    renderBars();
+    const chip = host.querySelector<HTMLButtonElement>("[data-comment-chip]")!;
+
+    // Open popover and click edit -> opens CommentBar prefilled with original note
+    act(() => chip.click());
+    const editBtn = document.querySelector<HTMLButtonElement>('[data-comment-edit="1"]')!;
+    expect(editBtn).toBeTruthy();
+    act(() => editBtn.click());
+
+    const input = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+    expect(input.value).toBe("original note");
+
+    // Modify and cancel with Esc -> stored note stays unchanged
+    act(() => {
+      setInputValue(input, "discarded edit");
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(document.querySelector("[data-comment-bar]")).toBeNull();
+    expect(getQuotes(draftKey).list.find((q) => q.id === id)?.comment?.body).toBe("original note");
+
+    // Reopen popover, edit again, and save with Enter -> stored note updates
+    act(() => chip.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-comment-edit="1"]')!.click());
+    const input2 = document.querySelector<HTMLInputElement>("[data-comment-bar] input")!;
+    act(() => {
+      setInputValue(input2, "updated before resend");
+      input2.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(document.querySelector("[data-comment-bar]")).toBeNull();
+    expect(getQuotes(draftKey).list.find((q) => q.id === id)?.comment?.body).toBe("updated before resend");
   });
 
   it("keeps outgoing serialized message format unchanged", () => {

@@ -3,6 +3,7 @@
   "placeholder": "任意のコメントを追加…",
   "note_label": "コメント {n}",
   "save": "コメントを保存",
+  "edit": "コメントを編集",
   "cancel": "キャンセル",
   "count_other": "{count} 件のコメント",
   "list_label": "コメント一覧",

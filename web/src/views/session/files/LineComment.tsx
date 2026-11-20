@@ -110,6 +110,8 @@ export function GutterNumber({ n, at = n, pick, marked, enabled, className, styl
 }
 
 /** Floating one-line comment bar anchored at the picked code line (or docked on narrow screens / preview panel). */
+const isLineGutter = (el: Element) => Boolean(el.closest("[data-gutter]"));
+
 export function LineBox({ where, anchor, onAdd, onCancel }: { where: string; anchor?: CommentBarAnchor | null; onAdd: (body: string) => void; onCancel: () => void }) {
   return (
     <CommentBar
@@ -117,6 +119,8 @@ export function LineBox({ where, anchor, onAdd, onCancel }: { where: string; anc
       context={where}
       showContextOnDesktop
       autoFocus
+      captureEscape
+      ignoreOutside={isLineGutter}
       onSave={onAdd}
       onCancel={onCancel}
       ariaLabel={t("chat-comments.box_label")}

@@ -46,6 +46,10 @@ export interface CommentBarProps {
   onDelete?: () => void;
   /** Accessible label for the input field. */
   ariaLabel?: string;
+  /** Elements matching this predicate do not trigger outside-click dismissal (e.g. code line gutters for shift-click range extension). */
+  ignoreOutside?: (target: Element) => boolean;
+  /** Intercept window-level Escape even if focus is outside the bar (true for explicit modals like pin edit / line box; false for unfocused text selection). */
+  captureEscape?: boolean;
   /** Optional portal target; defaults to `document.body`. */
   portal?: Element | null;
 }
@@ -77,6 +81,8 @@ export function CommentBar({
   onCancel,
   onDelete,
   ariaLabel,
+  ignoreOutside,
+  captureEscape = false,
   portal,
 }: CommentBarProps) {
   const [body, setBody] = useState(initialValue);
@@ -117,12 +123,14 @@ export function CommentBar({
     const onPointerDown = (e: PointerEvent) => {
       if (!(e.target instanceof Node)) return;
       if (barRef.current?.contains(e.target)) return;
-      // Clicking a pin button lets the pin handler switch directly to that pin.
-      if (e.target instanceof Element && e.target.closest("[data-comment-pin]")) return;
+      // Clicking a pin button lets the pin handler switch directly to that pin; callers may also exempt elements like line gutters.
+      if (e.target instanceof Element && (e.target.closest("[data-comment-pin]") || ignoreOutside?.(e.target))) return;
       onCancel();
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || composing(e)) return;
+      const inside = Boolean(barRef.current && document.activeElement && barRef.current.contains(document.activeElement));
+      if (!inside && !captureEscape) return;
       e.preventDefault();
       e.stopPropagation();
       onCancel();
@@ -133,7 +141,7 @@ export function CommentBar({
       document.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [onCancel]);
+  }, [onCancel, ignoreOutside, captureEscape]);
 
   const submit = () => onSave(body.trim());
   const showContext = Boolean(context) && (docked || showContextOnDesktop);

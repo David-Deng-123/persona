@@ -310,6 +310,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
           context={editingQuote.quote.text}
           initialValue={editingQuote.quote.comment?.body ?? ""}
           autoFocus
+          captureEscape
           onSave={(body) => {
             if (key) setNote(key, editingPin.id, body, true);
             setEditingPin(null);

@@ -52,7 +52,7 @@ export function QuoteBar({ quote, onRemove }: { quote: DraftQuote; onRemove: () 
 }
 
 /** Everything waiting above the input: the message quote (at most one), then a single compact chip for all comments. */
-export function QuoteBars({ quotes, onRemove }: { draftKey?: string; quotes: readonly DraftQuote[]; onRemove: (id: string) => void }) {
+export function QuoteBars({ draftKey, quotes, onRemove }: { draftKey?: string; quotes: readonly DraftQuote[]; onRemove: (id: string) => void }) {
   const messageQuotes = quotes.filter((q) => !q.comment);
   const comments = quotes.filter((q) => q.comment);
   return (
@@ -60,7 +60,7 @@ export function QuoteBars({ quotes, onRemove }: { draftKey?: string; quotes: rea
       {messageQuotes.map((q) => (
         <QuoteBar key={q.id} quote={q} onRemove={() => onRemove(q.id!)} />
       ))}
-      {comments.length > 0 && <CommentsChip comments={comments} onRemove={onRemove} />}
+      {comments.length > 0 && <CommentsChip draftKey={draftKey} comments={comments} onRemove={onRemove} />}
     </div>
   );
 }
