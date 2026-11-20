@@ -75,6 +75,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
   const [draft, setDraft] = useState<SelectionDraft | null>(null);
   const draftRef = useRef<SelectionDraft | null>(null);
   draftRef.current = draft;
+  const draftNoteRef = useRef("");
   const barInputRef = useRef<HTMLTextAreaElement>(null);
   const dragging = useRef(false);
 
@@ -191,12 +192,14 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
       // write = false: note was already written in the floating bar; focus never jumps to the bottom composer
       addQuote(key, q, false);
       document.getSelection()?.removeAllRanges();
+      draftNoteRef.current = "";
       setDraft(null);
     },
     [key],
   );
 
   const cancelDraft = useCallback(() => {
+    draftNoteRef.current = "";
     setDraft(null);
   }, []);
 
@@ -297,10 +300,15 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
 
   const openPin = (id: string, e: React.MouseEvent<HTMLButtonElement>) => {
     if (editingPinRef.current?.id === id) return;
+    // Save any non-empty note typed in a new-selection bar before switching to the clicked pin.
+    if (draftRef.current && draftNoteRef.current.trim()) saveDraft(draftNoteRef.current.trim());
+    else {
+      draftNoteRef.current = "";
+      setDraft(null);
+    }
     // Previous pin edits are already live-persisted via onDraftChange; snapshot the newly opened pin's originalBody once.
     const nextQuote = list.find((q) => q.id === id);
     const r = e.currentTarget.getBoundingClientRect();
-    setDraft(null);
     setEditingPin({ id, rect: { x: r.right, top: r.top, bottom: r.bottom }, originalBody: nextQuote?.comment?.body ?? "" });
   };
 
@@ -347,6 +355,9 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
           shortcutHint="C"
           ignoreOutside={isCommentPin}
           onInputFocus={() => setDraft((d) => (d && !d.focused ? { ...d, focused: true } : d))}
+          onDraftChange={(next) => {
+            draftNoteRef.current = next;
+          }}
           onSave={saveDraft}
           onCancel={cancelDraft}
           ariaLabel={t("chat-comments.note_label", { n: nextCommentNumber })}

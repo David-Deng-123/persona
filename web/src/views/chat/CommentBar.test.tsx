@@ -751,6 +751,86 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     }
   });
 
+  it("saves a non-empty note typed in a new-selection bar when clicking an existing pin", () => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 1;
+    });
+
+    const origCreateRange = document.createRange.bind(document);
+    vi.spyOn(document, "createRange").mockImplementation(() => {
+      const r = origCreateRange();
+      mockRangeRect(r, new DOMRect(60, 40, 80, 18));
+      return r;
+    });
+
+    function DraftToPinHarness() {
+      const scroller = useRef<HTMLDivElement>(null);
+      return (
+        <ChatActionsContext.Provider value={{ draftKey, title: "Test", canCompose: true, speaker: "Persona", images: () => [] }}>
+          <div ref={scroller} style={{ position: "relative", height: 400 }}>
+            <div>
+              <div data-items="msg-1">
+                <p>alpha beta gamma delta</p>
+              </div>
+            </div>
+            <CommentMarks scroller={scroller} />
+          </div>
+        </ChatActionsContext.Provider>
+      );
+    }
+
+    try {
+      act(() => root.render(<DraftToPinHarness />));
+      const scroller = host.firstElementChild as HTMLDivElement;
+      scroller.getBoundingClientRect = () => new DOMRect(0, 0, 800, 400);
+
+      // Seed existing comment pin 1 on "alpha"
+      const existing = textQuote("alpha", { item: "msg-1", start: 0, end: 5, exact: "alpha", before: "" });
+      existing.comment!.body = "existing note";
+      act(() => {
+        addQuote(draftKey, existing, false);
+      });
+      const pin1 = host.querySelector<HTMLButtonElement>('[data-comment-pin="1"]')!;
+      expect(pin1).toBeTruthy();
+
+      // Select "gamma" to open a new-selection bar, focus it, and type a note
+      const textNode = host.querySelector("p")!.firstChild as Text;
+      const range = origCreateRange();
+      range.setStart(textNode, 11);
+      range.setEnd(textNode, 16);
+      mockRangeRect(range, new DOMRect(120, 40, 60, 18));
+      const sel = document.getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      act(() => {
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+      const draftField = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+      act(() => {
+        draftField.focus();
+        setInputValue(draftField, "do not lose this");
+      });
+
+      // Clicking pin 1 saves the typed new-selection comment before opening pin 1
+      act(() => pin1.click());
+      const list = getQuotes(draftKey).list;
+      expect(list).toHaveLength(2);
+      expect(list[1].text).toBe("gamma");
+      expect(list[1].comment?.body).toBe("do not lose this");
+      expect(document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!.value).toBe("existing note");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not query another mounted file's gutter when scopeRef is missing or disconnected", () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
       cb(0);
