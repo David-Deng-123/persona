@@ -11,8 +11,13 @@ import (
 // noteChatState puts the state sc reports on c; it reports whether that changed c's state. A source that reports no
 // state leaves c's as it is.
 func noteChatState(c *Chat, sc SourceChat, now time.Time) bool {
+	pointerChanged := false
+	if _, link := canonicalSourceURL(sc.SourceURL); link != "" && link != c.SourceURL {
+		c.SourceURL = link
+		pointerChanged = true
+	}
 	if sc.State == "" || sc.State == c.State {
-		return false
+		return pointerChanged
 	}
 	c.State, c.StateAt = sc.State, sc.StateAt.UTC()
 	if c.StateAt.IsZero() {
@@ -24,7 +29,7 @@ func noteChatState(c *Chat, sc SourceChat, now time.Time) bool {
 // recordChatState records the state sc reports on the stored chat id when it changed: Ingest's path for a batch with
 // no new lines.
 func (e *Engine) recordChatState(id string, sc SourceChat) error {
-	if sc.State == "" {
+	if sc.State == "" && sc.SourceURL == "" {
 		return nil
 	}
 	e.Store.chatMu.Lock()
@@ -51,7 +56,7 @@ func (e *Engine) recordChatState(id string, sc SourceChat) error {
 func (e *Engine) chatStateChanged(c *Chat) {
 	for _, slug := range c.Projects {
 		p, ok := e.Store.Project(slug)
-		if !ok || !p.Live() || p.Status == "ignored" || p.Dirty {
+		if !ok || !p.Live() || p.referenceOnly() || p.Status == "ignored" || p.Dirty {
 			continue
 		}
 		p.Dirty = true
@@ -96,7 +101,7 @@ func (e *Engine) FinishProjects(now time.Time, busy func(slug string) bool) []st
 	}
 	var out []string
 	for _, p := range e.Store.Projects() {
-		if !p.Live() || p.Status != "active" && p.Status != "paused" || p.Kind == "long" || p.fieldLocked("status") {
+		if !p.Live() || p.referenceOnly() || p.Status != "active" && p.Status != "paused" || p.Kind == "long" || p.fieldLocked("status") {
 			continue
 		}
 		if busy != nil && busy(p.Slug) {
