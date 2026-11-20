@@ -169,14 +169,14 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     };
   }, [read, scroller]);
 
-  // C, with words picked and the keyboard not in a field: focus the floating bar right at the selection
+  // C, with words picked and the keyboard not in a field: focus (or refocus after blur) the floating bar at the selection
   useEffect(() => {
-    if (!draft || draft.focused) return;
+    if (!draft) return;
     const press = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== "c" || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.repeat || composing(e)) return;
       if (focusKind(e.target) !== "page") return;
       e.preventDefault();
-      setDraft((d) => (d ? { ...d, focused: true } : d));
+      setDraft((d) => (d && !d.focused ? { ...d, focused: true } : d));
       barInputRef.current?.focus({ preventScroll: true });
     };
     window.addEventListener("keydown", press);
@@ -360,6 +360,10 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
           }}
           onSave={saveDraft}
           onCancel={cancelDraft}
+          onYield={() => {
+            if (draftNoteRef.current.trim()) saveDraft(draftNoteRef.current.trim());
+            else cancelDraft();
+          }}
           ariaLabel={t("chat-comments.note_label", { n: nextCommentNumber })}
         />
       )}
@@ -384,6 +388,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
             if (key) setNote(key, editingPin.id, editingPin.originalBody, true);
             setEditingPin(null);
           }}
+          onYield={() => setEditingPin(null)}
           onDelete={() => {
             if (key) removeQuote(key, editingPin.id);
             setEditingPin(null);

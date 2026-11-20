@@ -831,6 +831,137 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     }
   });
 
+  it("closes an active chip editor without reverting when a transcript pin is opened, so Esc only cancels the pin edit", () => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+
+    const origCreateRange = document.createRange.bind(document);
+    vi.spyOn(document, "createRange").mockImplementation(() => {
+      const r = origCreateRange();
+      mockRangeRect(r, new DOMRect(60, 40, 80, 18));
+      return r;
+    });
+
+    function CombinedHarness() {
+      const scroller = useRef<HTMLDivElement>(null);
+      return (
+        <ChatActionsContext.Provider value={{ draftKey, title: "Test", canCompose: true, speaker: "Persona", images: () => [] }}>
+          <div ref={scroller} style={{ position: "relative", height: 400 }}>
+            <div>
+              <div data-items="msg-1">
+                <p>alpha beta gamma delta</p>
+              </div>
+            </div>
+            <CommentMarks scroller={scroller} />
+          </div>
+          <QuoteBars draftKey={draftKey} quotes={getQuotes(draftKey).list} onRemove={(id) => removeQuote(draftKey, id)} />
+        </ChatActionsContext.Provider>
+      );
+    }
+
+    try {
+      const q1 = textQuote("alpha", { item: "msg-1", start: 0, end: 5, exact: "alpha", before: "" });
+      q1.comment!.body = "pin one original";
+      const q2 = parseCommentBlock(["Comment 2", "Selected text:", "> pinless", "", "chip original"].join("\n"))!;
+      act(() => root.render(<CombinedHarness />));
+      let id1 = "";
+      let id2 = "";
+      act(() => {
+        id1 = addQuote(draftKey, q1, false);
+        id2 = addQuote(draftKey, q2, false);
+      });
+      act(() => root.render(<CombinedHarness />));
+
+      // Open chip editor for comment 2 and type a dirty edit
+      const chip = host.querySelector<HTMLButtonElement>("[data-comment-chip]")!;
+      act(() => chip.click());
+      act(() => document.querySelector<HTMLButtonElement>('[data-comment-edit="2"]')!.click());
+      const chipField = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+      act(() => setInputValue(chipField, "chip updated live"));
+      expect(getQuotes(draftKey).list.find((q) => q.id === id2)?.comment?.body).toBe("chip updated live");
+
+      // Click transcript pin 1 -> chip editor yields cleanly (keeping its live edit) and only pin 1 bar remains mounted
+      const pin1 = host.querySelector<HTMLButtonElement>('[data-comment-pin="1"]')!;
+      act(() => pin1.click());
+      expect(document.querySelectorAll("[data-comment-bar]")).toHaveLength(1);
+      expect(getQuotes(draftKey).list.find((q) => q.id === id2)?.comment?.body).toBe("chip updated live");
+
+      // Type in pin 1 and press Esc -> reverts ONLY pin 1, leaving comment 2's chip edit intact
+      const pinField = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+      act(() => setInputValue(pinField, "pin one temporary"));
+      act(() => {
+        pinField.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      expect(getQuotes(draftKey).list.find((q) => q.id === id1)?.comment?.body).toBe("pin one original");
+      expect(getQuotes(draftKey).list.find((q) => q.id === id2)?.comment?.body).toBe("chip updated live");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refocuses a selection bar on C after the user blurs the textarea", () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 1;
+    });
+
+    function BlurRefocusHarness() {
+      const scroller = useRef<HTMLDivElement>(null);
+      return (
+        <ChatActionsContext.Provider value={{ draftKey, title: "Test", canCompose: true, speaker: "Persona", images: () => [] }}>
+          <div ref={scroller} style={{ position: "relative", height: 400 }}>
+            <div>
+              <div data-items="msg-1">
+                <p>alpha beta gamma delta</p>
+              </div>
+            </div>
+            <CommentMarks scroller={scroller} />
+          </div>
+        </ChatActionsContext.Provider>
+      );
+    }
+
+    act(() => root.render(<BlurRefocusHarness />));
+    const scroller = host.firstElementChild as HTMLDivElement;
+    scroller.getBoundingClientRect = () => new DOMRect(0, 0, 800, 400);
+
+    const textNode = host.querySelector("p")!.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 6);
+    range.setEnd(textNode, 10);
+    mockRangeRect(range, new DOMRect(60, 40, 40, 18));
+    const sel = document.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    act(() => {
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+
+    const field = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+    // First press C -> focuses bar
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "c", bubbles: true }));
+    });
+    expect(document.activeElement).toBe(field);
+
+    // Blur the textarea -> bar goes dormant again
+    act(() => {
+      field.blur();
+    });
+    expect(document.activeElement).not.toBe(field);
+
+    // Press C again -> refocuses the bar cleanly
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "c", bubbles: true }));
+    });
+    expect(document.activeElement).toBe(field);
+  });
+
   it("does not query another mounted file's gutter when scopeRef is missing or disconnected", () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
       cb(0);

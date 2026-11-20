@@ -44,6 +44,8 @@ export interface CommentBarProps {
   onSave: (body: string) => void;
   /** Called on Esc or outside pointerdown. */
   onCancel: () => void;
+  /** Called when another CommentBar takes active ownership; closes cleanly without reverting live-persisted edits. */
+  onYield?: () => void;
   /** When editing an existing comment, shows an in-place delete button. */
   onDelete?: () => void;
   /** Accessible label for the input field. */
@@ -61,6 +63,9 @@ export interface CommentBarProps {
 const BAR_MAX_W = 340;
 const EDGE = 8;
 const GAP = 8;
+
+type ActiveBar = { id: symbol; yieldControl: () => void };
+let activeBar: ActiveBar | null = null;
 
 function subscribeResize(onStoreChange: () => void) {
   if (typeof window === "undefined") return () => {};
@@ -98,6 +103,7 @@ export function CommentBar({
   onDraftChange,
   onSave,
   onCancel,
+  onYield,
   onDelete,
   ariaLabel,
   ignoreOutside,
@@ -110,7 +116,14 @@ export function CommentBar({
   bodyRef.current = body;
   const initialRef = useRef(initialValue);
   initialRef.current = initialValue;
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
+  const onYieldRef = useRef(onYield);
+  onYieldRef.current = onYield;
   const [focused, setFocused] = useState(autoFocus);
+  const active = focused || captureEscape;
   const barRef = useRef<HTMLDivElement>(null);
   const localInput = useRef<HTMLTextAreaElement>(null);
   const field = inputRef ?? localInput;
@@ -128,6 +141,25 @@ export function CommentBar({
   useEffect(() => {
     setBody(initialValue);
   }, [initialValue]);
+
+  useLayoutEffect(() => {
+    if (!active) return;
+    const id = Symbol();
+    const prev = activeBar;
+    const mine: ActiveBar = {
+      id,
+      yieldControl: () => {
+        if (onYieldRef.current) onYieldRef.current();
+        else if (bodyRef.current !== initialRef.current) onSaveRef.current(bodyRef.current.trim());
+        else onCancelRef.current();
+      },
+    };
+    activeBar = mine;
+    if (prev && prev.id !== id) prev.yieldControl();
+    return () => {
+      if (activeBar?.id === id) activeBar = null;
+    };
+  }, [active]);
 
   useLayoutEffect(() => {
     if (!autoFocus) return;
