@@ -2,7 +2,7 @@
 // On narrow/touch viewports (~390px or coarse pointer) it docks cleanly above the bottom viewport / soft keyboard while
 // keeping the comment's number and context visible. Enter or ✓ saves (empty note allowed), Esc cancels, and editing an
 // existing pin offers an in-place delete button.
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { MAX_COMMENT_CHARS } from "../../lib/comments";
 import { composing } from "../../lib/send-history";
@@ -60,6 +60,16 @@ const BAR_MAX_W = 340;
 const EDGE = 8;
 const GAP = 8;
 
+function subscribeResize(onStoreChange: () => void) {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener("resize", onStoreChange);
+  return () => window.removeEventListener("resize", onStoreChange);
+}
+
+function getViewportWidth() {
+  return typeof window === "undefined" ? 1024 : window.innerWidth;
+}
+
 /** Computes clamped viewport coordinates for the floating bar, flipping above the anchor if near the bottom. */
 export function placeCommentBar(anchor: CommentBarAnchor, width: number, height: number, vw: number, vh: number): { left: number; top: number } {
   const w = Math.min(width, Math.max(160, vw - EDGE * 2));
@@ -95,7 +105,8 @@ export function CommentBar({
   const field = inputRef ?? localInput;
   const isPhone = useMedia(PHONE);
   const isTouch = useMedia(NO_HOVER);
-  const narrow = isPhone || isTouch || (typeof window !== "undefined" && window.innerWidth <= 639);
+  const viewportWidth = useSyncExternalStore(subscribeResize, getViewportWidth, () => 1024);
+  const narrow = isPhone || isTouch || viewportWidth <= 639;
   const docked = narrow || !anchor;
 
   const [pos, setPos] = useState<{ left: number; top: number }>(() =>
@@ -119,8 +130,8 @@ export function CommentBar({
     // Use unscaled layout dimensions so CSS pop-in scale transforms do not under-measure width/height.
     const w = barRef.current.offsetWidth || BAR_MAX_W;
     const h = barRef.current.offsetHeight || 44;
-    setPos(placeCommentBar(anchor, w, h, window.innerWidth, window.innerHeight));
-  }, [anchor, docked, showContextOnDesktop, context]);
+    setPos(placeCommentBar(anchor, w, h, viewportWidth, window.innerHeight));
+  }, [anchor, docked, showContextOnDesktop, context, viewportWidth]);
 
   // Dismiss when clicking/tapping outside the bar (except when the caller handles selection drags itself).
   useEffect(() => {

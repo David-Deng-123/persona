@@ -404,6 +404,88 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     expect(latestAnchor).toEqual({ x: 50, top: 120, bottom: 140 });
   });
 
+  it("establishes a new start line when shift-click dragging after a cancelled or saved pick", () => {
+    let latestAnchor: { x: number; top: number; bottom: number } | null = null;
+    function ShiftDragHarness() {
+      const pick = useLinePick(true);
+      latestAnchor = pick.anchor;
+      return (
+        <div>
+          {[1, 2, 3, 4, 5].map((n) => (
+            <GutterNumber key={n} n={n} pick={pick} enabled />
+          ))}
+          {pick.range && (
+            <LineBox
+              where={`src/app.ts:${pick.range.from}-${pick.range.to}`}
+              anchor={pick.anchor}
+              onAdd={() => pick.clear()}
+              onCancel={pick.clear}
+            />
+          )}
+        </div>
+      );
+    }
+
+    act(() => root.render(<ShiftDragHarness />));
+
+    const line1 = host.querySelector<HTMLButtonElement>('[data-gutter="1"]')!;
+    const line3 = host.querySelector<HTMLButtonElement>('[data-gutter="3"]')!;
+    const line5 = host.querySelector<HTMLButtonElement>('[data-gutter="5"]')!;
+    line3.getBoundingClientRect = () => new DOMRect(10, 200, 32, 20);
+    line5.getBoundingClientRect = () => new DOMRect(10, 280, 32, 20);
+
+    // Pick line 1 and cancel via Escape (calls pick.clear(), resetting startLine to null)
+    act(() => {
+      line1.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
+      window.dispatchEvent(new Event("pointerup"));
+    });
+    expect(document.querySelector("[data-comment-bar-context]")?.textContent).toContain("src/app.ts:1-1");
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(document.querySelector("[data-comment-bar]")).toBeNull();
+
+    // Shift-click line 3 and drag to line 5 -> establishes start line 3 and sweeps 3-5
+    act(() => {
+      line3.dispatchEvent(new MouseEvent("pointerdown", { button: 0, shiftKey: true, bubbles: true }));
+      line5.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+      window.dispatchEvent(new Event("pointerup"));
+    });
+    expect(document.querySelector("[data-comment-bar-context]")?.textContent).toContain("src/app.ts:3-5");
+    expect(latestAnchor).toEqual({ x: 50, top: 200, bottom: 220 });
+  });
+
+  it("reactively switches between floating and docked placement when viewport width crosses 639px on resize", () => {
+    act(() => {
+      root.render(
+        <CommentBar
+          anchor={{ x: 300, top: 200, bottom: 220 }}
+          number={1}
+          context="Resize reactivity check"
+          onSave={() => {}}
+          onCancel={() => {}}
+        />,
+      );
+    });
+
+    const bar = () => document.querySelector<HTMLElement>("[data-comment-bar]")!;
+    expect(bar().dataset.docked).toBeUndefined();
+
+    // Shrink window below 639px and fire resize -> docks immediately
+    act(() => {
+      Object.defineProperty(window, "innerWidth", { value: 390, configurable: true });
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(bar().dataset.docked).toBe("true");
+
+    // Grow window back above 639px and fire resize -> returns to floating placement
+    act(() => {
+      Object.defineProperty(window, "innerWidth", { value: 1280, configurable: true });
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(bar().dataset.docked).toBeUndefined();
+  });
+
   it("distinguishes unfocused selection bar state with shortcut hint and activates cleanly on click or focus", () => {
     const onCancel = vi.fn();
     const pageEscape = vi.fn();
