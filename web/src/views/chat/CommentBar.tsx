@@ -50,6 +50,8 @@ export interface CommentBarProps {
   ignoreOutside?: (target: Element) => boolean;
   /** Intercept window-level Escape even if focus is outside the bar (true for explicit modals like pin edit / line box; false for unfocused text selection). */
   captureEscape?: boolean;
+  /** Optional single-key shortcut badge (e.g. "C") shown while the bar is dormant/unfocused so users know how to focus it. */
+  shortcutHint?: string;
   /** Optional portal target; defaults to `document.body`. */
   portal?: Element | null;
 }
@@ -83,9 +85,11 @@ export function CommentBar({
   ariaLabel,
   ignoreOutside,
   captureEscape = false,
+  shortcutHint,
   portal,
 }: CommentBarProps) {
   const [body, setBody] = useState(initialValue);
+  const [focused, setFocused] = useState(autoFocus);
   const barRef = useRef<HTMLDivElement>(null);
   const localInput = useRef<HTMLInputElement>(null);
   const field = inputRef ?? localInput;
@@ -153,10 +157,18 @@ export function CommentBar({
       role="dialog"
       aria-label={ariaLabel ?? t("chat-comments.placeholder")}
       data-comment-bar
+      data-focused={focused ? "true" : "false"}
       data-docked={docked ? "true" : undefined}
       onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        if (e.target instanceof Element && e.target.closest("button, input")) return;
+        field.current?.focus({ preventScroll: true });
+      }}
       className={cx(
-        "fixed z-40 flex flex-col gap-1 rounded-[12px] border border-line-strong bg-surface p-1.5 text-ink shadow-overlay",
+        "fixed z-40 flex flex-col gap-1 rounded-[12px] border p-1.5 text-ink transition-[border-color,box-shadow,background-color] duration-150",
+        focused
+          ? "border-accent bg-surface shadow-[0_0_0_1.5px_var(--accent),var(--shadow-overlay)]"
+          : "border-line bg-surface/95 shadow-raised hover:border-line-strong",
         docked ? "inset-x-2 max-w-[calc(100vw-16px)]" : "w-[min(340px,calc(100vw-16px))]",
       )}
       style={
@@ -203,7 +215,11 @@ export function CommentBar({
           maxLength={MAX_COMMENT_CHARS}
           aria-label={ariaLabel ?? t("chat-comments.placeholder")}
           placeholder={t("chat-comments.placeholder")}
-          onFocus={onInputFocus}
+          onFocus={() => {
+            setFocused(true);
+            onInputFocus?.();
+          }}
+          onBlur={() => setFocused(false)}
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={(e) => {
             if (composing(e.nativeEvent)) return;
@@ -218,6 +234,15 @@ export function CommentBar({
           }}
           className="h-7 min-w-0 flex-1 bg-transparent px-1.5 text-[13px] leading-[1.4] text-ink outline-none placeholder:text-ink-3"
         />
+        {!focused && shortcutHint && !docked && (
+          <kbd
+            data-comment-shortcut
+            aria-hidden="true"
+            className="shrink-0 rounded-[5px] border border-line-strong bg-inset px-1.5 py-0.5 font-sans text-[10.5px] leading-none font-medium text-ink-3"
+          >
+            {shortcutHint}
+          </kbd>
+        )}
         {onDelete && (
           <button
             type="button"

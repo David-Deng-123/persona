@@ -296,6 +296,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
           context={draft.text}
           inputRef={barInputRef}
           autoFocus={draft.focused}
+          shortcutHint="C"
           onInputFocus={() => setDraft((d) => (d && !d.focused ? { ...d, focused: true } : d))}
           onSave={saveDraft}
           onCancel={cancelDraft}

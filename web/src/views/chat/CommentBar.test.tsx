@@ -364,6 +364,96 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     expect(document.querySelector("[data-comment-bar-context]")?.textContent).toContain("src/app.ts:2-5");
   });
 
+  it("keeps LineBox anchored at the drag start line when sweeping across multiple gutter rows", () => {
+    let latestAnchor: { x: number; top: number; bottom: number } | null = null;
+    function DragHarness() {
+      const pick = useLinePick(true);
+      latestAnchor = pick.anchor;
+      return (
+        <div>
+          {[1, 2, 3, 4, 5].map((n) => (
+            <GutterNumber key={n} n={n} pick={pick} enabled />
+          ))}
+          {pick.range && (
+            <LineBox
+              where={`src/app.ts:${pick.range.from}-${pick.range.to}`}
+              anchor={pick.anchor}
+              onAdd={() => pick.clear()}
+              onCancel={pick.clear}
+            />
+          )}
+        </div>
+      );
+    }
+
+    act(() => root.render(<DragHarness />));
+
+    const line2 = host.querySelector<HTMLButtonElement>('[data-gutter="2"]')!;
+    const line5 = host.querySelector<HTMLButtonElement>('[data-gutter="5"]')!;
+    line2.getBoundingClientRect = () => new DOMRect(10, 120, 32, 20);
+    line5.getBoundingClientRect = () => new DOMRect(10, 740, 32, 20);
+
+    // Drag from line 2 down to line 5 -> range is 2-5, anchor stays at line 2 (top: 120, bottom: 140)
+    act(() => {
+      line2.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
+      line5.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+      window.dispatchEvent(new Event("pointerup"));
+    });
+
+    expect(document.querySelector("[data-comment-bar-context]")?.textContent).toContain("src/app.ts:2-5");
+    expect(latestAnchor).toEqual({ x: 50, top: 120, bottom: 140 });
+  });
+
+  it("distinguishes unfocused selection bar state with shortcut hint and activates cleanly on click or focus", () => {
+    const onCancel = vi.fn();
+    const pageEscape = vi.fn();
+    window.addEventListener("keydown", pageEscape);
+
+    try {
+      act(() => {
+        root.render(
+          <CommentBar
+            anchor={{ x: 200, top: 100, bottom: 120 }}
+            autoFocus={false}
+            shortcutHint="C"
+            onSave={() => {}}
+            onCancel={onCancel}
+          />,
+        );
+      });
+
+      const bar = document.querySelector<HTMLElement>("[data-comment-bar]")!;
+      const input = bar.querySelector<HTMLInputElement>("input")!;
+      expect(bar.dataset.focused).toBe("false");
+      expect(bar.querySelector("[data-comment-shortcut]")?.textContent).toBe("C");
+
+      // While dormant, Escape still passes through to the page
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      expect(pageEscape).toHaveBeenCalledTimes(1);
+      expect(onCancel).not.toHaveBeenCalled();
+
+      // Clicking the bar focuses the input, flips data-focused="true", and hides the dormant C keycap
+      act(() => {
+        bar.click();
+      });
+      expect(document.activeElement).toBe(input);
+      expect(bar.dataset.focused).toBe("true");
+      expect(bar.querySelector("[data-comment-shortcut]")).toBeNull();
+
+      // Once focused, Escape cancels the bar and stops propagation to the page
+      pageEscape.mockClear();
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      expect(pageEscape).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("keydown", pageEscape);
+    }
+  });
+
   it("lets Escape pass through when selection bar is unfocused and ignores Escape during IME composition", () => {
     const onCancel = vi.fn();
     const pageEscape = vi.fn();

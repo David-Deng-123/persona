@@ -60,10 +60,12 @@ export function useLinePick(enabled: boolean): LinePick {
     down: (n, e) => {
       if (!enabled || e.button !== 0) return;
       e.preventDefault(); // no text selection while sweeping the numbers
-      anchorRef.current = rectOf(e.currentTarget);
-      if (e.shiftKey && startLine.current !== null) setSweeping(lineRange(startLine.current, n));
-      else {
+      if (e.shiftKey && startLine.current !== null) {
+        if (!anchorRef.current) anchorRef.current = rectOf(e.currentTarget);
+        setSweeping(lineRange(startLine.current, n));
+      } else {
         startLine.current = n;
+        anchorRef.current = rectOf(e.currentTarget);
         setSweeping({ from: n, to: n });
       }
       setRange(null);
@@ -72,7 +74,8 @@ export function useLinePick(enabled: boolean): LinePick {
     },
     enter: (n, e) => {
       if (drag.current && startLine.current !== null) {
-        if (e) anchorRef.current = rectOf(e.currentTarget) ?? anchorRef.current;
+        // Keep the anchor at the start line where the pick began; only populate if missing.
+        if (!anchorRef.current && e) anchorRef.current = rectOf(e.currentTarget);
         setSweeping(lineRange(startLine.current, n));
       }
     },
