@@ -5,8 +5,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { MAX_COMMENT_CHARS } from "../../lib/comments";
-import { composing } from "../../lib/send-history";
-import { NO_HOVER, PHONE, useMedia } from "../../lib/viewport";
+import { useComposition } from "../../lib/ime";
+import { enterSends, hasFinePointer, NO_HOVER, PHONE, useMedia } from "../../lib/viewport";
 import { cx, EASE } from "../../ui/atoms";
 import { Icon } from "../../ui/icons";
 import { NumberDot } from "./CommentCard";
@@ -42,8 +42,10 @@ export interface CommentBarProps {
   onDraftChange?: (body: string) => void;
   /** Called on Enter or ✓ click with the trimmed note (empty string allowed). */
   onSave: (body: string) => void;
-  /** Called on Esc or outside pointerdown. */
+  /** Called on Esc or explicit cancel button (reverts live-persisted edits when applicable). */
   onCancel: () => void;
+  /** Called on outside pointerdown when clean/unchanged; defaults to onCancel. Live-persisted editors pass close-without-revert. */
+  onDismiss?: () => void;
   /** Called when another CommentBar takes active ownership; closes cleanly without reverting live-persisted edits. */
   onYield?: () => void;
   /** When editing an existing comment, shows an in-place delete button. */
@@ -103,6 +105,7 @@ export function CommentBar({
   onDraftChange,
   onSave,
   onCancel,
+  onDismiss,
   onYield,
   onDelete,
   ariaLabel,
@@ -120,8 +123,11 @@ export function CommentBar({
   onSaveRef.current = onSave;
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
+  const onDismissRef = useRef(onDismiss);
+  onDismissRef.current = onDismiss;
   const onYieldRef = useRef(onYield);
   onYieldRef.current = onYield;
+  const ime = useComposition();
   const [focused, setFocused] = useState(autoFocus);
   const active = focused || captureEscape;
   // Keep a mounted dirty bar registered across blur until it is saved, cancelled, or yielded to another bar.
@@ -193,10 +199,10 @@ export function CommentBar({
       if (barRef.current?.contains(e.target)) return;
       if (e.target instanceof Element && ignoreOutside?.(e.target)) return;
       if (bodyRef.current !== initialRef.current) return;
-      onCancel();
+      (onDismissRef.current ?? onCancelRef.current)();
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || composing(e)) return;
+      if (e.key !== "Escape" || ime.busy(e)) return;
       const inside = Boolean(barRef.current && document.activeElement && barRef.current.contains(document.activeElement));
       if (!inside && !captureEscape) return;
       e.preventDefault();
@@ -209,7 +215,7 @@ export function CommentBar({
       document.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [onCancel, ignoreOutside, captureEscape]);
+  }, [onCancel, ignoreOutside, captureEscape, ime]);
 
   const submit = () => onSave(body.trim());
   const showContext = Boolean(context) && (docked || showContextOnDesktop);
@@ -279,18 +285,22 @@ export function CommentBar({
           maxLength={MAX_COMMENT_CHARS}
           aria-label={ariaLabel ?? t("chat-comments.placeholder")}
           placeholder={t("chat-comments.placeholder")}
+          {...ime.handlers}
           onFocus={() => {
             setFocused(true);
             onInputFocus?.();
           }}
-          onBlur={() => setFocused(false)}
+          onBlur={() => {
+            ime.onBlur();
+            setFocused(false);
+          }}
           onChange={(e) => {
             setBody(e.target.value);
             onDraftChange?.(e.target.value);
           }}
           onKeyDown={(e) => {
-            if (composing(e.nativeEvent)) return;
-            if (e.key === "Enter" && !e.shiftKey) {
+            if (ime.busy(e.nativeEvent)) return;
+            if (enterSends(e, hasFinePointer())) {
               e.preventDefault();
               submit();
             } else if (e.key === "Escape") {

@@ -38,7 +38,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     Object.defineProperty(window, "innerWidth", { value: 1280, configurable: true });
     Object.defineProperty(window, "innerHeight", { value: 800, configurable: true });
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
-      matches: false,
+      matches: query === "(any-pointer: fine)",
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},
@@ -393,7 +393,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     line2.getBoundingClientRect = () => new DOMRect(10, 120, 32, 20);
     line5.getBoundingClientRect = () => new DOMRect(10, 740, 32, 20);
 
-    // Drag from line 2 down to line 5 -> range is 2-5, anchor stays at line 2 (top: 120, bottom: 140)
+    // Drag from line 2 down to line 5 -> range is 2-5, anchor spans full picked range (start top 120 to end bottom 760)
     act(() => {
       line2.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
       line5.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
@@ -401,7 +401,7 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     });
 
     expect(document.querySelector("[data-comment-bar-context]")?.textContent).toContain("src/app.ts:2-5");
-    expect(latestAnchor).toEqual({ x: 50, top: 120, bottom: 140 });
+    expect(latestAnchor).toEqual({ x: 50, top: 120, bottom: 760 });
   });
 
   it("establishes a new start line when shift-click dragging after a cancelled or saved pick", () => {
@@ -445,14 +445,14 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     });
     expect(document.querySelector("[data-comment-bar]")).toBeNull();
 
-    // Shift-click line 3 and drag to line 5 -> establishes start line 3 and sweeps 3-5
+    // Shift-click line 3 and drag to line 5 -> establishes start line 3 and sweeps 3-5 spanning top 200 to bottom 300
     act(() => {
       line3.dispatchEvent(new MouseEvent("pointerdown", { button: 0, shiftKey: true, bubbles: true }));
       line5.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
       window.dispatchEvent(new Event("pointerup"));
     });
     expect(document.querySelector("[data-comment-bar-context]")?.textContent).toContain("src/app.ts:3-5");
-    expect(latestAnchor).toEqual({ x: 50, top: 200, bottom: 220 });
+    expect(latestAnchor).toEqual({ x: 50, top: 200, bottom: 300 });
   });
 
   it("reactively switches between floating and docked placement when viewport width crosses 639px on resize", () => {
@@ -1099,6 +1099,140 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
     const stillThere = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea");
     expect(stillThere).toBeTruthy();
     expect(stillThere!.value).toBe("keep me alive");
+  });
+
+  it("calls onDismiss instead of onCancel on clean outside pointerdown, and ignores Safari post-composition Enter/Esc", () => {
+    const onSave = vi.fn();
+    const onCancel = vi.fn();
+    const onDismiss = vi.fn();
+
+    act(() => {
+      root.render(
+        <CommentBar
+          anchor={{ x: 200, top: 100, bottom: 120 }}
+          initialValue="unchanged"
+          autoFocus
+          onSave={onSave}
+          onCancel={onCancel}
+          onDismiss={onDismiss}
+        />,
+      );
+    });
+
+    const field = document.querySelector<HTMLTextAreaElement>("[data-comment-bar] textarea")!;
+
+    // Safari post-composition tail: compositionend followed immediately by Enter or Escape must be ignored
+    act(() => {
+      field.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      field.dispatchEvent(new Event("compositionend", { bubbles: true }));
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+
+    // Outside pointerdown when unchanged invokes onDismiss, not onCancel
+    act(() => {
+      document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    });
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("preserves untrimmed selection text and recomputes live range in saveDraft", () => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 1;
+    });
+    const origCreateRange = document.createRange.bind(document);
+    vi.spyOn(document, "createRange").mockImplementation(() => {
+      const r = origCreateRange();
+      mockRangeRect(r, new DOMRect(60, 40, 60, 18));
+      return r;
+    });
+
+    function LiveRangeHarness() {
+      const scroller = useRef<HTMLDivElement>(null);
+      return (
+        <ChatActionsContext.Provider value={{ draftKey, title: "Test", canCompose: true, speaker: "Persona", images: () => [] }}>
+          <div ref={scroller} style={{ position: "relative", height: 400 }}>
+            <div>
+              <div data-items="msg-1">
+                <p>alpha beta gamma</p>
+              </div>
+            </div>
+            <CommentMarks scroller={scroller} />
+          </div>
+        </ChatActionsContext.Provider>
+      );
+    }
+
+    try {
+      act(() => root.render(<LiveRangeHarness />));
+      const scroller = host.firstElementChild as HTMLDivElement;
+      scroller.getBoundingClientRect = () => new DOMRect(0, 0, 800, 400);
+      const textNode = host.querySelector("p")!.firstChild as Text;
+
+      // Select " beta " with leading & trailing spaces
+      const range = document.createRange();
+      range.setStart(textNode, 5);
+      range.setEnd(textNode, 11);
+      const sel = document.getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      act(() => {
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+
+      // Simulate streaming prepend before saving -> anchor offsets shift, saveDraft re-resolves live offsets
+      textNode.data = "PRE " + textNode.data;
+
+      act(() => {
+        document.querySelector<HTMLButtonElement>("[data-comment-save]")!.click();
+      });
+      const saved = getQuotes(draftKey).list[0];
+      expect(saved.text).toBe(" beta ");
+      expect(saved.comment?.anchor?.start).toBe(9);
+      expect(saved.comment?.anchor?.end).toBe(15);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lets page-level Escape pass through when LineBox is open but focus is outside it", () => {
+    const onCancel = vi.fn();
+    const pageEscape = vi.fn();
+    window.addEventListener("keydown", pageEscape);
+
+    try {
+      act(() => {
+        root.render(
+          <>
+            <LineBox where="src/app.ts:10" anchor={{ x: 100, top: 100, bottom: 120 }} onAdd={() => {}} onCancel={onCancel} />
+            <textarea data-testid="external-composer" />
+          </>,
+        );
+      });
+
+      const external = host.querySelector<HTMLTextAreaElement>('[data-testid="external-composer"]')!;
+      act(() => external.focus());
+      expect(document.activeElement).toBe(external);
+
+      act(() => {
+        external.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      expect(pageEscape).toHaveBeenCalledTimes(1);
+      expect(onCancel).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("keydown", pageEscape);
+    }
   });
 
   it("does not query another mounted file's gutter when scopeRef is missing or disconnected", () => {

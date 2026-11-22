@@ -284,6 +284,7 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
             setNote(draftKey, editing.id, editing.originalBody, true);
             setEditing(null);
           }}
+          onDismiss={() => setEditing(null)}
           onYield={() => setEditing(null)}
           onDelete={() => {
             onRemove(editing.id);

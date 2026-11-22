@@ -26,15 +26,31 @@ function rectOf(el: EventTarget | null): CommentBarAnchor | null {
   return { x: r.right + 8, top: r.top, bottom: r.bottom };
 }
 
-function visibleRectOf(el: Element | null): CommentBarAnchor | null {
-  if (!el || !el.isConnected) return null;
-  const r = el.getBoundingClientRect();
-  if (r.width === 0 && r.height === 0) return null;
-  const scroller = el.closest("[data-testid='diff'], [data-testid='file-code']") ?? el.parentElement?.closest("[class*='overflow-']");
+function scopeOf(el: EventTarget | null): Element | null {
+  return el instanceof Element ? el.closest("[data-testid='diff'], [data-testid='file-code']") : null;
+}
+
+function visibleRangeRect(scope: Element | null, from: number, to: number, startEl: Element | null, endEl: Element | null): CommentBarAnchor | null {
+  const pickEl = (line: number, fallback: Element | null): Element | null => {
+    if (fallback?.isConnected && fallback.getAttribute("data-gutter-at") === String(line)) return fallback;
+    // Only re-query within our own connected scroll container so another mounted file/diff gutter is never matched.
+    if (scope?.isConnected) return scope.querySelector(`[data-gutter-at="${line}"]`);
+    return fallback?.isConnected ? fallback : null;
+  };
+  const loEl = pickEl(from, startEl);
+  const hiEl = from === to ? loEl : pickEl(to, endEl);
+  const primary = loEl ?? hiEl;
+  if (!primary) return null;
+  const loRect = (loEl ?? primary).getBoundingClientRect();
+  const hiRect = (hiEl ?? primary).getBoundingClientRect();
+  if (loRect.width === 0 && loRect.height === 0 && hiRect.width === 0 && hiRect.height === 0) return null;
+  const top = Math.min(loRect.top, hiRect.top);
+  const bottom = Math.max(loRect.bottom, hiRect.bottom);
+  const scroller = scope?.isConnected ? scope : primary.closest("[data-testid='diff'], [data-testid='file-code']") ?? primary.parentElement?.closest("[class*='overflow-']");
   const bounds = scroller ? scroller.getBoundingClientRect() : new DOMRect(0, 0, window.innerWidth, window.innerHeight);
-  if (r.bottom < bounds.top || r.top > bounds.bottom) return null;
-  if (r.bottom < 0 || r.top > window.innerHeight) return null;
-  return { x: r.right + 8, top: r.top, bottom: r.bottom };
+  if (bottom < bounds.top || top > bounds.bottom) return null;
+  if (bottom < 0 || top > window.innerHeight) return null;
+  return { x: loRect.right + 8, top, bottom };
 }
 
 function sameAnchor(a: CommentBarAnchor | null, b: CommentBarAnchor | null): boolean {
@@ -51,6 +67,7 @@ export function useLinePick(enabled: boolean): LinePick {
   const startLine = useRef<number | null>(null);
   const anchorRef = useRef<CommentBarAnchor | null>(null);
   const anchorElRef = useRef<Element | null>(null);
+  const endElRef = useRef<Element | null>(null);
   const scopeRef = useRef<Element | null>(null);
   const drag = useRef(false);
   useEffect(() => {
@@ -76,13 +93,7 @@ export function useLinePick(enabled: boolean): LinePick {
     if (!range) return;
     let frame = 0;
     const measure = () => {
-      let el = anchorElRef.current;
-      // Only re-query within our own connected scroll container so another mounted file/diff gutter is never matched.
-      if ((!el || !el.isConnected) && startLine.current !== null && scopeRef.current?.isConnected) {
-        el = scopeRef.current.querySelector(`[data-gutter-at="${startLine.current}"]`);
-        if (el) anchorElRef.current = el;
-      }
-      const next = visibleRectOf(el);
+      const next = visibleRangeRect(scopeRef.current, range.from, range.to, anchorElRef.current, endElRef.current);
       anchorRef.current = next;
       setAnchor((prev) => (sameAnchor(prev, next) ? prev : next));
     };
@@ -105,18 +116,23 @@ export function useLinePick(enabled: boolean): LinePick {
     down: (n, e) => {
       if (!enabled || e.button !== 0) return;
       e.preventDefault(); // no text selection while sweeping the numbers
+      const el = e.currentTarget;
+      const scope = scopeOf(el);
       if (e.shiftKey && startLine.current !== null) {
-        if (!anchorRef.current) {
-          anchorElRef.current = e.currentTarget;
-          scopeRef.current = e.currentTarget.closest("[data-testid='diff'], [data-testid='file-code']") ?? null;
-          anchorRef.current = rectOf(e.currentTarget);
+        const picked = lineRange(startLine.current, n);
+        endElRef.current = el;
+        if (!anchorElRef.current?.isConnected) {
+          anchorElRef.current = el;
+          scopeRef.current = scope;
         }
-        setSweeping(lineRange(startLine.current, n));
+        anchorRef.current = visibleRangeRect(scopeRef.current ?? scope, picked.from, picked.to, anchorElRef.current, endElRef.current) ?? rectOf(el);
+        setSweeping(picked);
       } else {
         startLine.current = n;
-        anchorElRef.current = e.currentTarget;
-        scopeRef.current = e.currentTarget.closest("[data-testid='diff'], [data-testid='file-code']") ?? null;
-        anchorRef.current = rectOf(e.currentTarget);
+        anchorElRef.current = el;
+        endElRef.current = el;
+        scopeRef.current = scope;
+        anchorRef.current = rectOf(el);
         setSweeping({ from: n, to: n });
       }
       setRange(null);
@@ -125,18 +141,23 @@ export function useLinePick(enabled: boolean): LinePick {
     },
     enter: (n, e) => {
       if (drag.current && startLine.current !== null) {
-        // Keep the anchor at the start line where the pick began; only populate if missing.
-        if (!anchorRef.current && e) {
-          anchorElRef.current = e.currentTarget;
-          anchorRef.current = rectOf(e.currentTarget);
+        const picked = lineRange(startLine.current, n);
+        if (e) {
+          endElRef.current = e.currentTarget;
+          if (!anchorElRef.current) {
+            anchorElRef.current = e.currentTarget;
+            scopeRef.current = scopeOf(e.currentTarget);
+          }
         }
-        setSweeping(lineRange(startLine.current, n));
+        anchorRef.current = visibleRangeRect(scopeRef.current, picked.from, picked.to, anchorElRef.current, endElRef.current) ?? anchorRef.current;
+        setSweeping(picked);
       }
     },
     clear: () => {
       startLine.current = null;
       anchorRef.current = null;
       anchorElRef.current = null;
+      endElRef.current = null;
       scopeRef.current = null;
       setRange(null);
       setAnchor(null);
@@ -179,7 +200,6 @@ export function LineBox({ where, anchor, onAdd, onCancel }: { where: string; anc
       context={where}
       showContextOnDesktop
       autoFocus
-      captureEscape
       ignoreOutside={isLineGutter}
       onSave={onAdd}
       onCancel={onCancel}

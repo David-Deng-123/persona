@@ -117,8 +117,8 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     const hide = () => setDraft((d) => (d ? null : d));
     if (!can || !el || !sel || sel.isCollapsed || sel.rangeCount === 0 || dragging.current) return hide();
     const range = sel.getRangeAt(0);
-    const text = sel.toString().trim();
-    if (!text || !el.contains(range.commonAncestorContainer)) return hide();
+    const text = sel.toString();
+    if (!text.trim() || !el.contains(range.commonAncestorContainer)) return hide();
     const rect = rectInBounds(range, el.getBoundingClientRect());
     // the end of the words is out of sight: nothing to hang the bar under
     if (!rect) return hide();
@@ -187,7 +187,14 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     (note: string) => {
       const cur = draftRef.current;
       if (!cur || !key) return;
-      const q = textQuote(cur.text, cur.anchor ?? undefined);
+      const el = scroller.current;
+      // Re-resolve the live range before saving so streaming/re-renders never persist stale offsets or text.
+      const liveRange =
+        (el && cur.anchor ? rangeFor(el, cur.anchor) : null) ??
+        (cur.range.startContainer.isConnected && cur.range.endContainer.isConnected ? cur.range : null);
+      const liveAnchor = liveRange ? (anchorOf(liveRange) ?? cur.anchor) : cur.anchor;
+      const liveText = liveRange ? liveRange.toString() : cur.text;
+      const q = textQuote(liveText.trim() ? liveText : cur.text, liveAnchor ?? undefined);
       if (note) q.comment!.body = note;
       // write = false: note was already written in the floating bar; focus never jumps to the bottom composer
       addQuote(key, q, false);
@@ -195,7 +202,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
       draftNoteRef.current = "";
       setDraft(null);
     },
-    [key],
+    [key, scroller],
   );
 
   const cancelDraft = useCallback(() => {
@@ -388,6 +395,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
             if (key) setNote(key, editingPin.id, editingPin.originalBody, true);
             setEditingPin(null);
           }}
+          onDismiss={() => setEditingPin(null)}
           onYield={() => setEditingPin(null)}
           onDelete={() => {
             if (key) removeQuote(key, editingPin.id);
