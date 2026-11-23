@@ -813,46 +813,92 @@ var agyToolNames = map[string]string{
 	"web_fetch": "WebFetch", "web_search": "WebSearch", "todo_write": "TodoWrite",
 }
 
-func agyDecodeStringArg(s string) string {
-	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
-		return s
+// agyArgPreview splits a clipped argument at the exporter's marker. A zero
+// omitted count means the value has no valid marker.
+func agyArgPreview(value string) (head, tail string, omitted int) {
+	match := agyTailTruncation.FindStringSubmatchIndex(value)
+	if match == nil {
+		match = agyTruncation.FindStringSubmatchIndex(value)
 	}
-	var decoded string
-	if err := json.Unmarshal([]byte(s), &decoded); err != nil {
-		return s
+	if match != nil {
+		if n, err := strconv.Atoi(value[match[2]:match[3]]); err == nil && n > 0 {
+			return value[:match[0]], value[match[1]:], n
+		}
 	}
-	return decoded
+	return value, "", 0
 }
 
-func agyNormalizeArgValue(v any, truncated bool) any {
+// agyDecodeArgString decodes one JSON string, closing a clipped prefix after
+// dropping any escape the exporter cut in half.
+func agyDecodeArgString(value string, clipped bool) (string, bool) {
+	if !strings.HasPrefix(value, `"`) {
+		return "", false
+	}
+	if clipped {
+		if slash := strings.LastIndexByte(value, '\\'); slash >= 0 {
+			escape := value[slash+1:]
+			if escape == "" || strings.HasPrefix(escape, "u") && len(escape) < 5 {
+				start := slash
+				for start > 0 && value[start-1] == '\\' {
+					start--
+				}
+				if (slash-start)%2 == 0 {
+					value = value[:slash]
+				}
+			}
+		}
+		value += `"`
+	}
+	var decoded string
+	err := json.Unmarshal([]byte(value), &decoded)
+	return decoded, err == nil
+}
+
+// agyNormalizeArgValue copies the arguments so a failed decode leaves the original
+// call available. Older exports can contain literal quotes in plain arguments.
+func agyNormalizeArgValue(v any, truncated, encoded bool) (any, bool) {
 	switch v := v.(type) {
 	case string:
+		head, tail, omitted := v, "", 0
 		if truncated {
-			if m := agyTailTruncation.FindStringSubmatchIndex(v); m != nil {
-				if omitted, err := strconv.Atoi(v[m[2]:m[3]]); err == nil && omitted > 0 {
-					return v[:m[0]] + transcript.ClipNote(m[0]+omitted)
-				}
-			}
-			if m := agyTruncation.FindStringSubmatchIndex(v); m != nil {
-				if omitted, err := strconv.Atoi(v[m[2]:m[3]]); err == nil && omitted > 0 {
-					return v[:m[0]] + v[m[1]:] + transcript.ClipNote(len(v)-(m[1]-m[0])+omitted)
-				}
-			}
+			head, tail, omitted = agyArgPreview(v)
 		}
-		return agyDecodeStringArg(v)
+		if encoded {
+			decoded, ok := agyDecodeArgString(head, omitted > 0)
+			if !ok {
+				return nil, false
+			}
+			if omitted > 0 {
+				// The missing text and any retained suffix are counted in encoded bytes.
+				return decoded + transcript.ApproximateClipNote(len(decoded)+omitted+len(tail)), true
+			}
+			return decoded, true
+		}
+		if omitted > 0 {
+			return head + transcript.ClipNote(len(head)+omitted+len(tail)), true
+		}
 	case []any:
+		out := make([]any, len(v))
 		for i, elem := range v {
-			v[i] = agyNormalizeArgValue(elem, truncated)
+			normalized, ok := agyNormalizeArgValue(elem, truncated, encoded)
+			if !ok {
+				return nil, false
+			}
+			out[i] = normalized
 		}
-		return v
+		return out, true
 	case map[string]any:
+		out := make(map[string]any, len(v))
 		for k, elem := range v {
-			v[k] = agyNormalizeArgValue(elem, truncated)
+			normalized, ok := agyNormalizeArgValue(elem, truncated, encoded)
+			if !ok {
+				return nil, false
+			}
+			out[k] = normalized
 		}
-		return v
-	default:
-		return v
+		return out, true
 	}
+	return v, true
 }
 
 func agyTool(name string, raw json.RawMessage) (string, json.RawMessage) {
@@ -879,8 +925,13 @@ func agyToolInput(name string, raw json.RawMessage, truncated bool) (string, jso
 	if !ok {
 		return appName, json.RawMessage("{}")
 	}
-	for k, v := range args {
-		args[k] = agyNormalizeArgValue(v, truncated)
+	// The compact export wraps every string argument in a JSON string literal.
+	// Decode only when the whole call fits that format.
+	if decoded, ok := agyNormalizeArgValue(args, truncated, true); ok {
+		args = decoded.(map[string]any)
+	} else if truncated {
+		preview, _ := agyNormalizeArgValue(args, true, false)
+		args = preview.(map[string]any)
 	}
 	first := func(keys ...string) any {
 		for _, key := range keys {
