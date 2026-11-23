@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -21,8 +22,8 @@ import (
 // wins until the transcript shows a newer one (a TUI only writes the mode down with the next prompt). An assistant
 // conversation's are persisted with its session state and always win (persistModes, #2416).
 // Set: at start as --permission-mode / --effort; later, headless conversations take control requests on stdin and
-// TUI sessions are driven like a person would: shift+tab cycles the mode, and the /effort picker's "s" sets the
-// level for this session only (`/effort <level>` would also save it as the default for new sessions).
+// TUI sessions are driven like a person would: shift+tab cycles the mode, and the /effort picker advertises the
+// confirmation key (`/effort <level>` would also save the level as the default for new sessions).
 
 // "auto" is the model's own default level (Claude Code 2.1.316). It is not a level Claude Code takes everywhere:
 // --effort rejects it (with a warning, falling back to the default), settings.json ignores it, and the /effort
@@ -39,6 +40,8 @@ var effortPickerLevels = proto.EffortLevels
 
 // effortPickerDefault is the hint under the picker's marker when it is on the model's default level.
 const effortPickerDefault = "The default effort for this model"
+
+var errEffortPickerNotOpen = errors.New("没打开思考强度的选择器（这个 Claude Code 版本可能不支持 /effort）")
 
 var permissionModes = proto.PermissionModes
 
@@ -568,9 +571,7 @@ func (n *Node) promptHasDraft(ctx context.Context, pane string) (bool, error) {
 	return !tuiPromptEmpty(plain), nil
 }
 
-// tuiSetEffort opens the /effort picker, moves to the level and confirms it for this session. Two pickers exist: the
-// older list ("for this session only", "s" picks it for the session) and, from Claude Code 2.1.2xx, a slider
-// ("←/→ to adjust · Enter to confirm") whose leftmost stop is low and that confirms with Enter.
+// tuiSetEffort opens the /effort picker, moves to the level and confirms it with the picker's session key.
 func (n *Node) tuiSetEffort(ctx context.Context, pane, effort string) error {
 	draft, err := n.promptHasDraft(ctx, pane)
 	if err != nil {
@@ -592,18 +593,20 @@ func (n *Node) tuiSetEffort(ctx context.Context, pane, effort string) error {
 			return err
 		}
 	}
-	picker := ""
+	var picker string
+	var refreshConfirmKey bool
 	for range 15 {
 		time.Sleep(200 * time.Millisecond)
 		if s, err := n.readPane(ctx, pane, "visible", 60); err == nil {
 			if picker = effortPicker(s); picker != "" {
+				refreshConfirmKey = effortSliderConfirmKey(s) != ""
 				break
 			}
 		}
 	}
 	if picker == "" {
 		_ = n.sendKeys(ctx, pane, "esc")
-		return fmt.Errorf("没打开思考强度的选择器（这个 Claude Code 版本可能不支持 /effort）")
+		return errEffortPickerNotOpen
 	}
 	if effort == effortAuto {
 		if err := n.tuiPickDefaultEffort(ctx, pane); err != nil {
@@ -615,7 +618,18 @@ func (n *Node) tuiSetEffort(ctx context.Context, pane, effort string) error {
 	}
 	time.Sleep(150 * time.Millisecond)
 	confirm := "s"
-	if picker == "slider" {
+	switch {
+	case refreshConfirmKey:
+		// The binding can change with the selected level in Claude Code 2.1.330 and later.
+		s, err := n.readPane(ctx, pane, "visible", 60)
+		if err != nil {
+			return err
+		}
+		confirm = effortSliderConfirmKey(s)
+		if confirm == "" {
+			return errEffortPickerNotOpen
+		}
+	case picker == "slider":
 		confirm = "enter"
 	}
 	if err := n.sendKeys(ctx, pane, confirm); err != nil {
@@ -670,6 +684,8 @@ func (n *Node) tuiPickDefaultEffort(ctx context.Context, pane string) error {
 // effortPicker says which /effort picker is on screen: "list", "slider" or "" (none).
 func effortPicker(screen string) string {
 	switch {
+	case effortSliderConfirmKey(screen) != "":
+		return "slider"
 	case strings.Contains(screen, "for this session only"):
 		return "list"
 	case strings.Contains(screen, "to adjust") && strings.Contains(screen, "Enter to confirm") && strings.Contains(screen, "Effort"):
@@ -677,6 +693,27 @@ func effortPicker(screen string) string {
 	}
 	return ""
 }
+
+var effortSliderTitle = regexp.MustCompile(`(?m)^[\t ]*Effort[\t ]*\r?$`)
+
+// effortSliderConfirmKey returns the session-only key from the active slider footer introduced in 2.1.330.
+// It returns an empty string when the heading or footer is missing. Joining fields handles narrow panes.
+func effortSliderConfirmKey(screen string) string {
+	start := strings.LastIndex(screen, "←/→")
+	if start < 0 || !effortSliderTitle.MatchString(screen[:start]) {
+		return ""
+	}
+	switch strings.Join(strings.Fields(screen[start:]), " ") {
+	case "←/→ to adjust · s to use this session only · Enter to save · Esc to cancel":
+		return "s"
+	case "←/→ to adjust · Enter to use this session only · Esc to cancel":
+		return "enter"
+	}
+	return ""
+}
+
+// effortStatus matches Claude's effort indicator above the input box, even if the result text scrolled off.
+var effortStatus = regexp.MustCompile(`(?m)^[\t ]*[○◐●◉◈][\t ]+(low|medium|high|xhigh|max)[\t ]+·[\t ]+/effort[\t ]*\r?$`)
 
 // effortOutcome reads what Claude Code printed once the picker closed. An effort set in the environment
 // (CLAUDE_CODE_EFFORT_LEVEL: the env block of Claude's settings.json, or a launcher) wins over the session's: say so
@@ -688,6 +725,9 @@ func effortOutcome(screen, effort string) error {
 		if v != effort && strings.Contains(flat[i:], "overrides") {
 			return fmt.Errorf("这台电脑设了 CLAUDE_CODE_EFFORT_LEVEL=%s（Claude 的 settings.json 的 env 或启动器里），它优先于会话里改的值，要改得先去掉它", v)
 		}
+	}
+	if status := effortStatus.FindStringSubmatch(screen); status != nil && (effort == effortAuto || status[1] == effort) {
+		return nil
 	}
 	if effort == effortAuto {
 		if strings.Contains(flat, "effort level to ") {
