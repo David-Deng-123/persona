@@ -36,6 +36,11 @@ type agyStepUsage struct {
 	ModelContextWindow       int   `json:"model_context_window"`
 }
 
+type agyToolCall struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"`
+}
+
 type agyStep struct {
 	Index                    *int            `json:"step_index"`
 	Type                     string          `json:"type"`
@@ -59,15 +64,12 @@ type agyStep struct {
 	Usage                    *agyStepUsage   `json:"usage"`
 	TruncatedFields          []string        `json:"truncated_fields"`
 	Media                    json.RawMessage `json:"media"`
-	ToolCalls                []*struct {
-		Name string          `json:"name"`
-		Args json.RawMessage `json:"args"`
-	} `json:"tool_calls"`
-	seq      int
-	key      string
-	branch   string
-	record   [32]byte
-	rendered [32]byte
+	ToolCalls                []*agyToolCall  `json:"tool_calls"`
+	seq                      int
+	key                      string
+	branch                   string
+	record                   [32]byte
+	rendered                 [32]byte
 }
 
 type agyStepMemo struct {
@@ -724,11 +726,12 @@ func mapAgySteps(steps []agyStep, fallback time.Time, receipts map[string]bool) 
 					it.Model = stepModel
 				}
 			}
+			truncatedCalls := slices.Contains(step.TruncatedFields, "tool_calls")
 			for k, call := range step.ToolCalls {
 				if call == nil {
 					continue
 				}
-				name, input := agyTool(call.Name, call.Args)
+				name, input := agyToolInput(call.Name, call.Args, truncatedCalls)
 				callID := fmt.Sprintf("call_%s_%d", step.key, k)
 				it := add("tool"+strconv.Itoa(k), "assistant", proto.KindToolUse, "")
 				it.Model = stepModel
@@ -810,7 +813,53 @@ var agyToolNames = map[string]string{
 	"web_fetch": "WebFetch", "web_search": "WebSearch", "todo_write": "TodoWrite",
 }
 
+func agyDecodeStringArg(s string) string {
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return s
+	}
+	var decoded string
+	if err := json.Unmarshal([]byte(s), &decoded); err != nil {
+		return s
+	}
+	return decoded
+}
+
+func agyNormalizeArgValue(v any, truncated bool) any {
+	switch v := v.(type) {
+	case string:
+		if truncated {
+			if m := agyTailTruncation.FindStringSubmatchIndex(v); m != nil {
+				if omitted, err := strconv.Atoi(v[m[2]:m[3]]); err == nil && omitted > 0 {
+					return v[:m[0]] + transcript.ClipNote(m[0]+omitted)
+				}
+			}
+			if m := agyTruncation.FindStringSubmatchIndex(v); m != nil {
+				if omitted, err := strconv.Atoi(v[m[2]:m[3]]); err == nil && omitted > 0 {
+					return v[:m[0]] + v[m[1]:] + transcript.ClipNote(len(v)-(m[1]-m[0])+omitted)
+				}
+			}
+		}
+		return agyDecodeStringArg(v)
+	case []any:
+		for i, elem := range v {
+			v[i] = agyNormalizeArgValue(elem, truncated)
+		}
+		return v
+	case map[string]any:
+		for k, elem := range v {
+			v[k] = agyNormalizeArgValue(elem, truncated)
+		}
+		return v
+	default:
+		return v
+	}
+}
+
 func agyTool(name string, raw json.RawMessage) (string, json.RawMessage) {
+	return agyToolInput(name, raw, false)
+}
+
+func agyToolInput(name string, raw json.RawMessage, truncated bool) (string, json.RawMessage) {
 	if name == "" {
 		name = "tool"
 	}
@@ -826,11 +875,12 @@ func agyTool(name string, raw json.RawMessage) (string, json.RawMessage) {
 		}
 		return appName, raw
 	}
-	var args map[string]any
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if dec.Decode(&args) != nil || args == nil {
+	args, ok := agyDecodeToolArgs(raw)
+	if !ok {
 		return appName, json.RawMessage("{}")
+	}
+	for k, v := range args {
+		args[k] = agyNormalizeArgValue(v, truncated)
 	}
 	first := func(keys ...string) any {
 		for _, key := range keys {

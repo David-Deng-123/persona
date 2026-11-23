@@ -35,6 +35,9 @@ func clipTo(s string, n int) string {
 // was cut by it (clippedNote; web/src/lib/turn-changes.ts).
 const clipNoteFormat = "\n…（已截断，共 %d 字节）"
 
+// ClipNote returns the suffix that marks a tool input string as truncated from total bytes.
+func ClipNote(total int) string { return fmt.Sprintf(clipNoteFormat, total) }
+
 // clipParts is where clipTo cuts s (len(s) > n) and the note it adds.
 func clipParts(s string, n int) (cut int, note string) {
 	cut = n
