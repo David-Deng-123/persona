@@ -3,6 +3,7 @@
 // The menu that offers one starts the chunk when it opens (preloadSessionDialogs), so the click draws the dialog at once.
 import { useEffect, useState } from "react";
 import { isUntouchedStart } from "../../lib/agent-archives";
+import { agentId, sessionAgent } from "../../lib/agent-kind";
 import { api, enc, errorText, sessionPath } from "../../lib/api";
 import { herdrTabName, sessionCan, sessionTitle } from "../../lib/format";
 import { useHerdrTabName } from "../../lib/agents-display";
@@ -30,6 +31,16 @@ export function RenameDialog({ session, open, onClose }: { session: Session; ope
   const hasTab = !session.assistant && Boolean(session.slot_id);
   const unified = preferTab && Boolean(herdrTabName(session));
   const body = renameBody(session, tab, title, unified);
+  const agent = agentId(sessionAgent(session).agent);
+  const renameHint = unified
+    ? t("chat-sessiondialogs.rename_hint_unified")
+    : session.assistant
+      ? t("chat-sessiondialogs.rename_hint_assistant")
+      : agent === "claude"
+        ? t("chat-sessiondialogs.rename_hint_agent")
+        : agent === "codex"
+          ? t("chat-sessiondialogs.rename_hint_codex")
+          : t("chat-sessiondialogs.rename_hint_tab_only");
   const save = async () => {
     // the form submits on Enter while the field stays editable: a second Enter would rename (type /rename) twice
     if (busy) return;
@@ -76,8 +87,8 @@ export function RenameDialog({ session, open, onClose }: { session: Session; ope
           {hasTab && <Field label={t("chat-sessiondialogs.tab_name")} value={tab} onChange={setTab} autoFocus />}
           <Field label={t("chat-sessiondialogs.session_name")} value={title} onChange={setTitle} autoFocus={!hasTab} />
         </>}
-        {/* the agent's hint is about herdr's tab and Claude's /rename: a session without a terminal (a runtime's) has neither */}
-        {(session.assistant || sessionCan(session, "terminal")) && <p className="text-label leading-relaxed text-ink-3">{unified ? t("chat-sessiondialogs.rename_hint_unified") : session.assistant ? t("chat-sessiondialogs.rename_hint_assistant") : t("chat-sessiondialogs.rename_hint_agent")}</p>}
+        {/* the agent's hint is about herdr's tab and CLI session rename: a session without a terminal (a runtime's) has neither */}
+        {(session.assistant || sessionCan(session, "terminal")) && <p className="text-label leading-relaxed text-ink-3">{renameHint}</p>}
         <button type="submit" hidden />
       </form>
     </Dialog>
