@@ -329,16 +329,16 @@ func (n *Node) cachedLaunchers() []proto.Launcher {
 }
 
 // inferLauncher names the launcher of a claude Persona did not start (typed in a terminal), from the
-// ANTHROPIC_BASE_URL / ANTHROPIC_MODEL the scan saw in its environment; "" when unknown.
+// ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / CLAUDE_CONFIG_DIR the scan saw in its environment; "" when unknown.
 func (n *Node) inferLauncher(id string) string {
 	env, ok := n.sessionEnv(id)
 	if !ok {
 		return ""
 	}
-	if name := matchLauncher(n.cachedLaunchers(), env.BaseURL, env.Model); name != "" {
+	if name := matchLauncher(n.cachedLaunchers(), env.BaseURL, env.Model, env.ConfigDir); name != "" {
 		return name
 	}
-	return matchLauncher(n.managedInferLaunchers(), env.BaseURL, env.Model)
+	return matchLauncher(n.managedInferLaunchers(), env.BaseURL, env.Model, env.ConfigDir)
 }
 
 // managedInferLaunchers returns the cached Claude managed-launcher projection so a terminal session started manually
@@ -360,34 +360,108 @@ func buildManagedInferLaunchers(byID map[string]proto.ManagedLauncher) []proto.L
 	if len(byID) == 0 {
 		return nil
 	}
+	home := userHome()
 	out := make([]proto.Launcher, 0, len(byID))
 	for _, l := range byID {
 		if a := l.AgentType(); a != "" && a != "claude" {
 			continue
 		}
 		pm, _ := providerModel(l, l.Model)
-		out = append(out, proto.Launcher{Name: l.Name, BaseURL: managedBaseURL(l), Model: sdkModel(l.Model, pm)})
+		out = append(out, proto.Launcher{
+			Name:      l.Name,
+			BaseURL:   managedBaseURL(l),
+			Model:     sdkModel(l.Model, pm),
+			ConfigDir: literalConfigDir(providerEnv(l, "", "", false)["CLAUDE_CONFIG_DIR"], home),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
-// matchLauncher picks the launcher that exports this base URL and model. Several launchers can share one endpoint
-// (and a launcher whose model is chosen at run time shows a placeholder such as "(claude-choose)"), so: the one
-// launcher with both equal (an empty model is unknown, never evidence of a match); else the one launcher with that base
-// URL; else nothing, never a guess between several.
-func matchLauncher(list []proto.Launcher, baseURL, model string) string {
-	if baseURL == "" {
-		return "" // the default endpoint: nothing to tell launchers apart by
+// literalConfigDir resolves a literal CLAUDE_CONFIG_DIR value from a launcher definition (expanding a leading
+// $HOME, ${HOME} or ~ against home). Returns "" when the value still depends on shell expansion (other
+// variables or command substitution).
+func literalConfigDir(v, home string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
 	}
-	var byURL, byBoth []string
+	rest := v
+	for _, h := range []string{"${HOME}", "$HOME"} {
+		if v == h || strings.HasPrefix(v, h+"/") {
+			rest = v[len(h):]
+			break
+		}
+	}
+	if strings.ContainsAny(rest, "$`") {
+		return ""
+	}
+	p := shellPath(v, home)
+	if p == "" {
+		return ""
+	}
+	return filepath.Clean(p)
+}
+
+// normalizeConfigDir canonicalizes a config directory path for comparison, expanding ~ / $HOME and resolving
+// symlinks when the directory exists on disk.
+func normalizeConfigDir(dir, home string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	dir = filepath.Clean(shellPath(dir, home))
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		return real
+	}
+	return dir
+}
+
+// matchLauncher picks the launcher that exports this base URL and model (and optional CLAUDE_CONFIG_DIR).
+// Several launchers can share one endpoint (and a launcher whose model is chosen at run time shows a placeholder
+// such as "(claude-choose)"), so: when baseURL is non-empty, the one launcher with both equal (an empty model is
+// unknown, never evidence of a match); else the one launcher with that base URL; else, when baseURL matching is
+// ambiguous, the one matching candidate with the same ConfigDir. When baseURL is empty, the one launcher with an
+// empty base URL and the same ConfigDir. Never a guess between several.
+func matchLauncher(list []proto.Launcher, baseURL, model string, configDir ...string) string {
+	home := userHome()
+	normCfgDir := ""
+	if len(configDir) > 0 {
+		normCfgDir = normalizeConfigDir(configDir[0], home)
+	}
+	if baseURL == "" {
+		if normCfgDir == "" {
+			return "" // the default endpoint with no config dir: nothing to tell launchers apart by
+		}
+		var byDir []string
+		for _, l := range list {
+			if l.BaseURL != "" || l.ConfigDir == "" {
+				continue
+			}
+			if normalizeConfigDir(l.ConfigDir, home) == normCfgDir {
+				byDir = append(byDir, l.Name)
+			}
+		}
+		if len(byDir) == 1 {
+			return byDir[0]
+		}
+		return ""
+	}
+	var byURL, byBoth, byURLAndDir, byBothAndDir []string
 	for _, l := range list {
 		if l.BaseURL != baseURL {
 			continue
 		}
 		byURL = append(byURL, l.Name)
+		dirMatch := normCfgDir != "" && l.ConfigDir != "" && normalizeConfigDir(l.ConfigDir, home) == normCfgDir
+		if dirMatch {
+			byURLAndDir = append(byURLAndDir, l.Name)
+		}
 		if model != "" && (l.Model == model || l.Model != "" && proto.TrimModelWindow(l.Model) == proto.TrimModelWindow(model)) {
 			byBoth = append(byBoth, l.Name)
+			if dirMatch {
+				byBothAndDir = append(byBothAndDir, l.Name)
+			}
 		}
 	}
 	if len(byBoth) == 1 {
@@ -395,6 +469,12 @@ func matchLauncher(list []proto.Launcher, baseURL, model string) string {
 	}
 	if len(byURL) == 1 {
 		return byURL[0]
+	}
+	if len(byBothAndDir) == 1 {
+		return byBothAndDir[0]
+	}
+	if len(byBoth) == 0 && len(byURLAndDir) == 1 {
+		return byURLAndDir[0]
 	}
 	return ""
 }
@@ -546,7 +626,12 @@ func aliasLauncher(words []string) (l proto.Launcher, settings string, ok bool) 
 		if filepath.Base(cmd[i]) != "claude" {
 			continue
 		}
-		l = proto.Launcher{BaseURL: env["ANTHROPIC_BASE_URL"], Model: env["ANTHROPIC_MODEL"], Source: "zshrc"}
+		l = proto.Launcher{
+			BaseURL:   env["ANTHROPIC_BASE_URL"],
+			Model:     env["ANTHROPIC_MODEL"],
+			ConfigDir: literalConfigDir(env["CLAUDE_CONFIG_DIR"], userHome()),
+			Source:    "zshrc",
+		}
 		for j := i + 1; j < len(cmd); j++ {
 			if cmd[j] == "--model" && j+1 < len(cmd) && l.Model == "" {
 				l.Model = cmd[j+1]

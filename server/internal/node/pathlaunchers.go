@@ -143,7 +143,13 @@ func scanPath(pathVar string, taken map[string]bool) *pathScan {
 			if !ok {
 				continue
 			}
-			s.list = append(s.list, proto.Launcher{Name: name, BaseURL: w.shown("ANTHROPIC_BASE_URL"), Model: w.model(), Source: "path"})
+			s.list = append(s.list, proto.Launcher{
+				Name:      name,
+				BaseURL:   w.shown("ANTHROPIC_BASE_URL"),
+				Model:     w.model(),
+				ConfigDir: literalConfigDir(w.env["CLAUDE_CONFIG_DIR"], userHome()),
+				Source:    "path",
+			})
 			if w.settings != "" {
 				s.settings[name] = w.settings
 			}

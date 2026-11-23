@@ -357,7 +357,7 @@ func (n *Node) refreshClaudeDirs() {
 	runs := map[string]claudeRun{}
 	twice := map[string]bool{}
 	for pid, e := range envs {
-		launcher := e.BaseURL != "" || e.Model != ""
+		launcher := e.BaseURL != "" || e.Model != "" || e.ConfigDir != ""
 		if !launcher && !e.Cmd {
 			continue
 		}
@@ -402,7 +402,7 @@ func (n *Node) refreshClaudeDirs() {
 }
 
 // sessionEnv is the scanned environment of the live claude running session id (false when none was seen or it set
-// neither ANTHROPIC_BASE_URL nor ANTHROPIC_MODEL).
+// none of ANTHROPIC_BASE_URL, ANTHROPIC_MODEL and CLAUDE_CONFIG_DIR).
 func (n *Node) sessionEnv(id string) (procEnv, bool) {
 	d := n.cdirs
 	if d == nil {
