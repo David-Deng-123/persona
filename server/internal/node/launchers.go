@@ -329,16 +329,28 @@ func (n *Node) cachedLaunchers() []proto.Launcher {
 }
 
 // inferLauncher names the launcher of a claude Persona did not start (typed in a terminal), from the
-// ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / CLAUDE_CONFIG_DIR the scan saw in its environment; "" when unknown.
+// endpoint and model the scan saw in its environment. The config directory breaks ties only after neither
+// launcher list yields a match by endpoint and model. It returns "" when the launcher is unknown.
 func (n *Node) inferLauncher(id string) string {
 	env, ok := n.sessionEnv(id)
 	if !ok {
 		return ""
 	}
-	if name := matchLauncher(n.cachedLaunchers(), env.BaseURL, env.Model, env.ConfigDir); name != "" {
+	cached := n.cachedLaunchers()
+	if name := matchLauncher(cached, env.BaseURL, env.Model); name != "" {
 		return name
 	}
-	return matchLauncher(n.managedInferLaunchers(), env.BaseURL, env.Model, env.ConfigDir)
+	managed := n.managedInferLaunchers()
+	if name := matchLauncher(managed, env.BaseURL, env.Model); name != "" {
+		return name
+	}
+	if env.ConfigDir == "" {
+		return ""
+	}
+	if name := matchLauncher(cached, env.BaseURL, env.Model, env.ConfigDir); name != "" {
+		return name
+	}
+	return matchLauncher(managed, env.BaseURL, env.Model, env.ConfigDir)
 }
 
 // managedInferLaunchers returns the cached Claude managed-launcher projection so a terminal session started manually

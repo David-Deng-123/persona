@@ -207,6 +207,39 @@ func TestInferLauncherByConfigDir(t *testing.T) {
 	})
 }
 
+func TestInferLauncherPrefersManagedMatchOverCachedConfigDir(t *testing.T) {
+	const (
+		id      = "example-session"
+		gateway = "https://gw.example.com"
+		model   = "managed-model"
+	)
+	profile := t.TempDir()
+	n := &Node{cdirs: &claudeDirs{
+		bySession: map[string]procEnv{id: {BaseURL: gateway, Model: model, ConfigDir: profile}},
+		scanned:   time.Now(),
+	}}
+	n.managed.byID = map[string]proto.ManagedLauncher{
+		"managed": {Name: "managed", BaseURL: gateway, Model: model},
+	}
+
+	launcherCache.Lock()
+	oldAt, oldList := launcherCache.at, launcherCache.list
+	launcherCache.at, launcherCache.list = time.Now(), []proto.Launcher{
+		{Name: "shell-profile", BaseURL: gateway, Model: "shell-model", ConfigDir: profile},
+		{Name: "shell-other", BaseURL: gateway, Model: "other-model"},
+	}
+	launcherCache.Unlock()
+	t.Cleanup(func() {
+		launcherCache.Lock()
+		launcherCache.at, launcherCache.list = oldAt, oldList
+		launcherCache.Unlock()
+	})
+
+	if got := n.inferLauncher(id); got != "managed" {
+		t.Errorf("inferLauncher = %q, want managed", got)
+	}
+}
+
 // claudeHome lays out a home with the default ~/.claude and a profile directory, each with a transcript.
 func claudeHome(t *testing.T) (*Node, string) {
 	t.Helper()
