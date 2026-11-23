@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { isUntouchedStart } from "../../lib/agent-archives";
 import { agentId, sessionAgent } from "../../lib/agent-kind";
 import { api, enc, errorText, sessionPath } from "../../lib/api";
-import { herdrTabName, sessionCan, sessionTitle } from "../../lib/format";
+import { herdrTabName, sessionCan, sessionCanRenameTitle, sessionHasRenameTab, sessionTitle } from "../../lib/format";
 import { useHerdrTabName } from "../../lib/agents-display";
 import { renameBody } from "../../lib/session-actions";
 import { href, navigate } from "../../lib/router";
@@ -15,7 +15,7 @@ import { Button, Dialog, toast } from "../../ui/atoms";
 import { t } from "../../i18n";
 import { cleanupReady, KEEP, runCleanup, useAgentWorktree, WorktreeCleanup, type Cleanup } from "./SessionWorktreeCleanup";
 
-// "Rename": the herdr tab and the session's name (Claude's /rename), each only when changed (iOS RenameSessionAlert).
+// "Rename": edit the tab and session names the Agent supports, and submit only changes.
 export function RenameDialog({ session, open, onClose }: { session: Session; open: boolean; onClose: () => void }) {
   const [tab, setTab] = useState("");
   const [title, setTitle] = useState("");
@@ -28,19 +28,23 @@ export function RenameDialog({ session, open, onClose }: { session: Session; ope
     // only when it opens: a push while typing must not overwrite the field
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
-  const hasTab = !session.assistant && Boolean(session.slot_id);
+  const hasTab = sessionHasRenameTab(session);
+  const hasTitle = sessionCanRenameTitle(session);
   const unified = preferTab && Boolean(herdrTabName(session));
   const body = renameBody(session, tab, title, unified);
   const agent = agentId(sessionAgent(session).agent);
-  const renameHint = unified
-    ? t("chat-sessiondialogs.rename_hint_unified")
-    : session.assistant
-      ? t("chat-sessiondialogs.rename_hint_assistant")
-      : agent === "claude"
-        ? t("chat-sessiondialogs.rename_hint_agent")
-        : agent === "codex"
-          ? t("chat-sessiondialogs.rename_hint_codex")
-          : t("chat-sessiondialogs.rename_hint_tab_only");
+  let renameHint;
+  if (session.assistant) {
+    renameHint = t("chat-sessiondialogs.rename_hint_assistant");
+  } else if (sessionCan(session, "terminal")) {
+    if (hasTab && (!hasTitle || (unified && session.source_kind === "runtime"))) {
+      renameHint = t("chat-sessiondialogs.rename_hint_tab_only");
+    } else if (unified) {
+      renameHint = t("chat-sessiondialogs.rename_hint_unified");
+    } else if (hasTitle && session.source_kind !== "runtime") {
+      renameHint = t(agent === "codex" ? "chat-sessiondialogs.rename_hint_codex" : "chat-sessiondialogs.rename_hint_agent");
+    }
+  }
   const save = async () => {
     // the form submits on Enter while the field stays editable: a second Enter would rename (type /rename) twice
     if (busy) return;
@@ -62,7 +66,7 @@ export function RenameDialog({ session, open, onClose }: { session: Session; ope
   };
   return (
     <Dialog
-      open={open}
+      open={open && (hasTab || hasTitle)}
       onClose={onClose}
       title={t("chat-sessiondialogs.rename")}
       footer={
@@ -85,10 +89,9 @@ export function RenameDialog({ session, open, onClose }: { session: Session; ope
       >
         {unified ? <Field label={t("chat-sessiondialogs.name")} value={tab} onChange={setTab} autoFocus /> : <>
           {hasTab && <Field label={t("chat-sessiondialogs.tab_name")} value={tab} onChange={setTab} autoFocus />}
-          <Field label={t("chat-sessiondialogs.session_name")} value={title} onChange={setTitle} autoFocus={!hasTab} />
+          {hasTitle && <Field label={t("chat-sessiondialogs.session_name")} value={title} onChange={setTitle} autoFocus={!hasTab} />}
         </>}
-        {/* the agent's hint is about herdr's tab and CLI session rename: a session without a terminal (a runtime's) has neither */}
-        {(session.assistant || sessionCan(session, "terminal")) && <p className="text-label leading-relaxed text-ink-3">{renameHint}</p>}
+        {renameHint && <p className="text-label leading-relaxed text-ink-3">{renameHint}</p>}
         <button type="submit" hidden />
       </form>
     </Dialog>
