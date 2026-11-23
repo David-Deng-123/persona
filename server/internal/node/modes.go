@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/nwverse/persona/server/internal/i18n"
+	"github.com/nwverse/persona/server/internal/lazyre"
 	"github.com/nwverse/persona/server/internal/proto"
 	"github.com/nwverse/persona/server/internal/rpc"
 	"github.com/nwverse/persona/server/internal/screen"
@@ -571,7 +571,7 @@ func (n *Node) promptHasDraft(ctx context.Context, pane string) (bool, error) {
 	return !tuiPromptEmpty(plain), nil
 }
 
-// tuiSetEffort opens the /effort picker, moves to the level and confirms it with the picker's session key.
+// tuiSetEffort opens /effort, moves to the requested level and follows the picker's confirmation hints.
 func (n *Node) tuiSetEffort(ctx context.Context, pane, effort string) error {
 	draft, err := n.promptHasDraft(ctx, pane)
 	if err != nil {
@@ -681,20 +681,32 @@ func (n *Node) tuiPickDefaultEffort(ctx context.Context, pane string) error {
 	return fmt.Errorf("思考强度的选择器里没找到模型的默认档位（可能被组织设置覆盖了），已取消")
 }
 
-// effortPicker says which /effort picker is on screen: "list", "slider" or "" (none).
+// effortPicker says which /effort picker is on screen: "list" and "session-slider" confirm for this session with "s",
+// "slider" with Enter; "" is none. Claude Code 2.1.330's slider footer says "s to use this session only" where Enter
+// would save the level as the default, and Enter itself says "use this session only" when that is all it does (no
+// "s" then). A narrow pane wraps the footer, so it is read with the lines joined.
 func effortPicker(screen string) string {
-	switch {
-	case effortSliderConfirmKey(screen) != "":
+	switch effortSliderConfirmKey(screen) {
+	case "s":
+		return "session-slider"
+	case "enter":
 		return "slider"
-	case strings.Contains(screen, "for this session only"):
+	}
+
+	flat := strings.Join(strings.Fields(screen), " ")
+	switch {
+	case strings.Contains(flat, "for this session only"):
 		return "list"
-	case strings.Contains(screen, "to adjust") && strings.Contains(screen, "Enter to confirm") && strings.Contains(screen, "Effort"):
+	case strings.Contains(flat, "Effort") && strings.Contains(flat, "adjust") && strings.Contains(flat, "Enter to confirm"):
 		return "slider"
 	}
 	return ""
 }
 
-var effortSliderTitle = regexp.MustCompile(`(?m)^[\t ]*Effort[\t ]*\r?$`)
+var (
+	effortSliderTitle  = lazyre.New(`(?m)^[\t ]*Effort[\t ]*\r?$`)
+	effortSliderFooter = lazyre.New(`(?i)^←/→ (?:to )?adjust · (?:(s) (?:to )?use this session only · enter (?:to )?save|enter (?:to )?use this session only) · esc(?:ape)? (?:to )?cancel$`)
+)
 
 // effortSliderConfirmKey returns the session-only key from the active slider footer introduced in 2.1.330.
 // It returns an empty string when the heading or footer is missing. Joining fields handles narrow panes.
@@ -703,17 +715,18 @@ func effortSliderConfirmKey(screen string) string {
 	if start < 0 || !effortSliderTitle.MatchString(screen[:start]) {
 		return ""
 	}
-	switch strings.Join(strings.Fields(screen[start:]), " ") {
-	case "←/→ to adjust · s to use this session only · Enter to save · Esc to cancel":
-		return "s"
-	case "←/→ to adjust · Enter to use this session only · Esc to cancel":
-		return "enter"
+	match := effortSliderFooter.FindStringSubmatch(strings.Join(strings.Fields(screen[start:]), " "))
+	if match == nil {
+		return ""
 	}
-	return ""
+	if match[1] != "" {
+		return "s"
+	}
+	return "enter"
 }
 
 // effortStatus matches Claude's effort indicator above the input box, even if the result text scrolled off.
-var effortStatus = regexp.MustCompile(`(?m)^[\t ]*[○◐●◉◈][\t ]+(low|medium|high|xhigh|max)[\t ]+·[\t ]+/effort[\t ]*\r?$`)
+var effortStatus = lazyre.New(`(?m)^[\t ]*[○◐●◉◈][\t ]+(low|medium|high|xhigh|max)[\t ]+·[\t ]+/effort[\t ]*\r?$`)
 
 // effortOutcome reads what Claude Code printed once the picker closed. An effort set in the environment
 // (CLAUDE_CODE_EFFORT_LEVEL: the env block of Claude's settings.json, or a launcher) wins over the session's: say so
