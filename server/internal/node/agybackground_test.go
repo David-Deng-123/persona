@@ -116,21 +116,14 @@ func TestAgyBackgroundSessionListMerge(t *testing.T) {
 	n.runtimes = newRuntimeRegistry()
 	h := n.runtimes.add(nil)
 	h.ready, h.hello.Runtime = true, agyRuntimeID
-	setRuntimeRow := func(status string, running bool) {
+	runtimeHost := &RuntimeHost{reg: n.runtimes}
+	setRuntimeRow := func(status, backgroundField string) {
 		t.Helper()
-		// Decode the companion's flat wire fields before normalizing as runtime.sessions does.
-		var row proto.Session
-		raw := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"model":"gemini-test","status":%q,"background_ended":[{"id":%q,"kind":"workflow","status":"completed","ended_at":%q,"output_file":"/unrelated.log"}]}`,
-			sid, home, status, agyTestID+"/task-2", stamp)
-		if err := json.Unmarshal([]byte(raw), &row); err != nil {
-			t.Fatal(err)
-		}
-		if running {
-			row.Background = []proto.BackgroundTask{{ID: agyTestID + "/task-1", Kind: "monitor", OutputFile: "/unrelated.log"}}
-		}
-		n.runtimes.setSessions(h, normalizeRuntimeSessions(h, []proto.Session{row}))
+		raw := fmt.Sprintf(`{"sessions":[{"session_id":%q,"cwd":%q,"model":"gemini-test","status":%q,%q:[{"id":%q,"kind":"monitor","output_file":"/unrelated.log"}],"background_ended":[{"id":%q,"kind":"workflow","status":"completed","ended_at":%q,"output_file":"/unrelated.log"}]}]}`,
+			sid, home, status, backgroundField, agyTestID+"/task-1", agyTestID+"/task-2", stamp)
+		runtimeHost.event(h, "runtime.sessions", json.RawMessage(raw))
 	}
-	setRuntimeRow(proto.StatusIdle, true)
+	setRuntimeRow(proto.StatusIdle, "background")
 	rows := listed(t, n)
 	acp := rows[sid]
 	if len(acp.Background) != 1 || acp.Background[0].Kind != "monitor" || acp.Background[0].OutputFile != logPath ||
@@ -138,7 +131,10 @@ func TestAgyBackgroundSessionListMerge(t *testing.T) {
 		t.Fatalf("ACP fields after normalization: %+v / %+v", acp.Background, acp.BackgroundEnded())
 	}
 
-	setRuntimeRow(proto.StatusIdle, false) // The companion sees a transcript without an ACP process.
+	setRuntimeRow(proto.StatusIdle, "agy_pane_background") // The companion sees a transcript without an ACP process.
+	if acp := listed(t, n)[sid]; acp.Model != "gemini-test" || len(acp.Background) != 0 {
+		t.Fatalf("history row shows pane-only work: %+v", acp)
+	}
 	pane := agyTestAgent(agyTestPane, home, agyTestID)
 	herdr.reply("session.snapshot", snapshot(nil, nil, []any{pane}, nil))
 	rows = listed(t, n)
@@ -146,13 +142,64 @@ func TestAgyBackgroundSessionListMerge(t *testing.T) {
 	if _, duplicate := rows[sid]; duplicate || row.Model != "gemini-test" || len(row.Background) != 1 || row.Background[0].Kind != "monitor" || row.Loop != nil {
 		t.Fatalf("live pane merge: pane=%+v, duplicate=%v", row, duplicate)
 	}
+	if row.Background[0].OutputFile != logPath || len(row.BackgroundEnded()) != 1 || row.BackgroundEnded()[0].OutputFile != "" {
+		t.Fatalf("pane did not keep projected tasks with verified logs: %+v / %+v", row.Background, row.BackgroundEnded())
+	}
 
-	setRuntimeRow(proto.StatusOffline, true)
+	setRuntimeRow(proto.StatusOffline, "background")
 	pane["agent_status"] = proto.StatusOffline
 	herdr.reply("session.snapshot", snapshot(nil, nil, []any{pane}, nil))
 	rows = listed(t, n)
 	if len(rows[sid].Background) != 0 || len(rows[agyTestRow].Background) != 0 {
 		t.Fatalf("stopped sessions show running work: %+v / %+v", rows[sid].Background, rows[agyTestRow].Background)
+	}
+}
+
+func TestAgyPaneKeepsCompanionBackgroundAfterRewind(t *testing.T) {
+	n, herdr, home := herdrNode(t)
+	t.Setenv("ANTIGRAVITY_CLI_CONFIG_DIR", "")
+	dir := n.agyDataRoot()
+	now := time.Now().UTC()
+	stamp := now.Format(time.RFC3339Nano)
+	kept, ended, abandoned := agyTestID+"/task-1", agyTestID+"/task-2", agyTestID+"/task-3"
+	logPath := filepath.Join(dir, "brain", agyTestID, ".system_generated", "tasks", "task-1.log")
+	// The compact export still contains a running task and a completion past the native rewind cut.
+	agyTestFile(t, dir, agyTestID,
+		agyBackgroundStep(0, "RUNNING", stamp, 1, "Kept task", agyBackgroundLogURI(logPath))+
+			agyBackgroundStep(1, "DONE", stamp, 2, "Finished before the cut", "")+
+			agyBackgroundStep(2, "RUNNING", stamp, 3, "Abandoned task", "")+
+			fmt.Sprintf(`{"step_index":3,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", stamp,
+				fmt.Sprintf(`Task id "%s" was killed.`, kept)))
+	seedAgents(t, n, herdr, agyTestAgent(agyTestPane, home, agyTestID))
+	n.runtimes = newRuntimeRegistry()
+	h := n.runtimes.add(nil)
+	h.ready, h.hello.Runtime = true, agyRuntimeID
+
+	companion := proto.Session{SessionID: agyAgent + "-" + agyTestID, Status: proto.StatusIdle, Cwd: home}
+	companion.Background = []proto.BackgroundTask{{ID: kept, Kind: "monitor", StartedAt: now}}
+	companion.SetBackgroundEnded([]proto.BackgroundTask{{ID: ended, Kind: "workflow", Status: proto.WorkflowCompleted, EndedAt: &now}})
+	n.runtimes.setSessions(h, normalizeRuntimeSessions(h, []proto.Session{companion}))
+
+	row := listed(t, n)[agyTestRow]
+	if len(row.Background) != 1 || row.Background[0].ID != kept || row.Background[0].Kind != "monitor" || row.Background[0].OutputFile != logPath {
+		t.Errorf("pane should keep the projected running task and attach its local log: %+v", row.Background)
+	}
+	if outcomes := row.BackgroundEnded(); len(outcomes) != 1 || outcomes[0].ID != ended || outcomes[0].Status != proto.WorkflowCompleted || row.Loop != nil {
+		t.Errorf("pane should keep the projected outcomes without adding a loop: %+v / %+v", outcomes, row.Loop)
+	}
+
+	companion.Background = nil
+	companion.SetBackgroundEnded(nil)
+	n.runtimes.setSessions(h, normalizeRuntimeSessions(h, []proto.Session{companion}))
+	row = listed(t, n)[agyTestRow]
+	if len(row.Background) != 0 || len(row.BackgroundEnded()) != 0 {
+		t.Errorf("a full rewind should keep the pane inventory empty: %+v / %+v", row.Background, row.BackgroundEnded())
+	}
+
+	n.runtimes.setSessions(h, nil)
+	row = listed(t, n)[agyTestRow]
+	if len(row.Background) != 1 || row.Background[0].ID != abandoned || len(row.BackgroundEnded()) != 2 {
+		t.Errorf("pane without a companion row should still read local tasks: %+v / %+v", row.Background, row.BackgroundEnded())
 	}
 }
 

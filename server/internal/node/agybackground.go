@@ -200,11 +200,52 @@ func agyStopped(status string) bool {
 	return status == proto.StatusOffline || status == proto.StatusInterrupted
 }
 
+// agyPaneBackgroundFromRows reads the tasks the companion hides on ACP history rows.
+func agyPaneBackgroundFromRows(params json.RawMessage) map[string][]proto.BackgroundTask {
+	var push struct {
+		Sessions []struct {
+			ID    string                 `json:"session_id"`
+			Tasks []proto.BackgroundTask `json:"agy_pane_background"`
+		} `json:"sessions"`
+	}
+	if json.Unmarshal(params, &push) != nil {
+		return nil
+	}
+	var background map[string][]proto.BackgroundTask
+	for _, row := range push.Sessions {
+		if len(row.Tasks) == 0 || !runtimeIDRe.MatchString(row.ID) {
+			continue
+		}
+		if background == nil {
+			background = make(map[string][]proto.BackgroundTask)
+		}
+		background[row.ID] = runtimeBackground(row.Tasks, maxRuntimeBackground, true)
+	}
+	return background
+}
+
+// agyPaneRuntimeRow reads the companion row and its pane inventory from the same list update.
+func (b *runtimeRegistry) agyPaneRuntimeRow(id string) (proto.Session, bool) {
+	h := b.ownerOf(id)
+	if h == nil {
+		return proto.Session{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.hello.Runtime != agyRuntimeID || h.daemon != "" {
+		return proto.Session{}, false
+	}
+	row, ok := h.rowLocked(id)
+	if tasks := h.agyPaneBackground[id]; len(row.Background) == 0 && len(tasks) > 0 {
+		row.Background = tasks
+	}
+	return row, ok
+}
+
 // Runtime task metadata cannot grant access to node-local files. Join the log
 // paths independently confirmed by the local conversation's transcript.
-func (n *Node) agyRuntimeTaskLogs(s *proto.Session) {
-	conversation, ok := strings.CutPrefix(s.SessionID, agyAgent+"-")
-	if !ok || (len(s.Background) == 0 && len(s.BackgroundEnded()) == 0) {
+func (n *Node) agyRuntimeTaskLogs(s *proto.Session, conversation string) {
+	if len(s.Background) == 0 && len(s.BackgroundEnded()) == 0 {
 		return
 	}
 	meta, ok := n.agyTranscriptMeta(conversation)

@@ -93,6 +93,7 @@ test('AGY companion publishes background lifecycles and clears running work when
   update({ exit: true })
   const stopped = await until('exit clears the running task', () => row() && !row().background && row(), 5000)
   assert.deepEqual(stopped.background_ended, finished.background_ended)
+  assert.deepEqual(stopped.agy_pane_background, finished.background)
 })
 
 test('AGY streams one assistant message at a time across tool calls', { timeout: 20_000 }, async (t) => {

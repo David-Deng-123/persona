@@ -554,10 +554,15 @@ func (b *runtimeRegistry) beginWatchLocked(h *runtimeConn, id string, since int)
 // yet (with the sequence and generation of each attempt), and the sessions it now runs that another runtime started
 // for the hub lately, which it has not been told of yet (runtime.driven).
 func (b *runtimeRegistry) setSessions(h *runtimeConn, list []proto.Session) (map[string]runtimeWatchAttempt, []string) {
+	return b.setSessionList(h, list, nil)
+}
+
+func (b *runtimeRegistry) setSessionList(h *runtimeConn, list []proto.Session, agyPaneBackground map[string][]proto.BackgroundTask) (map[string]runtimeWatchAttempt, []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	h.mu.Lock()
 	h.sessions = list
+	h.agyPaneBackground = agyPaneBackground
 	rt := h.hello.Runtime
 	h.mu.Unlock()
 	b.backAgain(rt) // its rows while it was away (runtimeaway.go): this list says what it has

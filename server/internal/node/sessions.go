@@ -254,7 +254,7 @@ func (n *Node) sessionListIn(ctx context.Context, refreshAgents bool, pass *code
 			hasRuntimeRow := false
 			if runtimeID := agyRuntimeIDs[id]; runtimeID != "" {
 				seen[runtimeID] = true
-				if runtimeRow, _, ok := n.runtimes.rowOf(runtimeID); ok {
+				if runtimeRow, ok := n.runtimes.agyPaneRuntimeRow(runtimeID); ok {
 					hasRuntimeRow = true
 					if s.Model == "" {
 						s.Model = runtimeRow.Model
@@ -268,12 +268,9 @@ func (n *Node) sessionListIn(ctx context.Context, refreshAgents bool, pass *code
 					if s.OutputTokens == 0 && runtimeRow.OutputTokens > 0 {
 						s.OutputTokens = runtimeRow.OutputTokens
 					}
-					background := agyBackgroundTasks{running: runtimeRow.Background, ended: runtimeRow.BackgroundEnded()}
-					// The live pane is authoritative even when its ACP mirror is only a history row.
-					if meta, ok := n.agyTranscriptMeta(agyConversations[id]); ok {
-						background = meta.background
-					}
-					background.apply(&s)
+					// The companion has already applied the native rewind cut.
+					agyBackgroundTasks{running: runtimeRow.Background, ended: runtimeRow.BackgroundEnded()}.apply(&s)
+					n.agyRuntimeTaskLogs(&s, agyConversations[id])
 				}
 			}
 			if a.Agent == agyAgent {
@@ -346,7 +343,9 @@ func (n *Node) sessionListIn(ctx context.Context, refreshAgents bool, pass *code
 			n.resolveAgyContextWindow(s)
 			if s.SourceInstanceID == agyRuntimeID {
 				agyBackgroundTasks{running: s.Background, ended: s.BackgroundEnded()}.apply(s)
-				n.agyRuntimeTaskLogs(s)
+				if conversation, ok := strings.CutPrefix(s.SessionID, agyAgent+"-"); ok {
+					n.agyRuntimeTaskLogs(s, conversation)
+				}
 			}
 		}
 		seen[s.SessionID] = true
