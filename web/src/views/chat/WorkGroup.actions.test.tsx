@@ -19,8 +19,8 @@ it("headers retain first-seen kind order, deduplicate read paths, combine edit k
   expect(actionSummary(group("g", [tool("1", "CustomTool")])).text).toContain("CustomTool");
 });
 
-it("command rows lead with the full command (including argv), search rows retain the query and target", () => {
-  expect(presentAction(tool("1", "exec_command", { command: ["npm", "test"], description: "Run unit checks" }).use)).toEqual({ param: { text: "npm test", title: "Run unit checks" } });
+it("command rows show a run verb and the full argv, and search rows retain the query and target", () => {
+  expect(presentAction(tool("1", "exec_command", { command: ["npm", "test"], description: "Run unit checks" }).use)).toEqual({ verb: "运行", param: { text: "npm test", title: "Run unit checks" } });
   expect(presentAction(tool("2", "Grep", { pattern: "missing reply", path: "src/example.ts" }).use).param).toEqual({ text: "missing reply · src/example.ts", title: "missing reply · src/example.ts" });
 });
 
