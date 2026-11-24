@@ -36,6 +36,7 @@ const FOLDERS: Record<string, unknown> = {
   "/home/me/code/my-app": { path: "/home/me/code/my-app", parent: "/home/me/code", entries: [entry("/home/me/code/my-app", "web")] },
   "/srv/work/recent-repo": { path: "/srv/work/recent-repo", parent: "/srv/work", entries: [entry("/srv/work/recent-repo", "docs")] },
   "/srv/work": { path: "/srv/work", parent: "/srv", entries: [entry("/srv/work", "Alpha"), entry("/srv/work", "alpine"), entry("/srv/work", "beta")] },
+  "/srv/work/alpine": { path: "/srv/work/alpine", parent: "/srv/work", entries: [] },
   "/srv/work/beta": { path: "/srv/work/beta", parent: "/srv/work", entries: [entry("/srv/work/beta", "src")] },
   "/srv": { path: "/srv", parent: "/", entries: [entry("/srv", "work")] },
   "/": { path: "/", parent: "/", entries: [entry("", "srv")] },
@@ -196,24 +197,31 @@ describe("NewAgent folder list follows the folder field (#9452)", () => {
     expect(rows()).toEqual(["Alpha", "alpine"]);
     expect(field().value).toBe("/srv/work/al"); // the list never rewrites what was typed
 
-    // picking a row fills the field and keeps the list where it is
+    // picking a filtered row enters that folder and updates cwd in lockstep
     await act(async () => folderRows().find((b) => b.title === "/srv/work/alpine")!.click());
     await tick(300);
     expect(field().value).toBe("/srv/work/alpine");
-    expect(rows()).toEqual(["Alpha", "alpine"]);
+    expect(breadcrumbLabels()).toEqual(["/", "srv", "work", "alpine"]);
+    expect(rows()).toEqual([]);
   });
 
-  it("lets browsing from the list take over until the next keystroke", async () => {
+  it("keeps cwd, breadcrumbs, and subfolders in lockstep when clicking into subfolders and going up", async () => {
     await typeFolder("/srv/work");
     await tick(300);
-    await act(async () => host.querySelector<HTMLButtonElement>(`[aria-label="${t("newagent.open_folder", { name: "beta" })}"]`)!.click());
+    await act(async () => folderRows().find((b) => b.title === "/srv/work/beta")!.click());
     await tick();
+    expect(field().value).toBe("/srv/work/beta");
+    expect(breadcrumbLabels()).toEqual(["/", "srv", "work", "beta"]);
     expect(rows()).toEqual(["src"]);
     await act(async () => upButton()!.click());
     await tick();
+    expect(field().value).toBe("/srv/work");
+    expect(breadcrumbLabels()).toEqual(["/", "srv", "work"]);
     expect(rows()).toEqual(["Alpha", "alpine", "beta"]);
     await act(async () => upButton()!.click());
     await tick();
+    expect(field().value).toBe("/srv");
+    expect(breadcrumbLabels()).toEqual(["/", "srv"]);
     expect(rows()).toEqual(["work"]);
 
     await typeFolder("/srv/work/b");

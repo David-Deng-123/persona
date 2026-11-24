@@ -47,7 +47,6 @@
   "prompt_placeholder_keys": "What should it do… ({keys} to start)",
   "add_files": "Add images or files",
   "attach_hint": "Paste or drop images and files · sent in the background after start",
-  "open_folder": "Open {name}",
   "permission_mode": "Permission mode",
   "permission_mode_hint": "You can change the mode in the conversation later; Full access can only be picked when starting.",
   "provider_mode_hint": "This agent uses its own approval settings unless you pick Full access. You can switch in the conversation later.",

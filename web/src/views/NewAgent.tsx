@@ -192,6 +192,13 @@ function AgentForm({ open, onClose, preset }: NewAgentProps) {
     setBrowse("");
     setFolderView("browse");
   };
+  // Single-state folder navigation (#14595): navigating in the picker always keeps cwd, breadcrumbs, and subfolders in lockstep.
+  const navigateFolder = (dir: string) => {
+    clearTimeout(typing.current);
+    pickCwd(dir);
+    setBrowse(dir);
+    setFolderView("browse");
+  };
   const clearCwd = () => {
     setCwd("");
     setCwdPicked(false);
@@ -1051,7 +1058,7 @@ function AgentForm({ open, onClose, preset }: NewAgentProps) {
                       <button
                         type="button"
                         aria-label={t("newagent.parent_folder")}
-                        onClick={() => { setBrowse(dirs.parent!); setFolderView("browse"); }}
+                        onClick={() => navigateFolder(dirs.parent!)}
                         className="touch-hit -ml-1 flex size-5 shrink-0 items-center justify-center rounded-[4px] text-ink-3 hover:bg-hover hover:text-ink"
                       >
                         <Icon name="chevronLeft" size={12} stroke={2.4} />
@@ -1069,11 +1076,7 @@ function AgentForm({ open, onClose, preset }: NewAgentProps) {
                                 data-breadcrumb-path={seg.path}
                                 aria-current={last ? "location" : undefined}
                                 title={seg.path}
-                                onClick={() => {
-                                  pickCwd(seg.path);
-                                  setBrowse(seg.path);
-                                  setFolderView("browse");
-                                }}
+                                onClick={() => navigateFolder(seg.path)}
                                 className={cx(
                                   "touch-hit rounded-[4px] px-1 py-0.5 whitespace-nowrap transition-colors hover:bg-hover hover:text-ink",
                                   last ? "font-medium text-ink" : "text-ink-2",
@@ -1131,19 +1134,19 @@ function AgentForm({ open, onClose, preset }: NewAgentProps) {
                       path={d.path}
                       sub={shortPath(d.path)}
                       selected={!desktopScratch && cwd === d.path}
-                      onPick={() => { pickCwd(d.path); followFilled(d.path); }}
+                      onPick={() => navigateFolder(d.path)}
                     />
                   ))
                 ) : (
                   <>
                     {naming && dirs?.path && (
                       <Suspense fallback={null}>
-                        <NewFolderNaming key={dirs.path} folder={dirs.path} onCancel={() => setNaming(false)} onUse={(made) => { pickCwd(made); setNaming(false); }} />
+                        <NewFolderNaming key={dirs.path} folder={dirs.path} onCancel={() => setNaming(false)} onUse={(made) => { navigateFolder(made); setNaming(false); }} />
                       </Suspense>
                     )}
                     {visibleEntries.length > 0 ? (
                       visibleEntries.map((d) => (
-                        <DirRow key={d.path} name={d.name} path={d.path} git={d.is_git} selected={!desktopScratch && cwd === d.path} onPick={() => pickCwd(d.path)} onOpen={() => setBrowse(d.path)} />
+                        <DirRow key={d.path} name={d.name} path={d.path} git={d.is_git} selected={!desktopScratch && cwd === d.path} drillable onPick={() => navigateFolder(d.path)} />
                       ))
                     ) : (
                       !loadingDirs && dirs && !naming && (
@@ -1508,20 +1511,23 @@ function Choice({ selected, onClick, title, radio, children }: { selected: boole
   );
 }
 
-// A folder to start in: picked with a click, opened with a double click or its chevron.
-function DirRow({ name, path, sub, git, selected, onPick, onOpen }: { name: string; path: string; sub?: string; git?: boolean; selected: boolean; onPick: () => void; onOpen?: () => void }) {
+// A folder to start in: single-click navigates into it and updates cwd in lockstep (#14595).
+function DirRow({ name, path, sub, git, selected, drillable, onPick }: { name: string; path: string; sub?: string; git?: boolean; selected: boolean; drillable?: boolean; onPick: () => void }) {
   return (
-    <div className={cx("group/dir flex h-8 items-center gap-2 rounded-[6px] px-2 transition-colors pointer-coarse:min-h-11", selected ? "bg-accent-tint" : "hover:bg-hover")}>
-      <button type="button" data-dir-row onClick={onPick} onDoubleClick={onOpen} className="flex min-w-0 flex-1 items-center gap-2 self-stretch text-left" title={path}>
-        <Icon name={git ? "git" : "folder"} size={13} className={selected ? "text-accent-ink" : "text-ink-3"} />
-        <span className={cx("shrink-0 truncate text-[12.5px]", selected ? "font-medium text-accent-ink" : "text-ink")}>{name}</span>
-        {sub && <span className="min-w-0 truncate font-mono text-[11px] text-ink-3">{sub}</span>}
-      </button>
-      {onOpen && (
-        <button type="button" aria-label={t("newagent.open_folder", { name })} onClick={onOpen} className="touch-hit flex size-5 items-center justify-center rounded-[4px] text-ink-3 opacity-0 transition-opacity group-hover/dir:opacity-100 hover:bg-hover-2 hover:text-ink focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
-          <Icon name="chevronRight" size={12} stroke={2.4} />
-        </button>
+    <button
+      type="button"
+      data-dir-row
+      onClick={onPick}
+      title={path}
+      className={cx(
+        "group/dir flex h-8 w-full items-center gap-2 rounded-[6px] px-2 text-left transition-colors pointer-coarse:min-h-11",
+        selected ? "bg-accent-tint" : "hover:bg-hover",
       )}
-    </div>
+    >
+      <Icon name={git ? "git" : "folder"} size={13} className={cx("shrink-0", selected ? "text-accent-ink" : "text-ink-3")} />
+      <span className={cx("shrink-0 truncate text-[12.5px]", selected ? "font-medium text-accent-ink" : "text-ink")}>{name}</span>
+      {sub && <span className="min-w-0 truncate font-mono text-[11px] text-ink-3">{sub}</span>}
+      {drillable && <Icon name="chevronRight" size={12} stroke={2.4} className="ml-auto shrink-0 text-ink-3 transition-colors group-hover/dir:text-ink" />}
+    </button>
   );
 }
