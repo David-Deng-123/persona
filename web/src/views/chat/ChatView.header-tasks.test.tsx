@@ -110,16 +110,36 @@ describe("conversation tasks in the header", () => {
     expect(getPanel()).toMatchObject({ kind: "conversation-tasks", mid: "mac", sid: "s1" });
   });
 
-  it("from 640 px, the button opens it and ⋯ has no row for it", async () => {
+  it("from 640 px, the button opens it and ⋯ omits duplicate desktop panel items and aligns right", async () => {
     media.phone = false;
+    upsertSession({ ...agent, branch: "feat/header-cleanup" } as Session);
+    act(() => root.render(<ChatView mid="mac" sid="s1" inPage />));
+    await flush();
+    expect(header().querySelector("[data-chat-branch]")).toBeNull();
+    expect(header().querySelector("[data-header-divider]")).not.toBeNull();
+    await openMore();
+    const labels = menuRows().map((r) => r.textContent ?? "");
+    expect(tasksRow()).toBeUndefined();
+    expect(labels.some((l) => l.includes(t("chat-chatview.files")))).toBe(false);
+    expect(labels.some((l) => l === "Git")).toBe(false);
+    expect(labels.some((l) => l.includes(t("chat-chatview.terminal")))).toBe(false);
+    const menuEl = document.querySelector<HTMLElement>('[role="menu"]')!;
+    expect(menuEl.style.transformOrigin).toBe("top right");
+    act(() => tasksButton()!.click());
+    await flush();
+    expect(getPanel()).toMatchObject({ kind: "conversation-tasks", mid: "mac", sid: "s1" });
+  });
+
+  it("on a phone, ⋯ retains Files and Git entries alongside Conversation tasks", async () => {
+    media.phone = true;
     upsertSession(agent);
     act(() => root.render(<ChatView mid="mac" sid="s1" inPage />));
     await flush();
     await openMore();
-    expect(tasksRow()).toBeUndefined();
-    act(() => tasksButton()!.click());
-    await flush();
-    expect(getPanel()).toMatchObject({ kind: "conversation-tasks", mid: "mac", sid: "s1" });
+    const labels = menuRows().map((r) => r.textContent ?? "");
+    expect(labels.some((l) => l.includes(t("chat-chatview.files")))).toBe(true);
+    expect(labels.some((l) => l === "Git")).toBe(true);
+    expect(labels.some((l) => l.includes(TASKS))).toBe(true);
   });
 });
 
