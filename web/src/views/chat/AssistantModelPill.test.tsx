@@ -269,7 +269,7 @@ describe("a Persona chat's pill on a hub that keeps picks", () => {
   it("Codex's Fast goes through the speed request", async () => {
     await show(chat({ agent: "codex", service_tiers: [{ id: "default", name: "Standard" }, { id: "priority", name: "Fast" }] }));
     await open();
-    expect(await act(() => panel.props!.onApplyCurrent!({ fast: true }))).toBe(true);
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "fast" }))).toBe(true);
     expect(calls.filter((c) => c.url.endsWith("/modes")).map((c) => c.body)).toEqual([{ service_tier: "priority" }]);
   });
 
@@ -361,22 +361,22 @@ describe("an older hub and the new-conversation page", () => {
     await show(undefined);
     await open();
     const models = panel.props!.providers.find((p) => p.id === "codex")!.models!;
-    expect(models.find((m) => m.id === "gpt-fast")!.fast).toBe(true);
-    expect(models.find((m) => m.id === "gpt-standard")!.fast).not.toBe(true);
-    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "low" });
-    expect(await act(() => panel.props!.onApplyCurrent!({ fast: true }))).toBe(true);
-    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "low", fast: true });
+    expect(models.find((m) => m.id === "gpt-fast")!.speeds?.map((tier) => tier.id)).toEqual(["standard", "fast"]);
+    expect(models.find((m) => m.id === "gpt-standard")!.speeds).toBeUndefined();
+    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "low", speed: "standard" });
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "fast" }))).toBe(true);
+    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "low", speed: "fast" });
     expect(await act(() => panel.props!.onApplyCurrent!({ effort: "high" }))).toBe(true);
-    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "high", fast: true });
-    expect(await act(() => panel.props!.onApplyCurrent!({ fast: false }))).toBe(true);
-    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "high" });
+    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "high", speed: "fast" });
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "standard" }))).toBe(true);
+    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "high", speed: "standard" });
     // Reset can carry effort and Fast together; neither is dropped.
-    await act(() => panel.props!.onApplyCurrent!({ fast: true }));
-    expect(await act(() => panel.props!.onApplyCurrent!({ effort: "", fast: false }))).toBe(true);
-    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast" });
+    await act(() => panel.props!.onApplyCurrent!({ speed: "fast" }));
+    expect(await act(() => panel.props!.onApplyCurrent!({ effort: "", speed: "standard" }))).toBe(true);
+    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", speed: "standard" });
     // A whole-setup pick applies a Fast-only change, and an unsupported model never inherits it.
-    expect(await act(() => panel.props!.onPick({ provider: "codex", model: "gpt-fast", fast: true }))).toBe(true);
-    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", fast: true });
+    expect(await act(() => panel.props!.onPick({ provider: "codex", model: "gpt-fast", speed: "fast" }))).toBe(true);
+    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", speed: "fast" });
     expect(await act(() => panel.props!.onPick({ provider: "codex", model: "gpt-standard" }))).toBe(true);
     expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-standard" });
     expect(pickedFast()).toBe(false);
@@ -386,13 +386,13 @@ describe("an older hub and the new-conversation page", () => {
     defaultSetup = { provider: "codex", model: "gpt-fast", effort: "low" };
     await show(undefined); // no launcher/model pick of its own, as after /clear
     await open();
-    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "low" });
-    expect(await act(() => panel.props!.onApplyCurrent!({ fast: true }))).toBe(true);
+    expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", effort: "low", speed: "standard" });
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "fast" }))).toBe(true);
     expect(pickedLauncher(NEW_CONVERSATION)).toBe("codex");
     expect(pickedModel(NEW_CONVERSATION)).toBe("gpt-fast");
     expect(pickedEffort(NEW_CONVERSATION)).toBe("low");
     expect(pickedFast()).toBe(true);
-    expect(await act(() => panel.props!.onApplyCurrent!({ fast: true, effort: "high" }))).toBe(true);
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "fast", effort: "high" }))).toBe(true);
     expect(pickedEffort(NEW_CONVERSATION)).toBe("high");
   });
 
@@ -401,14 +401,14 @@ describe("an older hub and the new-conversation page", () => {
     await show(undefined);
     await open();
     const shown = panel.props!.state.current!;
-    expect(shown).toEqual({ provider: "codex", model: "gpt-fast", effort: "low" });
-    expect(await act(() => panel.props!.onPick({ ...shown, fast: true }))).toBe(true);
+    expect(shown).toEqual({ provider: "codex", model: "gpt-fast", effort: "low", speed: "standard" });
+    expect(await act(() => panel.props!.onPick({ ...shown, speed: "fast" }))).toBe(true);
     expect(pickedLauncher(NEW_CONVERSATION)).toBe("codex");
     expect(pickedModel(NEW_CONVERSATION)).toBe("gpt-fast");
     expect(pickedEffort(NEW_CONVERSATION)).toBe("low");
     expect(pickedFast()).toBe(true);
     // A speed-only edit keeps the setup; only the explicit Follow default resets every part.
-    expect(await act(() => panel.props!.onApplyCurrent!({ fast: false }))).toBe(true);
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "standard" }))).toBe(true);
     expect(pickedLauncher(NEW_CONVERSATION)).toBe("codex");
     expect(pickedModel(NEW_CONVERSATION)).toBe("gpt-fast");
     expect(pickedEffort(NEW_CONVERSATION)).toBe("low");
@@ -418,7 +418,7 @@ describe("an older hub and the new-conversation page", () => {
     expect(pickedFast()).toBe(false);
   });
 
-  it("a Recent row for the shown default with Fast is pickable and sends fast: true", async () => {
+  it("a Recent row for the shown default with Fast is pickable and sends Fast", async () => {
     defaultSetup = { provider: "codex", model: "gpt-fast", effort: "low" };
     await show(undefined);
     await open();
@@ -428,11 +428,11 @@ describe("an older hub and the new-conversation page", () => {
       view: { kind: "recent" },
       query: "",
       favorites: [],
-      recent: [{ provider: "codex", model: "gpt-fast", effort: "low", fast: true }],
+      recent: [{ provider: "codex", model: "gpt-fast", effort: "low", speed: "fast" }],
       overrides: {},
     }).flatMap((s) => s.rows).find((r) => r.kind === "recent");
     expect(recent?.provider.unavailable).toBeUndefined();
-    expect(recent?.setup).toEqual({ provider: "codex", model: "gpt-fast", effort: "low", fast: true });
+    expect(recent?.setup).toEqual({ provider: "codex", model: "gpt-fast", effort: "low", speed: "fast" });
     expect(await act(() => panel.props!.onPick(recent!.setup))).toBe(true);
     expect(pickedFast()).toBe(true);
     expect([pickedLauncher(NEW_CONVERSATION), pickedModel(NEW_CONVERSATION), pickedEffort(NEW_CONVERSATION)]).toEqual(["codex", "gpt-fast", "low"]);
@@ -446,7 +446,7 @@ describe("an older hub and the new-conversation page", () => {
     await show(undefined);
     await open();
     const models = panel.props!.providers.find((p) => p.id === "codex")!.models!;
-    expect(models.find((m) => m.id === "gpt-fast")!.fast).not.toBe(true);
+    expect(models.find((m) => m.id === "gpt-fast")!.speeds).toBeUndefined();
     expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast" });
     expect(pickedFast()).toBe(false);
   });

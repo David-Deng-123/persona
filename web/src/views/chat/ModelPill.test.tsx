@@ -468,8 +468,8 @@ describe("an Agent's pill", () => {
     await open();
     expect(provider("cx").unavailable).toBe(t("chat-modelpanel.model_fixed", { agent: "Codex" }));
     expect(panel.props!.state.recommended).toEqual([]);
-    expect(provider("cx").models![0]).toMatchObject({ id: "gpt-5.5", efforts: ["low", "medium", "high"], fast: true });
-    expect(await act(() => panel.props!.onApplyCurrent!({ fast: true }))).toBe(true);
+    expect(provider("cx").models![0]).toMatchObject({ id: "gpt-5.5", efforts: ["low", "medium", "high"], speeds: [{ id: "standard" }, { id: "fast" }] });
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "fast" }))).toBe(true);
     expect(modes()).toEqual([{ service_tier: "priority" }]);
     expect(getSession(codex.machine_id, "s1")?.service_tier).toBeUndefined();
     expect(await act(() => panel.props!.onApplyCurrent!({ effort: "low" }))).toBe(true);
@@ -480,7 +480,7 @@ describe("an Agent's pill", () => {
     act(() => root.render(<AgentModelPill session={fast} />));
     await flush();
     calls.length = 0;
-    await act(() => panel.props!.onApplyCurrent!({ fast: false }));
+    await act(() => panel.props!.onApplyCurrent!({ speed: "standard" }));
     expect(modes()).toEqual([{ service_tier: "default" }]);
   });
 

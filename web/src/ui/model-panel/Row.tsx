@@ -6,7 +6,7 @@
 // ID as its second line (a touch screen has no tooltip), and a touch screen adds the full ID to the provider's line.
 import { useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent, type MouseEvent } from "react";
 import { t } from "../../i18n";
-import { priceTier, shownEffort, type PanelRow } from "../../lib/model-panel";
+import { priceTier, shownEffort, speedLabel, type PanelRow } from "../../lib/model-panel";
 import { effortTitle } from "../../lib/session-actions";
 import { agentName } from "../../lib/agent-kind";
 import { cx } from "../atoms";
@@ -74,7 +74,15 @@ export function Row({ row, second, describes, keepSecond, asButton, dense, block
   const effort = shownEffort(row.setup, model);
   const tier = priceTier(model.price);
   // what the right side says, in words: "Claude Code · High · Fast"
-  const setupTitle = [agentName(provider.engine, provider.engineLabel), effort && effortTitle(effort), row.setup.fast && t("ui-modelpanel.fast_short")].filter(Boolean).join(" · ");
+  const speed = row.setup.speed && row.setup.speed !== "standard" ? row.setup.speed : undefined;
+  const speedName = speed && speedLabel(model.speeds?.find((choice) => choice.id === speed) ?? { id: speed });
+  const speedMark = speedName && (
+    <span data-row-speed title={speedName} aria-label={speedName} role="img" className="flex shrink-0 items-center gap-1 text-label text-ink-3">
+      <Icon name="bolt" size={11} className="fill-current" />
+      {speed !== "fast" && speedName}
+    </span>
+  );
+  const setupTitle = [agentName(provider.engine, provider.engineLabel), effort && effortTitle(effort), speedName].filter(Boolean).join(" · ");
   const off = Boolean(blocked) || Boolean(frozen);
   // the running model's row stays reachable while picks are off: its Customize still opens the flyout (effort, Fast), so it
   // is not announced as disabled (its pick is a no-op anyway, and Enter does nothing while blocked)
@@ -186,12 +194,15 @@ export function Row({ row, second, describes, keepSecond, asButton, dense, block
           <RowButton icon="x" disabled={frozen} label={t("ui-modelpanel.forget", { id: model.id })} onClick={onForget} className={cx("text-ink-3 hover:text-ink-2", REVEAL)} />
         )}
         {dense ? (
-          row.current && <Icon name="check" size={14} stroke={2.5} className="ml-auto shrink-0 text-ink" />
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            {speedMark}
+            {row.current && <Icon name="check" size={14} stroke={2.5} className="shrink-0 text-ink" />}
+          </span>
         ) : (
           <span className="ml-auto flex shrink-0 items-center">
             <span title={setupTitle} data-row-setup className="flex max-w-[118px] shrink-0 items-center gap-1 truncate text-[12px] text-ink-3">
               {effort && <span className="truncate">{effortTitle(effort)}</span>}
-              {row.setup.fast && <Icon name="bolt" size={11} className="shrink-0 fill-current" />}
+              {speedMark}
             </span>
           </span>
         )}

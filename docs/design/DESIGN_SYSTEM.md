@@ -1582,9 +1582,10 @@ chat (#5033), where the panel only offers models and says plainly which one the 
   (160 px; entries 32 px high with the mark, the launcher's own name, an accent dot on the current one, the quota
   percentage and an ⓘ whose tooltip says why one can't take a pick), the models (single-line rows, a check on the one
   that runs, no effort word), and the thinking efforts of the model picked (156 px; one 32 px button per level, a check
-  on the one in use, "Recommended" after the default). The footer gives that model's speed as a two-segment Standard /
-  Fast control on `--hover-2` and Claude Code's ultracode where offered. A pick there keeps the panel open; outside or
-  Esc closes it. The reason a launcher can't take a pick shows once, above its models, never as a line under each one. Customize opens a 264 px flyout to the panel's left: the effort slider, Fast, the engine, an exact catalog
+  on the one in use, "Recommended" after the default). The footer gives the model an ordered speed selector on
+  `--hover-2` when the session offers choices, and Claude Code's ultracode where offered. Standard / Fast stay a
+  compact pair, and Ultrafast and other advertised tiers get their own segments. A pick there keeps the panel open; outside or
+  Esc closes it. The reason a launcher can't take a pick shows once, above its models, never as a line under each one. Customize opens a 264 px flyout to the panel's left: the effort slider, the same speed selector, the engine, an exact catalog
   reference-price line where known, and a footer that says whether the setup is the recommended one, customized or
   saved. A launcher summary adds its weekly-remaining bar only when the existing launcher quota answer supplies a
   weekly ratio; its tooltip names the window and reset time.
@@ -3158,11 +3159,12 @@ changing (principle 3).
 
 ## Codex speed controls (#3865)
 
-An Agent's Codex thread sets its speed with Fast in the model panel's flyout of the model it runs (#5032, the model pill
-and unified model panel in 3.8); a Persona chat running Codex does the same since #5033, its effort chip and Speed
-submenu retired. Fast is a toggle showing the current value, and its label explains the increased usage. A change
-waits for native acknowledgment and the session push; turning Fast off is the reversible choice. Settings > Agents >
-Codex uses the existing agent-settings row for the native default. No account or session is automatically switched to Fast.
+In the web model panel, Agents can change the speed of a writable Codex thread or a supported Claude Code
+terminal session. The same segmented control sits in the wide footer and the narrow flyout. It lists only
+advertised choices and keeps the acknowledged selection visible while a change is pending. A faster option
+explains the extra usage, and Claude Code's Fast detail explains that the runtime may save the preference for
+future sessions. To undo a speed change, pick the previous option. Settings > Agents > Codex still owns the
+native default for new Codex sessions.
 
 The iOS main Assistant conversation offers the same current-session choice inside its existing composer Model / Thinking
 Effort menu (#10244), not in Settings and not on other chats. A native **Speed** section is present only when the session

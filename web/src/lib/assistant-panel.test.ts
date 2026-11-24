@@ -205,9 +205,9 @@ describe("the panel's providers", () => {
   it("Codex's Fast on the model it runs, as it runs", () => {
     const c = chat({ session: session({ launcher: "codex", model: "gpt-5.5", service_tier: "priority" }) });
     const withList = (name: string) => (name === "codex" ? { list: { agent: "codex", models: [{ id: "gpt-5.5", name: "GPT-5.5", efforts: ["low", "high"] }] } } : listOf(name));
-    const { providers, state } = assistantPanel(assistantSetup(c, info), info, withList, { fast: true, fastOn: true });
-    expect(providers.find((p) => p.id === "codex")!.models![0].fast).toBe(true);
-    expect(state.current).toMatchObject({ provider: "codex", model: "gpt-5.5", fast: true });
+    const { providers, state } = assistantPanel(assistantSetup(c, info), info, withList, { speeds: [{ id: "standard" }, { id: "fast" }], speed: "fast" });
+    expect(providers.find((p) => p.id === "codex")!.models![0].speeds?.map((tier) => tier.id)).toEqual(["standard", "fast"]);
+    expect(state.current).toMatchObject({ provider: "codex", model: "gpt-5.5", speed: "fast" });
   });
 });
 

@@ -2588,7 +2588,7 @@ selector; where Persona's earlier rules differ, Cindy's wins, built from Persona
 - **What the pill shows**: `[engine][model][effort][⚡][⌄]`: the mark of the Agent the launcher runs, drawn once and first
   (#5497: `AgentMark`, as in the Agents list; an Agent with no mark of its own gets the generic `agent` icon, never a
   letter, unless its runtime names it, #8142), the model as its launcher's list names it (before that list is in, a short form of the ID such as `opus 5.5`),
-  the thinking effort in the text colour, a filled bolt for Codex's Fast, and the workflow mark while ultracode (or a
+  the thinking effort in the text colour, a filled bolt for Fast, and the workflow mark while ultracode (or a
   Codex thread's ultra) is on. The pill, effort controls and settings use Minimal, Low, Medium, High, XHigh, Max and Ultra
   in all three languages. Explanations use the page's language. When the pill shows a tier, it drops the effort qualifier
   from the model name and retains context sizes. An Antigravity variant can supply the pill's tier from its catalog ID.
@@ -2596,6 +2596,11 @@ selector; where Persona's earlier rules differ, Cindy's wins, built from Persona
   "Claude Code · Opus 5.5 · gateway · High[ · Fast]"; accessible name "Select model. Current: Opus 5.5, thinking effort: High".
   One of Paseo's providers is its own engine (#8142): its mark, and its label in the tooltip ("Grok · Grok 4 · grok"),
   never `paseo`; the panel's rows, its Agent block and its reasons name it the same way.
+- The wide panel's footer and the narrow model flyout show the same ordered **Speed** selector. Standard / Fast
+  stay a compact pair where those are the only choices. Codex may offer Ultrafast or other catalog tiers, and
+  supported Claude Code sessions offer Standard / Fast. The selected speed follows session acknowledgment. Saved
+  setups that used the old Fast flag still read as Fast, and saved setups without a speed read as Standard where
+  the model offers it. Choosing a different model sends no speed request based on the previous model's tiers.
 - **Widths**: the composer card is a container (`@container/composer`). From 600 px the pill takes 72–320 px; under 600 it
   takes the width its words need with the name at most 108 px, and a name's trailing qualifier in brackets is left out
   there ("Default (recommended)" reads "Default", "GPT-5 (beta)" "GPT-5"), except a context size, which names another

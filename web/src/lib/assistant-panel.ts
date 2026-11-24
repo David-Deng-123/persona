@@ -18,6 +18,7 @@ import { validModelId } from "./model-id";
 import { cleanSetup, type PanelConfig, type PanelModel, type PanelProvider, type PanelState } from "./model-panel";
 import { providerTitle } from "./provider-names";
 import { currentModelRow, modelLabel, type AssistantLaunchers, type ModelList } from "./session-models";
+import { STANDARD_FAST, type SpeedOption } from "./session-speed";
 import type { ModelPick } from "./types";
 
 /** A model of a launcher's list as the panel shows it: an ID typed before takes any of Claude Code's efforts (nobody
@@ -28,7 +29,7 @@ function panelModel(m: AgentModel, engine: string, catalogFast: boolean): PanelM
   if (m.resolved) out.resolved = m.resolved;
   if (m.aliases?.length) out.aliases = m.aliases;
   if (m.default_effort) out.defaultEffort = m.default_effort;
-  if (catalogFast && modelSupportsFast(m)) out.fast = true;
+  if (catalogFast && modelSupportsFast(m)) out.speeds = STANDARD_FAST;
   if (m.custom) out.custom = true;
   return out;
 }
@@ -51,9 +52,8 @@ export interface AssistantPanelOptions {
   supervision?: boolean;
   /** A new conversation may choose an advertised native speed for its first turn. */
   starting?: boolean;
-  /** The chat has Codex's Fast speed: the model it runs offers it ("as it runs": on when `fastOn`). */
-  fast?: boolean;
-  fastOn?: boolean;
+  speeds?: readonly SpeedOption[];
+  speed?: string;
 }
 
 /** The panel's providers and state for a Persona chat running `setup`: `info` the computer's launchers for the main chat
@@ -104,11 +104,10 @@ export function assistantPanel(setup: AssistantSetup, info: AssistantLaunchers |
   const own = providers.find((p) => p.id === setup.provider);
   const row = own?.models ? currentModelRow(listOf(setup.provider).list?.models ?? [], setup.model) : undefined;
   const model = row?.id ?? setup.model ?? explicitLauncherModel(launchers.find((l) => l.name === setup.provider)?.model);
-  if (o.fast && model && own?.models) own.models = own.models.map((m) => (m.id === model ? { ...m, fast: true } : m));
-  const currentRow = own?.models?.find((m) => m.id === model);
-  const canFast = Boolean(currentRow?.fast || o.fast);
+  if (o.speeds?.length && model && own?.models) own.models = own.models.map((m) => (m.id === model ? { ...m, speeds: o.speeds } : m));
+  const startSpeed = o.starting && own?.models?.find((m) => m.id === model)?.speeds ? (setup.fast ? "fast" : "standard") : undefined;
   const state: PanelState = {
-    current: model ? cleanSetup({ provider: setup.provider, model, effort: setup.effort, fast: canFast && Boolean(setup.fast || o.fastOn) }) : null,
+    current: model ? cleanSetup({ provider: setup.provider, model, effort: setup.effort, speed: o.speed ?? startSpeed }) : null,
     recommended: own && !own.unavailable ? [setup.provider] : [],
   };
   return { providers, state };
