@@ -28,5 +28,7 @@
   "every_minutes": "Every {count}m",
   "every_hours": "Every {count}h",
   "hourly": "Hourly",
-  "daily_at": "Daily {time}"
+  "daily_at": "Daily {time}",
+  "interrupt": "Interrupt",
+  "interrupt_hint": "Interrupt (Esc)"
 }

@@ -26,5 +26,7 @@
   "every_minutes": "{count}分ごと",
   "every_hours": "{count}時間ごと",
   "hourly": "毎時",
-  "daily_at": "毎日 {time}"
+  "daily_at": "毎日 {time}",
+  "interrupt": "中断",
+  "interrupt_hint": "中断（Esc）"
 }
