@@ -30,11 +30,12 @@ import (
 // Antigravity subagent reports and background task results as task notices, invoke_subagent Role / Prompt (#14625), 749 B (263,994 B).
 // Untitled Antigravity conversations take a short title from their first prompt line (#14629), 218 B (264,212 B).
 // An API error agy streams as message text becomes the turn's error, kept in history and settled idle (#14628), 231 B (264,443 B).
-// Keeping context compatibility in the Antigravity adapter (#14922) takes the total to 264,538 B.
-// Antigravity background task and schedule tracking (#13594) adds 2,283 B after merging main (266,821 B).
+// Antigravity adapter context compatibility (#14922), adapter compaction (#15037), and GENERIC timestamp header
+// stripping (#13662) bring main's measured total to 264,368 B.
+// Antigravity background task and schedule tracking (#13594) adds 2,388 B (266,756 B).
 // Raise the budget only for code a runtime needs, never to embed the packages raw again.
 func TestDistBudget(t *testing.T) {
-	const budget = 266_821
+	const budget = 266_756
 	_, out := generateIntegrations(t)
 	entries, err := os.ReadDir(out)
 	if err != nil {
