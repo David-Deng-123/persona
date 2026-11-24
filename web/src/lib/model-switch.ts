@@ -34,12 +34,14 @@ export const CODEX_APP_LAUNCHER = "codex-app";
 /** The node's name for the Claude Desktop launcher (server/internal/node/claudedesktop_new.go). */
 export const CLAUDE_DESKTOP_LAUNCHER = "claude-desktop";
 
-/** The launcher whose list the panel shows first: the session's own; without one, its engine's: the Codex App's for one
- *  of the App's chats (`space_kind` codex_app), plain codex for another Codex session, Claude Desktop for a desktop
- *  session, plain claude otherwise. */
+/** The launcher whose list the panel shows first: the session's own; without one, its engine's: agy for an Antigravity
+ *  session, the Codex App's for one of the App's chats (`space_kind` codex_app), plain codex for another Codex session,
+ *  Claude Desktop for a desktop session, plain claude otherwise. */
 export const sessionLauncher = (s: Partial<Pick<Session, "launcher" | "agent" | "agent_label" | "source_kind" | "agent_surface" | "space_kind">>): string => {
   if (s.launcher) return s.launcher;
-  if (agentId(sessionAgent(s).agent) !== "codex") {
+  const engine = agentId(sessionAgent(s).agent);
+  if (engine === "agy") return "agy";
+  if (engine !== "codex") {
     return s.source_kind === "claude_desktop" || s.space_kind === "claude_desktop" || s.agent_surface === "desktop"
       ? CLAUDE_DESKTOP_LAUNCHER
       : "claude";
