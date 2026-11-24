@@ -70,7 +70,7 @@ export function fontStartupScript(module: string): string {
   function start() {
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
-        import(new URL(${JSON.stringify(`./${module}`)}, document.baseURI).href).then(function (m) { m.startFonts(); }).catch(function () {});
+        import(new URL(${JSON.stringify(`./${module}`)}, document.baseURI).href).then(function () { dispatchEvent(new Event("persona-font-startup")); }).catch(function () {});
       });
     });
   }

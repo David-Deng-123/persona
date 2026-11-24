@@ -92,7 +92,6 @@ function startupPreload(): Plugin {
   let enforceBudgets = true;
   let building = false;
   const appHTML = normalizePath(fileURLToPath(new URL("./index.html", import.meta.url)));
-  const fontModule = fileURLToPath(new URL("./src/ui/font-startup.ts", import.meta.url));
   const compact = async (script: string) => (await transformWithEsbuild(script, "startup-inline.js", { minify: true, target: "es2022" })).code.trim();
   let startup: string[] | undefined; // the first screen's files, set by transformIndexHtml for the client page
   let screens: [string, string[]][] = []; // each language's first screen of the App (not the live screen)
@@ -105,9 +104,6 @@ function startupPreload(): Plugin {
       building = config.command === "build";
       enforceBudgets = config.mode !== "development-update";
       logger = config.logger;
-    },
-    buildStart() {
-      if (building) this.emitFile({ type: "chunk", id: fontModule, name: "fonts", preserveSignature: "strict" });
     },
     async transform(code, id) {
       if (!building || !id.includes("/src/") || !code.includes("lazyPage(")) return;
@@ -185,8 +181,8 @@ function startupPreload(): Plugin {
         const script = preloadScript(files);
         // What runs before the rest of the catalog is in: the groups, and main.tsx's other imports (not preloaded).
         const first = new Set([...entry, ...shared, ...files.app, ...files.screen, ...group(["/src/lib/back-close.ts", "/src/lib/error-reports-start.ts"].map(find), new Set())]);
-        const fonts = chunks.find((chunk) => chunk.facadeModuleId && normalizePath(chunk.facadeModuleId) === normalizePath(fontModule));
-        if (!fonts?.exports.includes("startFonts") || first.has(fonts.fileName)) this.error("startup-preload: web fonts must load after the first screen");
+        const fonts = find("/src/ui/font-startup.ts");
+        if (first.has(fonts.fileName)) this.error("startup-preload: web fonts must load after the first screen");
         const gaps = startupGaps(chunks.filter((c) => first.has(c.fileName)).map((c) => c.code), clientKeys(meta("en")), startupEntries(meta("en")));
         if (gaps.length) {
           throw new Error(`startup-preload: the first screen's code names ${gaps.join(", ")}, which the page reads before the rest of the catalog is in: add them to src/i18n/startup-namespaces.json (a key there takes every key that begins with it, a namespace all of it; list a namespace whole only when the first screen reads most of it)`);
@@ -292,7 +288,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 900,
     rollupOptions: {
       // The service worker (src/sw.ts) is its own entry at a fixed /sw.js: its scope is the folder it's served from.
-      input: { main: "index.html", admin: "admin/index.html", sw: "src/sw.ts" },
+      input: { main: "index.html", admin: "admin/index.html", sw: "src/sw.ts", fonts: "src/ui/font-startup.ts" },
       output: {
         entryFileNames: (chunk) => (chunk.name === "sw" ? "sw.js" : chunk.name === "admin" ? "admin/assets/[name]-[hash].js" : "assets/[name]-[hash].js"),
         chunkFileNames: (chunk) => (adminOnly(chunk.moduleIds) ? "admin/assets/[name]-[hash].js" : "assets/[name]-[hash].js"),
