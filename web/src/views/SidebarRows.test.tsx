@@ -101,6 +101,45 @@ describe("where an agent was opened, as a mark at its row's end (#2526)", () => 
     expect(html).toMatch(/<span class="[^"]*min-w-6 shrink-\[20\][^"]*">[^<]*Codex/);
     expect(render({ pane_id: "w1:p1" })).not.toContain("basis-auto"); // nothing at the end: as before
   });
+  it("renders SourceTag after data-row-age and before pendingCount so icons align on one right rail (#14832)", () => {
+    const updated_at = "2026-11-24T09:00:00Z";
+    for (const patch of [
+      { pane_id: "w1:p1", updated_at },
+      { space_kind: "codex_app", source_kind: "codex_history", updated_at },
+      { pane_id: "botmux:oc_1/t1", external_url: "https://example.com/topic", updated_at },
+    ]) {
+      const html = render({ ...patch, pending_interactions: 2 });
+      const ageIdx = html.indexOf("data-row-age");
+      const sourceIdx = html.indexOf("data-source=");
+      const pendingIdx = html.indexOf(">2<");
+      expect(ageIdx).toBeGreaterThan(-1);
+      expect(sourceIdx).toBeGreaterThan(ageIdx);
+      expect(pendingIdx).toBeGreaterThan(sourceIdx);
+      expect(mark(html)).toContain("group-hover/row:invisible");
+    }
+    const activeHtml = renderToStaticMarkup(
+      <SessionRow {...rowProps} s={{ ...session, pane_id: "botmux:oc_1/t1", external_url: "https://example.com/topic", updated_at }} active />,
+    );
+    expect(activeHtml.indexOf("data-source=")).toBeGreaterThan(activeHtml.indexOf("data-row-age"));
+    expect(mark(activeHtml)).toContain('role="link"');
+    expect(mark(activeHtml)).not.toContain("invisible");
+  });
+  it("renders OriginMark after data-row-age and keeps tailShown before data-row-age (#14832)", () => {
+    const updated_at = "2026-11-24T09:00:00Z";
+    const originHtml = render({ assistant: true, origin: "extension", updated_at }, { showState: false });
+    const ageIdx = originHtml.indexOf("data-row-age");
+    const originIdx = originHtml.indexOf('data-origin-mark="extension"');
+    expect(ageIdx).toBeGreaterThan(-1);
+    expect(originIdx).toBeGreaterThan(ageIdx);
+
+    const tabHtml = render({ pane_id: "w1:p1", slot_id: "w1:t2", slot_name: "Release Review", updated_at });
+    const tabIdx = tabHtml.indexOf(t("sidebar.tab_named", { label: "Release Review" }));
+    const tabAgeIdx = tabHtml.indexOf("data-row-age");
+    const tabSourceIdx = tabHtml.indexOf('data-source="terminal"');
+    expect(tabIdx).toBeGreaterThan(-1);
+    expect(tabAgeIdx).toBeGreaterThan(tabIdx);
+    expect(tabSourceIdx).toBeGreaterThan(tabAgeIdx);
+  });
 });
 
 describe("an agent's row with 「Agent 行显示详情」 (#2430)", () => {
