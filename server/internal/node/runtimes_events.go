@@ -179,7 +179,7 @@ func normalizeRuntimeSessions(h *runtimeConn, list []proto.Session) []proto.Sess
 		if s.Agent == "" {
 			s.Agent = agent
 		}
-		agy := rt == agyRuntimeID && s.Agent == agyAgent && !daemon
+		agy := agent == agyAgent && s.Agent == agyAgent && !daemon
 		if agy && agyStopped(s.Status) {
 			s.Background = nil
 		}
