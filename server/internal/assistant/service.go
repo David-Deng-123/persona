@@ -474,6 +474,7 @@ func New(o Options) *Service {
 	s.sessionReviewRoutes()
 	s.workspaceBoardRoutes()
 	s.navigationRoutes() // navigation.go: the page the apps open on
+	s.webFontRoutes()
 	s.channelRoutes()
 	s.companionRoutes()
 	s.kbInit(o.KB)

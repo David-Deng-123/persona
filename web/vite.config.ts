@@ -1,9 +1,9 @@
 /// <reference types="vitest/config" />
 import { fileURLToPath } from "node:url";
-import { defineConfig, type Logger, type Plugin } from "vite";
+import { defineConfig, normalizePath, transformWithEsbuild, type Logger, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { brotliCopies, firstScreenBytes, firstScreenOverBudget, firstScreenRoom, gzipBytes, IDLE_TIER_BUDGET, idleImports, localeDirs, preloadScript, startupGaps } from "./src/startup-preload";
+import { brotliCopies, firstScreenBytes, firstScreenOverBudget, firstScreenRoom, fontStartupScript, gzipBytes, IDLE_TIER_BUDGET, idleImports, localeDirs, preloadScript, startupGaps } from "./src/startup-preload";
 import { textScale } from "./src/lib/text-scale";
 import { classicWorkerProblem } from "./src/sw-entry-check";
 import { clientKeys, i18nCatalogs, startupEntries } from "./i18n-catalogs";
@@ -90,6 +90,10 @@ const showcaseImages: Plugin = {
 // what they import beyond those files (src/lib/lazy-page.ts): the build fails if they send more than IDLE_TIER_BUDGET.
 function startupPreload(): Plugin {
   let enforceBudgets = true;
+  let building = false;
+  const appHTML = normalizePath(fileURLToPath(new URL("./index.html", import.meta.url)));
+  const fontModule = fileURLToPath(new URL("./src/ui/font-startup.ts", import.meta.url));
+  const compact = async (script: string) => (await transformWithEsbuild(script, "startup-inline.js", { minify: true, target: "es2022" })).code.trim();
   let startup: string[] | undefined; // the first screen's files, set by transformIndexHtml for the client page
   let screens: [string, string[]][] = []; // each language's first screen of the App (not the live screen)
   const idle = new Set<string>(); // the modules lazyPage loads at idle, found by transform
@@ -97,13 +101,16 @@ function startupPreload(): Plugin {
   let logger: Logger | undefined;
   return {
     name: "startup-preload",
-    apply: "build",
     configResolved(config) {
+      building = config.command === "build";
       enforceBudgets = config.mode !== "development-update";
       logger = config.logger;
     },
+    buildStart() {
+      if (building) this.emitFile({ type: "chunk", id: fontModule, name: "fonts", preserveSignature: "strict" });
+    },
     async transform(code, id) {
-      if (!id.includes("/src/") || !code.includes("lazyPage(")) return;
+      if (!building || !id.includes("/src/") || !code.includes("lazyPage(")) return;
       let specs: string[];
       try {
         specs = idleImports(code);
@@ -135,8 +142,10 @@ function startupPreload(): Plugin {
     },
     transformIndexHtml: {
       order: "post",
-      handler(html, ctx) {
-        if (!ctx.bundle || ctx.chunk?.name !== "main") return html; // not admin/index.html
+      async handler(html, ctx) {
+        const fontTag = (script: string) => ({ tag: "script", children: script, injectTo: "body" as const });
+        if (!ctx.bundle) return normalizePath(ctx.filename) === appHTML ? [fontTag(fontStartupScript("src/ui/font-startup.ts"))] : html;
+        if (ctx.chunk?.name !== "main") return html; // not admin/index.html
         const chunks = Object.values(ctx.bundle).filter((c) => c.type === "chunk");
         // react-dom/client shares a chunk with other modules (no facade): look a module up by the chunk holding it.
         const byModule = (path: string) => chunks.find((c) => c.moduleIds.some((id) => id.endsWith(path)));
@@ -176,6 +185,8 @@ function startupPreload(): Plugin {
         const script = preloadScript(files);
         // What runs before the rest of the catalog is in: the groups, and main.tsx's other imports (not preloaded).
         const first = new Set([...entry, ...shared, ...files.app, ...files.screen, ...group(["/src/lib/back-close.ts", "/src/lib/error-reports-start.ts"].map(find), new Set())]);
+        const fonts = chunks.find((chunk) => chunk.facadeModuleId && normalizePath(chunk.facadeModuleId) === normalizePath(fontModule));
+        if (!fonts?.exports.includes("startFonts") || first.has(fonts.fileName)) this.error("startup-preload: web fonts must load after the first screen");
         const gaps = startupGaps(chunks.filter((c) => first.has(c.fileName)).map((c) => c.code), clientKeys(meta("en")), startupEntries(meta("en")));
         if (gaps.length) {
           throw new Error(`startup-preload: the first screen's code names ${gaps.join(", ")}, which the page reads before the rest of the catalog is in: add them to src/i18n/startup-namespaces.json (a key there takes every key that begins with it, a namespace all of it; list a namespace whole only when the first screen reads most of it)`);
@@ -184,7 +195,15 @@ function startupPreload(): Plugin {
         if (!idle.size) throw new Error("startup-preload: no lazyPage(…, { idle: true }) was found, so the idle tier's budget would check nothing");
         idleFiles = group([...idle].map(find), new Set([...first, ...startup]));
         screens = Object.entries(files.catalogs).map(([lang, catalog]) => [lang, [...new Set([...entry, ...shared, ...files.app, catalog])]]);
-        return { html, tags: [{ tag: "script", children: script, injectTo: "head" }] };
+        // Keep the shell small as the deferred startup adds an inline loader. Compile the adjacent before-paint
+        // scripts too, since the HTML entry's classic scripts do not go through the normal JS minifier.
+        for (const [tag, source] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+          html = html.replace(tag, `<script>${await compact(source)}</script>`);
+        }
+        return { html, tags: [
+          { tag: "script", children: await compact(script), injectTo: "head" },
+          fontTag(await compact(fontStartupScript(fonts.fileName))),
+        ] };
       },
     },
   };
