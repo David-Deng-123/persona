@@ -3383,7 +3383,11 @@ export const Header = memo(function Header({
         ...(onContinueTakeover && takeoverLabels
           ? [{ key: "takeover-continue", label: takeoverLabels.continueNew, icon: "compose" as const, disabled: takeoverBusy, onSelect: onContinueTakeover }]
           : []),
-        ...(showFiles && phone ? [{ key: "files", label: t("chat-chatview.files"), icon: "folder" as const, checked: here(panel, "files"), onSelect: openFiles }, { key: "git", label: "Git", icon: "git" as const, checked: here(panel, "git"), onSelect: openGit }, ...(reviews ? [{ key: "review", label: t("chat-chatview.review_changes"), icon: "pullRequest" as const, checked: here(panel, "review"), onSelect: openReview }] : [])] : []),
+        ...(showFiles && phone ? [
+          { key: "files", label: t("chat-chatview.files"), icon: "folder" as const, checked: here(panel, "files"), onSelect: openFiles },
+          { key: "git", label: "Git", icon: "git" as const, checked: here(panel, "git"), onSelect: openGit },
+        ] : []),
+        ...(showFiles && reviews ? [{ key: "review", label: t("chat-chatview.review_changes"), icon: "pullRequest" as const, checked: here(panel, "review"), onSelect: openReview }] : []),
         ...tasksItem,
         ...sessionReviewItems,
         // a run of a comparison (#8916): back to its runs' page
