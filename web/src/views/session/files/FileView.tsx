@@ -243,6 +243,7 @@ export function FileView({
   cwd,
   line,
   lineTo,
+  leading,
   onBack,
   onClose,
   onOpenPath,
@@ -256,6 +257,8 @@ export function FileView({
   line?: number;
   /** The last line of the range marked, when it is one. */
   lineTo?: number;
+  /** Optional leading control in the header (e.g. directory tree toggle in the File Workbench). */
+  leading?: React.ReactNode;
   onBack?: () => void;
   onClose: () => void;
   onOpenPath: (path: string) => void;
@@ -467,9 +470,9 @@ export function FileView({
   return (
     <>
       {onBack ? (
-        <BackHeader title={name} subtitle={where} actions={actions} onBack={onBack} onClose={onClose} />
+        <BackHeader title={name} subtitle={where} leading={leading} actions={actions} onBack={onBack} onClose={onClose} />
       ) : (
-        <PanelHeader icon={kind === "directory" ? "folder" : kind === "image" ? "image" : "read"} title={name} subtitle={where} actions={actions} onClose={onClose} />
+        <PanelHeader icon={kind === "directory" ? "folder" : kind === "image" ? "image" : "read"} title={name} subtitle={where} leading={leading} actions={actions} onClose={onClose} />
       )}
       <div className="flex min-h-0 flex-1 flex-col" key={path}>
         {doc.pageError && !doc.changed && (kind !== "sheet" || mode === "source") && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs text-ink-2">

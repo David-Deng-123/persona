@@ -13,6 +13,7 @@ import { api, enc, errorText, isAbort } from "../../lib/api";
 import { t } from "../../i18n";
 import { entryPayload, ENTRY_DRAG_TYPE } from "../../lib/entry-drag";
 import { aheadBehind, dirName, fileName, gitMark, joinPath, type FsEntry, type FsListing, type GitStatus } from "../../lib/files";
+import { revealDirs } from "../../lib/files-tree";
 import { historyBack, historyForward, historyGo, parentPath, pathSegments, writableHere, type FilesHistory } from "../../lib/files-nav";
 import { hitFolder, hitName, nameEntries, searchNames, type NameHit } from "../../lib/files-find-name";
 import { ago, bytes, shortPath } from "../../lib/format";
@@ -41,8 +42,31 @@ import { FilesTree } from "./files/FilesTree";
 import { Empty, FileGlyph, GitDot, GitBadge, useStoredFlag } from "./files/parts";
 
 type Listed = { at: string; listing?: FsListing; error?: string };
+type OpenFile = { path: string; line?: number; to?: number };
 
-export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClose }: { mid: string; sid: string; cwd: string; path?: string; file?: string; highlight?: string; onClose: () => void }) {
+export function FilesPanel({
+  mid,
+  sid,
+  cwd,
+  path,
+  file,
+  line,
+  to,
+  highlight: marked,
+  onShowInFolder,
+  onClose,
+}: {
+  mid: string;
+  sid: string;
+  cwd: string;
+  path?: string;
+  file?: string;
+  line?: number;
+  to?: number;
+  highlight?: string;
+  onShowInFolder?: (path: string) => void;
+  onClose: () => void;
+}) {
   // Where it starts: `path` (a folder to open at) or the session's folder; Back / Forward walk what was shown since.
   const startDir = path || cwd;
   const [history, setHistory] = useState<FilesHistory>({ current: startDir, back: [], forward: [] });
@@ -76,9 +100,12 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
   const [dirTick, setDirTick] = useState(0); // the folder shown changed on the computer (drill-in view)
   const [gitTick, setGitTick] = useState(0); // the folder's Git status did
   const [git, setGit] = useState<GitStatus | null>(null);
-  const [open, setOpen] = useState<string[]>(file ? [file] : []); // files opened from the list, newest last
+  const [open, setOpen] = useState<OpenFile[]>(file ? [{ path: file, line, to }] : []); // files opened in the workbench, newest last
+  // Collapsible directory tree in the split workbench: open by default on wide panels, collapsed on narrow viewports.
+  const [treePref, setTreePref] = useState<boolean | null>(null);
+  const treeOpen = treePref ?? !narrow;
   // where it is, kept when the page leaves the session so coming back opens it here again (#5150)
-  useEffect(() => notePlace({ mid, sid, cwd }, { path: dir === cwd ? undefined : dir, file: open.at(-1) }), [mid, sid, cwd, dir, open]);
+  useEffect(() => notePlace({ mid, sid, cwd }, { path: dir === cwd ? undefined : dir, file: open.at(-1)?.path }), [mid, sid, cwd, dir, open]);
   const menu = useMenu();
   const newMenu = useMenu();
   const features = useStore((s) => s.features);
@@ -126,8 +153,11 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
     return () => removeEventListener("keydown", key);
   }, [selecting, endSelect]);
 
+  const viewing = open[open.length - 1];
+  const reveal = useMemo(() => revealDirs(dir, viewing?.path), [dir, viewing?.path]);
+
   useEffect(() => {
-    if (!dir || tree) return;
+    if (!dir || tree || Boolean(viewing)) return;
     const ac = new AbortController();
     api<FsListing>(`/machines/${enc(mid)}/fs?path=${enc(dir)}&cwd=${enc(cwd)}`, { signal: ac.signal })
       .then((l) => setListed((m) => ({ ...m, [dir]: { at: dir, listing: l } })))
@@ -135,7 +165,7 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
         if (!isAbort(e)) setListed((m) => ({ ...m, [dir]: { at: dir, listing: m[dir]?.listing, error: errorText(e) } }));
       });
     return () => ac.abort();
-  }, [mid, cwd, dir, reloads, dirTick, tree]);
+  }, [mid, cwd, dir, reloads, dirTick, tree, viewing]);
 
   useEffect(() => {
     if (!cwd) return;
@@ -147,9 +177,9 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
   }, [mid, cwd, reloads, gitTick]);
 
   // The drill-in view watches the folder it shows; the tree watches the ones it has open (FilesTree). Both want Git.
-  useFsLive(mid, cwd, tree || !dir ? [] : [dir], true, (c) => {
+  useFsLive(mid, cwd, tree || Boolean(viewing) || !dir ? [] : [dir], true, (c) => {
     if (c.git) setGitTick((n) => n + 1);
-    if (!tree && dir && c.dirs.includes(dir)) setDirTick((n) => n + 1);
+    if (!tree && !viewing && dir && c.dirs.includes(dir)) setDirTick((n) => n + 1);
   });
 
   const here = listed[dir];
@@ -174,14 +204,22 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
     }
   };
   // A broken link says what it says (Info); a folder opens; a file opens in the viewer.
-  const enter = (e: FsEntry) => (e.link_broken ? setInfo({ path: joinPath(shown, e.name), entry: e }) : e.dir ? go(joinPath(shown, e.name)) : setOpen([joinPath(shown, e.name)]));
+  const enter = (e: FsEntry) => (e.link_broken ? setInfo({ path: joinPath(shown, e.name), entry: e }) : e.dir ? go(joinPath(shown, e.name)) : setOpen([{ path: joinPath(shown, e.name) }]));
+  // Switching files from the workbench tree updates the viewer in place; on narrow screens, collapse the overlay tree.
+  const selectFile = useCallback(
+    (p: string) => {
+      setOpen([{ path: p }]);
+      if (narrow) setTreePref(false);
+    },
+    [narrow],
+  );
 
   // A path the viewer links to: a folder already listed opens in the list, anything else in the viewer.
   const openPath = (p: string) => {
     if (listed[p]?.listing) {
       setOpen([]);
       go(p);
-    } else setOpen((o) => [...o, p]);
+    } else setOpen((o) => [...o, { path: p }]);
   };
   // The viewer's Show in Files: back to the list, at the file's folder, the file marked.
   const showInFolder = (p: string) => {
@@ -194,14 +232,15 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
   const entries = (here?.listing?.entries ?? []).filter((e) => showHidden || !e.name.startsWith("."));
   const changes = git?.is_repo ? git.files.length : 0;
   const sync = aheadBehind(git);
-  const viewing = open[open.length - 1];
+  const canGoBackInViewer = open.length > 1 || (!file && open.length > 0);
   // where an upload goes when no folder row is meant: the folder shown (the tree's root)
   const here_dir = writable ? dir : "";
   const finding = query.trim() !== "";
 
   return (
     <>
-      <div className={cx("flex min-h-0 flex-1 flex-col", viewing && "hidden")}>
+      {!viewing && (
+      <div className="flex min-h-0 flex-1 flex-col">
         <PanelHeader
           icon="folder"
           title={t("session-filespanel.title")}
@@ -259,19 +298,6 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
             ]}
           />
         )}
-        {rowMenu?.scope === ops.scope && (
-          <Menu
-            items={beforeTrash(ops.rowItems(rowMenu.x, rowMenu.open), [
-              { key: "info", label: t("files-info.info"), icon: "info", divider: true, onSelect: () => setInfo({ path: rowMenu.x.path }) },
-              ...(canChmod ? [{ key: "perm", label: t("files-perm.menu"), icon: "shield" as const, onSelect: () => setPerm({ path: rowMenu.x.path }) }] : []),
-              ...(canTerminal && rowMenu.x.dir ? [{ key: "terminal", label: t("files-nav.open_terminal"), icon: "terminal" as const, onSelect: () => void openTerminal(rowMenu.x.path) }] : []),
-            ])}
-            anchor={rowMenu.at.anchor ?? null}
-            point={rowMenu.at.point}
-            onClose={() => setRowMenu((current) => current === rowMenu ? null : current)}
-            align="right"
-          />
-        )}
         {selecting && <SelectionBar ops={ops} selected={[...selected.values()]} onClear={endSelect} />}
         <PathBar
           shown={shown}
@@ -305,7 +331,7 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
         {dropDir && <DropHint dir={dropDir} />}
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" key={finding ? "find" : tree ? `tree:${dir}` : dir}>
           {finding ? (
-            <FindResults mid={mid} dir={shown} query={query} onOpen={(hit) => (hit.dir ? go(joinPath(shown, hit.path)) : setOpen([joinPath(shown, hit.path)]))} />
+            <FindResults mid={mid} dir={shown} query={query} onOpen={(hit) => (hit.dir ? go(joinPath(shown, hit.path)) : setOpen([{ path: joinPath(shown, hit.path) }]))} />
           ) : tree ? (
             dir ? (
               <FilesTree
@@ -313,11 +339,11 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
                 sid={sid}
                 cwd={cwd}
                 root={dir}
-                reveal={[]}
+                reveal={reveal}
                 showHidden={showHidden}
                 git={git}
                 reloads={reloads}
-                onOpenFile={(p) => setOpen([p])}
+                onOpenFile={selectFile}
                 onShowHidden={() => setShowHidden(true)}
                 rowOps={rowOps}
               />
@@ -349,8 +375,22 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
           )}
         </div>
         </div>
-        {ops.ui}
       </div>
+      )}
+      {rowMenu?.scope === ops.scope && (
+        <Menu
+          items={beforeTrash(ops.rowItems(rowMenu.x, rowMenu.open), [
+            { key: "info", label: t("files-info.info"), icon: "info", divider: true, onSelect: () => setInfo({ path: rowMenu.x.path }) },
+            ...(canChmod ? [{ key: "perm", label: t("files-perm.menu"), icon: "shield" as const, onSelect: () => setPerm({ path: rowMenu.x.path }) }] : []),
+            ...(canTerminal && rowMenu.x.dir ? [{ key: "terminal", label: t("files-nav.open_terminal"), icon: "terminal" as const, onSelect: () => void openTerminal(rowMenu.x.path) }] : []),
+          ])}
+          anchor={rowMenu.at.anchor ?? null}
+          point={rowMenu.at.point}
+          onClose={() => setRowMenu((current) => current === rowMenu ? null : current)}
+          align="right"
+        />
+      )}
+      {ops.ui}
       {newKind && (
         <NewItemDialog
           mid={mid}
@@ -362,7 +402,7 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
           onMade={(p, kind) => {
             setReloads((n) => n + 1);
             setHighlight(fileName(p));
-            if (kind === "text") setOpen([p]);
+            if (kind === "text") setOpen([{ path: p }]);
           }}
         />
       )}
@@ -379,17 +419,65 @@ export function FilesPanel({ mid, sid, cwd, path, file, highlight: marked, onClo
       )}
       {perm && <PermissionsDialog mid={mid} cwd={cwd} path={perm.path} mode={perm.mode} onClose={() => setPerm(null)} onChanged={() => setReloads((n) => n + 1)} />}
       {viewing && (
-        <FileView
-          key={viewing}
-          mid={mid}
-          sid={sid}
-          path={viewing}
-          cwd={cwd}
-          onBack={() => setOpen((o) => o.slice(0, -1))}
-          onClose={onClose}
-          onOpenPath={openPath}
-          onShowInFolder={showInFolder}
-        />
+        <div className="relative flex min-h-0 flex-1 overflow-hidden" data-testid="file-workbench">
+          {treeOpen && dir && (
+            <div
+              data-testid="file-workbench-tree"
+              className={cx(
+                "flex min-h-0 w-[236px] shrink-0 flex-col border-r border-line bg-page",
+                narrow && "absolute inset-y-0 left-0 z-20 shadow-overlay",
+              )}
+            >
+              <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3">
+                <Icon name="folder" size={14} className="shrink-0 text-ink-2" />
+                <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink" title={shown}>
+                  {fileName(shown) || shown}
+                </span>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <FilesTree
+                  mid={mid}
+                  sid={sid}
+                  cwd={cwd}
+                  root={dir}
+                  reveal={reveal}
+                  activePath={viewing.path}
+                  showHidden={showHidden}
+                  git={git}
+                  reloads={reloads}
+                  onOpenFile={selectFile}
+                  onShowHidden={() => setShowHidden(true)}
+                  rowOps={rowOps}
+                />
+              </div>
+            </div>
+          )}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <FileView
+              key={`${open.length}:${viewing.path}`}
+              mid={mid}
+              sid={sid}
+              path={viewing.path}
+              cwd={cwd}
+              line={viewing.line}
+              lineTo={viewing.to}
+              leading={
+                dir ? (
+                  <IconButton
+                    icon="sidebar"
+                    label={treeOpen ? t("files-tree.hideTree") : t("files-tree.showTree")}
+                    onClick={() => setTreePref(!treeOpen)}
+                    pressed={treeOpen}
+                  />
+                ) : undefined
+              }
+              onBack={canGoBackInViewer ? () => setOpen((o) => o.slice(0, -1)) : undefined}
+              onClose={onClose}
+              onOpenPath={openPath}
+              onShowInFolder={onShowInFolder ?? showInFolder}
+            />
+          </div>
+        </div>
       )}
     </>
   );

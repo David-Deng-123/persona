@@ -1,7 +1,7 @@
 // The Files panel's tree (#2439, Moshi's form): folders open in place under their parent, what was listed is kept in
 // a small cache so closing and reopening the panel (or a folder) shows it at once, and the open folders are kept per
 // session. No DOM here: tested in files-tree.test.ts.
-import { joinPath, type FsEntry, type FsListing } from "./files";
+import { below, joinPath, type FsEntry, type FsListing } from "./files";
 
 // ── cache ────────────────────────────────────────────────────────────────
 
@@ -130,6 +130,26 @@ export function ancestors(root: string, stack: string[]): string[] {
     out.push(dir);
   }
   return out;
+}
+
+const normSlashes = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+
+/** Ancestor directories of `target` strictly below `root` (outermost first), so the tree expands down to `target`. */
+export function revealDirs(root: string, target?: string): string[] {
+  if (!root || !target) return [];
+  const posix = below(root, target);
+  if (posix) return posix.length > 1 ? ancestors(root, posix.slice(0, -1)) : [];
+  const nr = normSlashes(root);
+  const nt = normSlashes(target);
+  if (!nt.startsWith(nr + "/")) return [];
+  const parts = nt.slice(nr.length + 1).split("/").filter(Boolean);
+  return parts.length > 1 ? ancestors(root, parts.slice(0, -1)) : [];
+}
+
+/** Whether two tree paths point to the same entry (tolerates trailing slashes and Windows separators). */
+export function sameTreePath(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  return a === b || normSlashes(a) === normSlashes(b);
 }
 
 /** `open` plus `more`, without repeats, order kept. */
