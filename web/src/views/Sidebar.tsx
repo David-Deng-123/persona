@@ -64,7 +64,7 @@ import type { MenuNode } from "../lib/node-actions";
 import type { MenuAt } from "../ui/menu-model";
 import { useSidebarTerminals } from "../lib/sidebar-terminals";
 import { usePanes } from "../lib/terminal-panes";
-import { buildTerminalTree, shellsOnly, type TermSpace } from "../lib/terminals";
+import { buildTerminalTree, filterTerminalTree, shellsOnly, type TermSpace } from "../lib/terminals";
 import type { LinkTargetSpace } from "./LinkTodoDialog";
 import { lazyDialog } from "./LazyOverlay";
 import { FoldScope, useFolded } from "../lib/use-folded";
@@ -83,7 +83,7 @@ import { heldSidesOf, useHeldVersion } from "../lib/use-child-sessions";
 import { NoComputers, useAddComputer } from "./machines/AddComputerEntry";
 import { BADGE_CLASS, DOT_CLASS, type GoFn, GroupCount, holdsRow, morePagesMenu, type NavPage, type NodeMenuFn, pageIconStyle, pageLabel, type RegFn, rowKey, type RowMenuFn, Section, SidebarGroup, GroupFoldButton, useActiveKey, useGo, useNavPages } from "./SidebarParts";
 import { NavRow, PersonalAgents, PersonaRow, SessionRow, SubHeading } from "./SidebarRows";
-import { GroupBranch, LooseSection, MachineSection, RepoMachineSection, SessionTally, type SpaceMenuFn, type WorkspaceTreeActions, SpaceSection, TodoTreeView } from "./SidebarTree";
+import { GroupBranch, LooseSection, MachineSection, RepoMachineSection, SessionTally, ShellSpaceSection, type SpaceMenuFn, type WorkspaceTreeActions, SpaceSection, TodoTreeView } from "./SidebarTree";
 import { CollapseButton, PagesTally } from "./SidebarRail";
 import type { PageSection } from "../lib/sidebar-pages";
 import { WindowedRows } from "./WindowedRows";
@@ -94,7 +94,7 @@ import { usePendingWorkSessions } from "./sidebar-pending-sessions";
 import { useMainWaiting } from "./assistant/use-main-waiting";
 // Declared in the files split out of this one; re-exported so the files that import them from here stay as they are.
 export { useNavPages, type NavPage } from "./SidebarParts";
-export { AgentRow, PersonaRow, SessionRow } from "./SidebarRows";
+export { AgentRow, PersonaRow, SessionRow, ShellRow } from "./SidebarRows";
 export { SidebarRail } from "./SidebarRail";
 
 // Skip parent pushes with unchanged props; each leaf still receives its own state and subscription updates.
@@ -1116,9 +1116,33 @@ function LegacyAgentsBlock({ reg, hover, activeKey, go, onNewAgent, onNavigate, 
     setKept(matchingKeys(live, filter, mutes));
   }, [loaded, live, filter, mutes]);
   const filtered = filter !== "all" || dimActive;
+  const panesOn = useStore((s) => s.features.includes("terminal_panes"));
+  const sidebarTerminals = useSidebarTerminals();
+  const wantsShells = (panesOn || sidebarTerminals) && (shownGrouping === "machine" || shownGrouping === "space" || filter === "terminal");
+  const { listing: panes, refresh: refreshPanes } = usePanes(machines, wantsShells);
+  const shellTrees = useMemo(() => {
+    if (!wantsShells) return undefined;
+    const machineFilter = dimFilters.machines.length > 0 ? new Set(dimFilters.machines) : null;
+    const query = dimFilters.query.trim();
+    const out: Record<string, TermSpace[]> = {};
+    for (const m of machines) {
+      if (machineFilter && !machineFilter.has(m.id)) continue;
+      let spaces = shellsOnly(buildTerminalTree(panes[m.id]?.data, []));
+      if (query) spaces = filterTerminalTree(spaces, query, machineWithHub(m.id, machines));
+      if (spaces.length > 0) out[m.id] = spaces;
+    }
+    return out;
+  }, [wantsShells, machines, panes, dimFilters.machines, dimFilters.query]);
+  const shellCount = useMemo(() => {
+    if (!shellTrees) return 0;
+    return Object.values(shellTrees).reduce((n, list) => n + list.reduce((a, sp) => a + sp.tabs.reduce((b, tab) => b + tab.panes.length, 0), 0), 0);
+  }, [shellTrees]);
+  const showShellsForFilter = filter === "all" || filter === "terminal";
+  const visibleShellTrees = showShellsForFilter ? shellTrees : undefined;
+  const shownShellCount = showShellsForFilter ? shellCount : 0;
   const { needs, unread, working, bg_waiting, feishu, terminal } = useMemo(() => filterCounts(live, mutes), [live, mutes]);
   // A session can change its text or timestamp without changing any filter's count.
-  const filterTotals = useMemo(() => ({ needs, unread, working, bg_waiting, feishu, terminal }), [needs, unread, working, bg_waiting, feishu, terminal]);
+  const filterTotals = useMemo(() => ({ needs, unread, working, bg_waiting, feishu, terminal: terminal + shellCount }), [needs, unread, working, bg_waiting, feishu, terminal, shellCount]);
   const shown = useMemo(() => applyFilter(live, filter, mutes, kept), [live, filter, mutes, kept]);
   // a pinned agent shows once, under "Pinned" (an offline one too, unless a filter is on); the groups below are the rest
   const pinnedAgents = useMemo(() => pinnedSessions(filter !== "all" ? shown : [...shown, ...offline], pins), [filter, shown, offline, pins]);
@@ -1174,9 +1198,13 @@ function LegacyAgentsBlock({ reg, hover, activeKey, go, onNewAgent, onNavigate, 
   }, [unpinned, machines, shownGrouping, agentRepos.mod, catalog, shown, pinnedAgents, filtered, showEmptyWorkspaces, botmuxHidden, rowOrder, byUpdate, activity]);
   const machineTree = useMemo(() => {
     if (shownGrouping !== "machine") return [];
-    const built = buildMachineTree(machines, unpinned, { pins, hideEmpty: filtered });
+    const built = buildMachineTree(machines, unpinned, {
+      pins,
+      hideEmpty: filtered,
+      keepMachine: visibleShellTrees ? (id) => Boolean(visibleShellTrees[id]?.length) : undefined,
+    });
     return byUpdate ? activity.machineTreeByUpdate(built) : built;
-  }, [shownGrouping, machines, unpinned, pins, filtered, byUpdate, activity]);
+  }, [shownGrouping, machines, unpinned, pins, filtered, visibleShellTrees, byUpdate, activity]);
   // by todo a group mixes hosts (herdr, botmux…): when the list has more than one, rows outside herdr name theirs (#1836)
   const mixedHosts = useMemo(() => shownGrouping === "todo" && hostsOf(live).size > 1, [shownGrouping, live]);
   const unreadShown = filter === "unread" ? unreadOf(shown) : [];
@@ -1189,13 +1217,6 @@ function LegacyAgentsBlock({ reg, hover, activeKey, go, onNewAgent, onNavigate, 
     setKept(matchingKeys(filterInputs.current.live, f, filterInputs.current.mutes));
     hover(null);
   }, [hover]);
-  // Settings › Appearance › Show terminals in sidebar (off): the plain shells of each machine's terminal host, under its agents in "By machine"
-  const showTerminals = useSidebarTerminals() && shownGrouping === "machine";
-  const { listing: panes, refresh: refreshPanes } = usePanes(machines, showTerminals);
-  const shellTrees = useMemo(() => {
-    if (!showTerminals) return undefined;
-    return Object.fromEntries(machines.map((m) => [m.id, shellsOnly(buildTerminalTree(panes[m.id]?.data, []))])) as Record<string, TermSpace[]>;
-  }, [showTerminals, machines, panes]);
   const [rowMenu, setRowMenu] = useState<{ s: Session; anchor: HTMLElement; at?: MenuAt } | null>(null);
   const [spaceMenu, setSpaceMenu] = useState<{ sp: Space; anchor: HTMLElement; at?: MenuAt; fold?: MenuNode["fold"] } | null>(null);
   const [nodeMenu, setNodeMenu] = useState<{ node: MenuNode; at: MenuAt; header?: string } | null>(null);
@@ -1324,7 +1345,7 @@ function LegacyAgentsBlock({ reg, hover, activeKey, go, onNewAgent, onNavigate, 
 
       {todosFailed && <TodosUnread />}
 
-      {!listNote && filtered && shown.length === 0 && pinnedAgents.length === 0 && (
+      {!listNote && filtered && shown.length === 0 && pinnedAgents.length === 0 && shownShellCount === 0 && (
         <div className="mt-2 flex items-center gap-2 px-2 py-1.5 text-[12px] text-ink-3">
           <span className="min-w-0 flex-1 truncate">{filter !== "all" ? t("sidebar.filter_empty", { filter: AGENT_FILTERS.find((f) => f.key === filter)!.label }) : t("sidebar.no_match")}</span>
           <button type="button" onClick={() => { choose("all"); setDimFilters(DEFAULT_DIMENSION_FILTERS); }} className="touch-hit relative z-10 shrink-0 whitespace-nowrap rounded-control px-1.5 py-0.5 text-[12px] font-medium text-accent-ink hover:bg-hover">{t("sidebar.show_all")}</button>
@@ -1363,9 +1384,29 @@ function LegacyAgentsBlock({ reg, hover, activeKey, go, onNewAgent, onNavigate, 
           }} />
         </div>
       ) : shownGrouping === "space" ? <>
-      {active.map((sp) => (
-        <SpaceSection key={sp.key} sp={sp} machineName={machines.length > 1 ? machineWithHub(sp.machineId, machines) : undefined} reg={reg} hover={hover} activeKey={activeKey} go={go} pinned={isSpacePinned(sp.machineId, sp.name, pins)} muted={isSpaceMuted(sp, mutes)} onMenu={onSpaceMenu} onRowMenu={onRowMenu} onNavigate={onNavigate} />
-      ))}
+      {active.map((sp) => {
+        const matched = visibleShellTrees?.[sp.machineId]?.filter((ts) => ts.label === sp.name);
+        const online = machines.find((m) => m.id === sp.machineId)?.online !== false;
+        return <SpaceSection key={sp.key} sp={sp} machineName={machines.length > 1 ? machineWithHub(sp.machineId, machines) : undefined} shells={matched?.length ? matched : undefined} online={online} reg={reg} hover={hover} activeKey={activeKey} go={go} pinned={isSpacePinned(sp.machineId, sp.name, pins)} muted={isSpaceMuted(sp, mutes)} onMenu={onSpaceMenu} onRowMenu={onRowMenu} onNodeMenu={onNodeMenu} onNavigate={onNavigate} />;
+      })}
+      {visibleShellTrees && machines.flatMap((m) =>
+        (visibleShellTrees[m.id] ?? [])
+          .filter((ts) => !active.some((sp) => sp.machineId === m.id && sp.name === ts.label))
+          .map((ts) => (
+            <ShellSpaceSection
+              key={`shell:${m.id}/${ts.host}:${ts.id}`}
+              mid={m.id}
+              online={m.online}
+              sp={ts}
+              machineName={machines.length > 1 ? machineWithHub(m.id, machines) : undefined}
+              reg={reg}
+              hover={hover}
+              activeKey={activeKey}
+              go={go}
+              onNodeMenu={onNodeMenu}
+            />
+          )),
+      )}
 
       {idle.length > 0 && (
         <Section title={t("sidebar.idle_spaces", { count: idle.length })} folded={idleFolded} onToggle={toggleIdle}>
@@ -1378,7 +1419,7 @@ function LegacyAgentsBlock({ reg, hover, activeKey, go, onNewAgent, onNavigate, 
       {loose.length > 0 && <LooseSection sessions={loose} reg={reg} hover={hover} activeKey={activeKey} go={go} onRowMenu={onRowMenu} />}
 
       </> : shownGrouping === "machine" ? machineTree.map((m) => (
-        <MachineSection key={m.key} m={m} shells={shellTrees?.[m.machine.id]} {...tree} />
+        <MachineSection key={m.key} m={m} shells={visibleShellTrees?.[m.machine.id]} {...tree} />
       )) : shownGrouping === "repo" ? (
         repoMachines.map((m) => (
           <RepoMachineSection key={m.key} m={m} flat={repoMachines.length <= 1} machines={machines} reg={reg} hover={hover} activeKey={activeKey} go={go} onRowMenu={onRowMenu} {...workspaceActions} />
