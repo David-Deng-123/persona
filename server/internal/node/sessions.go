@@ -226,16 +226,7 @@ func (n *Node) sessionListIn(ctx context.Context, refreshAgents bool, pass *code
 			s.AsksRead = true
 		}
 		if a.Agent == "codex" {
-			if _, thread, err := n.codexOwner(id); err == nil && thread.model != "" {
-				s.Model = thread.model
-			}
-			n.codexRewindRow(id, &s)
-			if c, thread, driven := n.codexEffortThread(id); driven {
-				s.Model = n.codexModelNow(id, c, thread, s.Model)
-				s.Capabilities.Model = proto.Bool(true)
-			}
-			n.codexEffortRow(id, &s.Efforts, &s.Effort, rollout) // joined on its app-server: its effort (codex_effort.go)
-			n.codexSpeedRow(&s)
+			n.codexPaneControls(&s, rollout)
 		}
 		if piFamily(a.Agent) {
 			n.mergePiRow(&s) // its conversation is the extension's (pi.go)
@@ -271,11 +262,16 @@ func (n *Node) sessionListIn(ctx context.Context, refreshAgents bool, pass *code
 					// The companion has already applied the native rewind cut.
 					agyBackgroundTasks{running: runtimeRow.Background, ended: runtimeRow.BackgroundEnded()}.apply(&s)
 					n.agyRuntimeTaskLogs(&s, agyConversations[id])
+					if bd := runtimeRow.ContextBreakdown(); bd != nil {
+						if existing := s.ContextBreakdown(); existing == nil || existing.Source != proto.ContextBreakdownExact {
+							s.SetContextBreakdown(bd)
+						}
+					}
 				}
 			}
 			if a.Agent == agyAgent {
 				if hasRuntimeRow {
-					n.resolveAgyContextWindow(&s)
+					n.resolveAgyContext(&s, agyConversations[id])
 				} else {
 					n.mergeAgyTranscript(&s, agyConversations[id])
 				}
@@ -725,4 +721,19 @@ func (n *Node) revsChanged(list []proto.Session) map[string]int64 {
 // folder, except the assistant's own conversations and the sessions the hub keeps.
 func (n *Node) listBlocked(sid, cwd string) bool {
 	return cwd != "" && n.cwdBlocked(cwd) && !n.isAssistantSession(sid) && !n.keptSessions()[sid]
+}
+
+// Keep the start response and later inventory snapshots in step with the owning daemon.
+func (n *Node) codexPaneControls(s *proto.Session, rollout quickMeta) {
+	id := s.SessionID
+	if _, thread, err := n.codexOwner(id); err == nil && thread.model != "" {
+		s.Model = thread.model
+	}
+	n.codexRewindRow(id, s)
+	if c, thread, driven := n.codexEffortThread(id); driven {
+		s.Model = n.codexModelNow(id, c, thread, s.Model)
+		s.Capabilities.Model = proto.Bool(true)
+	}
+	n.codexEffortRow(id, &s.Efforts, &s.Effort, rollout) // joined on its app-server: its effort (codex_effort.go)
+	n.codexSpeedRow(s)
 }
