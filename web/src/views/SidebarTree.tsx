@@ -4,6 +4,7 @@ import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef } from "reac
 import { t } from "../i18n";
 import { isSpaceMuted } from "../lib/agent-filter";
 import { isQuiet, sessionHost, type AgentMutes, type Space } from "../lib/agent-groups";
+import { useHeldSeenOrder, useSeenRowsMode } from "../lib/seen-rows";
 import { showsWorktreeLevel, type RepoMachine, type RepoTree, type RepoWorktree } from "../lib/agent-repos-core";
 import { paneRoute, tabRowKeys, type ChildStates, type HerdrMachine, type HerdrSpace, type HerdrTab } from "../lib/herdr-tree";
 import { machineWithHub } from "../lib/mesh";
@@ -356,7 +357,8 @@ function RepoWorktreeRows({ w, repo, row, activeKey, go, selected, ...actions }:
     row.scrollIntoView?.({ block: "nearest" });
   }, [selected, w.key]);
   const mutes = useStore((st) => st.mutes);
-  const running = w.sessions.filter((s) => !isQuiet(s, mutes)).length;
+  const heldOrder = useHeldSeenOrder(useSeenRowsMode());
+  const running = w.sessions.filter((s) => !isQuiet(s, mutes, heldOrder)).length;
   const title = [w.workspace?.project_name, w.name, w.branch, w.path, w.workspace?.source].filter(Boolean).join(" · ");
   const label = <><span className="min-w-0 truncate">{w.name}</span>{w.workspace?.project_name && w.workspace.project_name !== repo && <span className="min-w-0 max-w-24 truncate text-ink-3">{w.workspace.project_name}</span>}</>;
   const showWorktreeKind = !w.main && (!w.workspace || (w.workspace.is_main === false && w.workspace.workspace_kind !== "folder"));
@@ -446,7 +448,8 @@ function RepoChildToggle({ count, counts, folded, onToggle }: { count: number; c
 
 export function SpaceSection({ sp, machineName, shells, online = true, reg, hover, activeKey, go, pinned, muted, onMenu, onRowMenu, onNodeMenu, onNavigate }: { sp: Space; machineName?: string; shells?: TermSpace[]; online?: boolean; reg: RegFn; hover: (k: string | null) => void; activeKey: string; go: GoFn; pinned: boolean; muted: boolean; onMenu: SpaceMenuFn; onRowMenu: RowMenuFn; onNodeMenu?: NodeMenuFn; onNavigate?: () => void }) {
   const mutes = useStore((st) => st.mutes);
-  const allIdle = sp.sessions.every((s) => isQuiet(s, mutes));
+  const heldOrder = useHeldSeenOrder(useSeenRowsMode());
+  const allIdle = sp.sessions.every((s) => isQuiet(s, mutes, heldOrder));
   const hasShells = Boolean(shells && shells.length > 0);
   const [folded, toggle] = useFolded(`space:${sp.key}`, allIdle && !hasShells && sp.sessions.length > 3, { holds: holdsRow(sp.sessions, activeKey) || holdsShell(shells, sp.machineId, activeKey) });
 
