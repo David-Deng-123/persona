@@ -45,7 +45,7 @@ import { t as tr } from "../../i18n";
 import { lastEditablePrompt, promptsOf, rewindBlock, rewindDone, rewindSession, rewindTarget, type RewindRestore } from "../../lib/rewind";
 import { EDIT_SEND_SETTLE_MS } from "../../lib/edit-last-key";
 import { sendDraft } from "../../lib/drafts";
-import { chatLines, freshWords, openRecap, parseUserText, segments, type ChatLine, type UserMessage } from "../../lib/turns";
+import { chatLines, freshWords, isUserInput, openRecap, parseUserText, segments, type ChatLine, type UserMessage } from "../../lib/turns";
 import { foldsBackgroundRounds, relayNeedsAttention } from "../../lib/background-fold";
 import type { Interaction, Item, Session, Subagent } from "../../lib/types";
 import { REVIEW_FEATURE } from "../../lib/types";
@@ -73,7 +73,7 @@ import { COMPOSER_INPUT, lostWith } from "../../lib/dock-focus";
 import { FailureNote, showsFailureNote } from "./FailureNote";
 import { LazyCloseoutCard } from "./closeout-chunks";
 import { shownCloseout } from "../../lib/closeout";
-import { AWAIT_MS, awaitingTurn, COMMAND_DOCK_MAX, DOCK_MAX, turnStart } from "./dock";
+import { AWAIT_MS, awaitingTurn, COMMAND_DOCK_MAX, DOCK_MAX, pickupStateForWait, RETRY_IDLE_GRACE_MS, turnStart } from "./dock";
 const ChatEmptyState = lazyPage(() => import("./ChatEmptyState").then((m) => m.ChatEmptyState));
 import { HEADER_SLOT, HEADER_SLOT_END, HEADER_SLOT_START } from "./header";
 import { AgentModelPill, AssistantModelPill, useAssistantTurnFix } from "./ModelPill";
@@ -126,7 +126,7 @@ import { pickParts } from "./picking-parts";
 import type { MessagePick } from "../../lib/message-pick";
 import { foldHolding, lineItemIds, lineOfItem, loadEarlierForSearch, untilStill, type ChatSearchHit, type SearchLoadOutcome } from "../../lib/chat-search";
 import { chatFiles } from "../../lib/mentions";
-import { OutboxBubbles } from "./OutboxBubbles";
+import { dedupeQueuedOutbox, OutboxBubbles } from "./OutboxBubbles";
 import { MainRuntimeSlot } from "../assistant/MainRuntimeSlot";
 import { AssistantFace, CompactionStrip, useAssistantMenu } from "../assistant/AssistantChat";
 import { PageBoundary } from "../PageBoundary";
@@ -256,7 +256,7 @@ function queuesWhileWorking(row?: Session): boolean {
   return Boolean(row && stateOf(row) === "working" && !row.background_waiting && (
     (row.queued?.length ?? 0) > (row.queued_relayed ?? 0) || row.capabilities?.queue_edit || row.capabilities?.queue_send_now ||
     row.space_kind === "codex_app" ||
-    (row.source_kind !== "runtime" && (!row.agent || row.agent === "claude"))
+    (row.source_kind !== "runtime" && (!row.agent || row.agent === "claude" || row.agent === "agy"))
   ));
 }
 
@@ -523,10 +523,15 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
   useLayoutEffect(() => {
     if (!hasQueue) queueMemory.current = undefined;
   }, [hasQueue]);
+  const visibleOutbox = useMemo(() => dedupeQueuedOutbox(outbox, session?.queued), [outbox, session?.queued]);
+  const queueCandidates = useMemo(() => [
+    ...pending,
+    ...outbox.filter((e) => e.state !== "failed").map((e) => ({ id: e.id, raw: e.text, images: e.images, before: [] as string[] })),
+  ], [pending, outbox]);
   // the owner's messages the assistant keeps after they could not go in, from the row: on every device (#10194)
   // (not one this page still draws as sending: the row can come before the send's answer)
   const keptUndelivered = shownUndelivered(session, tr.items, pending.map((p) => p.id));
-  const outgoing = shownPending.length + outbox.filter((e) => e.state !== "failed").length;
+  const outgoing = shownPending.length + visibleOutbox.filter((e) => e.state !== "failed").length;
   const persona = usePersona();
   // what the chat slots are told (core/ChatSlots.tsx): this page's own id (the same chat may be open twice, a page and a
   // side panel), and who answers here
@@ -538,30 +543,57 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
   // the message is in, the hub has not said working yet (#3654): the live row covers that wait too
   const segs = useMemo(() => segments(tr.items), [tr.items]);
   const lastSeg = segs[segs.length - 1];
+  const endedThrough = tr.streamEndedThrough;
+  const inputAfterPreview = endedThrough !== undefined && endedThrough > 0 &&
+    tr.items.some((item) => item.seq > endedThrough && !item.queued && isUserInput(item));
+  const streamEnded = tr.streamEnded && !inputAfterPreview;
+  const replyPreview = inputAfterPreview ? "" : tr.streaming;
   const [awaitNow, setAwaitNow] = useState(() => Date.now());
   const turnFailure = session?.failure_reason || session?.turn_error || lastSeg?.cut ? { since: session?.state_since } : undefined;
   // a message whose wait the hub took a stop for (#2450): it is no longer worked on, so Working… and Interrupt go at
   // once instead of after AWAIT_MS; a turn the hub reports later still shows through `state`
-  const [stoppedTurn, setStoppedTurn] = useState<string>();
-  const awaitedTurn = awaitingTurn(lastSeg, state, awaitNow, turnFailure, session?.state_since) ? lastSeg?.user?.id : undefined;
-  const awaiting = awaitedTurn !== undefined && awaitedTurn !== stoppedTurn && !tr.streamEnded;
+  const [stoppedInput, setStoppedInput] = useState<{ chat: string; id: string }>();
+  const stoppedTurn = stoppedInput?.chat === chatNow.current ? stoppedInput.id : undefined;
+  // An existing background command can keep the row working before the next foreground turn picks up the echo.
+  // background_working alone is not proof the foreground is idle; pickupStateForWait only demotes it while this turn
+  // has no foreground activity yet, so a live turn keeps the real working state (review P1).
+  const foregroundActive = Boolean(tr.streaming || lastSeg?.answer ||
+    lastSeg?.steps.some((step) => step.kind === "thinking" || (step.kind === "tool" && !step.result)));
+  const pickupState = pickupStateForWait(state, session?.background_working, foregroundActive);
+  const inputKey = lastSeg?.user ? `${mid}/${sid}/${lastSeg.user.id}` : undefined;
+  const hubStateAt = Date.parse(session?.state_since ?? "");
+  const [observedInput, setObservedInput] = useState<{ key: string; hubStateAt: number; seenAt: number }>();
+  const observedKey = observedInput?.key;
+  useLayoutEffect(() => {
+    if (inputKey !== observedKey) {
+      setObservedInput(inputKey ? { key: inputKey, hubStateAt, seenAt: Date.now() } : undefined);
+    }
+  }, [inputKey, hubStateAt, observedKey]);
+  // The hub can deliver its idle update with the echo or just after it. Wait for it to stay idle
+  // through the handoff before offering a retry, since the input and status come from separate streams.
+  const idleAt = observedInput && observedKey === inputKey && !tr.streaming && (state === "idle" || state === "unread") &&
+    (hubStateAt > observedInput.hubStateAt || hubStateAt > Date.parse(lastSeg?.user?.ts ?? ""))
+    ? observedInput.seenAt + RETRY_IDLE_GRACE_MS : undefined;
+  const settled = idleAt !== undefined && awaitNow >= idleAt;
+  const awaitedTurn = awaitingTurn(lastSeg, pickupState, awaitNow, turnFailure, settled) ? lastSeg?.user?.id : undefined;
+  const awaiting = awaitedTurn !== undefined && awaitedTurn !== stoppedTurn && !streamEnded;
   const awaitingNow = useRef<string | undefined>(undefined);
   awaitingNow.current = awaiting ? awaitedTurn : undefined;
   const waitStart = awaitedTurn ? lastSeg?.user?.ts : undefined;
+  const waitUntil = Math.min(Date.parse(waitStart ?? "") + AWAIT_MS, idleAt ?? Infinity);
   useEffect(() => {
     // draw again when the wait runs out, so a message nobody picks up stops looking worked on; once something answers
     // it there is nothing to wait for (and no clock to reset on every streamed item)
-    const at = waitStart ? Date.parse(waitStart) : NaN;
-    if (Number.isNaN(at)) return;
+    if (Number.isNaN(waitUntil)) return;
     setAwaitNow(Date.now());
-    const left = at + AWAIT_MS - Date.now();
+    const left = waitUntil - Date.now();
     if (left <= 0) return;
     const timer = window.setTimeout(() => setAwaitNow(Date.now()), left + 10);
     return () => clearTimeout(timer);
-  }, [waitStart]);
+  }, [waitUntil]);
   const stopped = Boolean(stoppedTurn && stoppedTurn === lastSeg?.user?.id);
   const canShowPreview = state !== "offline" && state !== "needs_you" && !stopped && !turnFailure;
-  const streaming = Boolean(tr.streaming) && !tr.streamEnded && (state === "working" || canShowPreview);
+  const streaming = Boolean(replyPreview) && !streamEnded && (state === "working" || canShowPreview);
   const working = state === "working" || streaming || outgoing > 0 || awaiting;
   // The user's time stays in its row until the finished reply can show its own. An item that lands
   // while the turn is still running otherwise removes a line above the live work and moves it up.
@@ -1582,7 +1614,7 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
       if (r.state === "unknown") throw new Error(t("lib-new-agent.outcome_unknown"));
       toast(t("chat-chatview.interrupted"));
       stopMessageFeedback(mid, sid);
-      if (waited) setStoppedTurn(waited);
+      if (waited) setStoppedInput({ chat: `${mid}/${sid}`, id: waited });
       stopTimer.current = window.setTimeout(stopDone, STOP_SETTLE_MS);
     } catch (e) {
       toast(t("chat-chatview.interrupt_failed", { error: errorText(e) }), "error");
@@ -1744,7 +1776,7 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
   linesNow.current = lines;
   const limitOn = limitLine ? lines.reduce((id, line) => (line.kind === "apiError" ? line.id : id), "") : "";
   // failed messages where they were sent: before the first message written after them (lib/outbox.ts placeFailed)
-  const placed = useMemo(() => placeFailed(lines, outbox), [lines, outbox]);
+  const placed = useMemo(() => placeFailed(lines, visibleOutbox), [lines, visibleOutbox]);
   const failedBefore = (id: string) => {
     const list = placed.before.get(id);
     return list ? [<OutboxBubbles key={`failed:${id}`} mid={mid} sid={sid} entries={list} canRetry={!refusedNoRow} />] : [];
@@ -2117,7 +2149,7 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
   // After the end marker the last reply can still be waiting for its item. Its text stays visible
   // without keeping the exchange working, even if the host already reported completion.
   const wordsFor = (line: ChatLine) => (line.kind === "segment" || line.kind === "supervision") &&
-    ((line.live && streaming) || (line === lastLine && tr.streamEnded && canShowPreview)) ? tr.streaming || undefined : undefined;
+    ((line.live && streaming) || (line === lastLine && streamEnded && canShowPreview)) ? replyPreview || undefined : undefined;
   // "Retry" on the error banner and the failure note: sends "continue" alone, not what is in the box. Whether it went:
   // deliver can refuse without leaving a bubble (the setup gate, a row that cannot send, a refused launcher switch)
   const retry = useCallback(() => deliver({ text: t("chat-chatview.continue_text"), images: [] }, uuid()), [deliver]);
@@ -2283,8 +2315,8 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
   // at the top of the composer's card, as cindy's pending queue (#5327); a phone on its side keeps it to one line beside
   // the run's status. The same element while nothing in it changes: the composer is memoized.
   const queue = useMemo(
-    () => (session && hasQueue ? <QueueStrip session={session} draftKey={draftKey} canEdit={canCompose} compact={short} persona={assistant ? persona.name : undefined} pending={pending} optimistic={optimisticQueue} memory={queueMemory} onAccepted={queuedAccepted} cancelQueued={cancelQueued} /> : null),
-    [session, hasQueue, draftKey, canCompose, short, assistant, persona.name, pending, optimisticQueue, queuedAccepted, cancelQueued],
+    () => (session && hasQueue ? <QueueStrip session={session} draftKey={draftKey} canEdit={canCompose} compact={short} persona={assistant ? persona.name : undefined} pending={queueCandidates} optimistic={optimisticQueue} memory={queueMemory} onAccepted={queuedAccepted} cancelQueued={cancelQueued} /> : null),
+    [session, hasQueue, draftKey, canCompose, short, assistant, persona.name, queueCandidates, optimisticQueue, queuedAccepted, cancelQueued],
   );
   // with the plan's pill showing, "Jump to bottom" goes beside it (over the chat, they hid each other); the pill keeps
   // one wrapper either way, so a flyout pinned open on it stays when the reader scrolls
@@ -2859,7 +2891,7 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
           working={state === "working" || awaiting}
           needsYou={state === "needs_you"}
           onSend={send}
-          onSendNow={session && (session.capabilities?.queue_send_now ?? (assistant || (session.agent === "claude" && session.source_kind !== "runtime"))) ? sendQueueNow : undefined}
+          onSendNow={session && (session.capabilities?.queue_send_now ?? (assistant || ((session.agent === "claude" || session.agent === "agy") && session.source_kind !== "runtime"))) ? sendQueueNow : undefined}
           disabled={composerDisabled}
           onEditLastMessage={onEditLastMessage}
           editingLast={editProp}
