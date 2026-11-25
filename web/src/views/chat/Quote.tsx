@@ -62,17 +62,16 @@ export function QuoteBars({ draftKey, quotes, onRemove, onAddCommentImages }: {
   return (
     <div className="relative flex max-h-[25dvh] flex-col gap-1.5 overflow-y-auto overscroll-contain px-0.5 pt-0.5 [&>div]:shrink-0" data-quotes data-scroll-box>
       {quotes.map((q) => {
-        if (!q.comment) return <QuoteBar key={q.id} quote={q} onRemove={() => onRemove(q.id!)} />;
-        const number = ++n;
-        const fallback = <CommentBlock quote={q} n={number} />;
-        return (
-          <OverlayBoundary key={q.id} open fallback={fallback} onClose={() => {}}>
-            <Suspense fallback={fallback}>
-              <LazyDraftCommentCard draftKey={draftKey} quote={q} n={number} editing={editing === q.id} onRemove={() => onRemove(q.id!)}
+        const remove = () => onRemove(q.id!);
+        const preview = <QuoteBar quote={q} onRemove={remove} />;
+        return q.comment ? (
+          <OverlayBoundary key={q.id} open onClose={() => {}} fallback={preview}>
+            <Suspense fallback={preview}>
+              <LazyDraftCommentCard draftKey={draftKey} quote={q} n={++n} editing={editing === q.id} onRemove={remove}
                 onAddImages={q.comment.spot || q.comment.element ? undefined : onAddCommentImages} />
             </Suspense>
           </OverlayBoundary>
-        );
+        ) : <QuoteBar key={q.id} quote={q} onRemove={remove} />;
       })}
     </div>
   );

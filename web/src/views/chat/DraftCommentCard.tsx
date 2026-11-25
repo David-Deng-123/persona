@@ -7,7 +7,7 @@ import { cx, EASE, IconButton } from "../../ui/atoms";
 import { Icon } from "../../ui/icons";
 import { t } from "../../i18n";
 import { composing } from "../../lib/send-history";
-import { CommentExcerpt, goToComment, NumberDot } from "./CommentCard";
+import { Excerpt, goToComment, NumberDot, omittedOf, whereOf } from "./CommentCard";
 
 export type CommentImagePicker = (id: string, files: File[], signal: AbortSignal) => Promise<void>;
 
@@ -99,6 +99,8 @@ export function DraftCommentCard({ draftKey, quote, n, editing, onRemove, onAddI
     } else setNote(draftKey, id, c.body, true);
     before.current = null;
   };
+  const where = whereOf(c);
+  const omitted = omittedOf(c);
   return (
     <div
       className="flex min-w-0 items-start gap-2 rounded-[10px] bg-inset py-1.5 pr-1 pl-2 shadow-hairline"
@@ -118,6 +120,7 @@ export function DraftCommentCard({ draftKey, quote, n, editing, onRemove, onAddI
             e.preventDefault();
             finish(false);
           } else if (e.key === "Escape") {
+            // Keep the page's Escape shortcut from stopping a running agent.
             e.preventDefault();
             e.stopPropagation();
             finish(true);
@@ -130,11 +133,13 @@ export function DraftCommentCard({ draftKey, quote, n, editing, onRemove, onAddI
           title={t("chat-comments.jump")}
           className="flex min-w-0 flex-col gap-0.5 rounded-[6px] text-left transition-colors hover:bg-hover-2 focus-visible:outline-2 focus-visible:outline-accent"
         >
-          <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] font-medium whitespace-nowrap text-ink-3">
+          <span className="flex min-w-0 items-center gap-1.5 text-submeta font-medium whitespace-nowrap text-ink-3">
             <NumberDot n={n} />
             <span className="shrink-0">{t("chat-comments.comment_n", { n })}</span>
           </span>
-          <CommentExcerpt quote={quote} lines={2} />
+          {where && <span className="truncate font-mono text-submeta text-ink-3">{where}</span>}
+          <Excerpt q={quote} lines={2} />
+          {omitted > 0 && <span className="text-submeta text-ink-3">{t("chat-comments.omitted", { count: omitted })}</span>}
         </button>
         {editing ? (
           <div className="flex flex-col gap-0.5">
@@ -159,9 +164,9 @@ export function DraftCommentCard({ draftKey, quote, n, editing, onRemove, onAddI
                 e.preventDefault();
                 void addImages(images);
               })}
-              className="w-full resize-none rounded-[8px] bg-surface px-2 py-1 text-[13px] leading-[1.5] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1.5px_var(--accent)]"
+              className="w-full resize-none rounded-[8px] bg-surface px-2 py-1 text-meta leading-[1.5] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1.5px_var(--accent)]"
             />
-            <div className="flex items-center gap-1 text-[11px] text-ink-3">
+            <div className="flex items-center gap-1 text-submeta text-ink-3">
               {onAddImages && (
                 <>
                   <IconButton icon="image" label={t("chat-comments.add_images")} className="size-7" onClick={() => fileInput.current?.click()} />
@@ -179,12 +184,12 @@ export function DraftCommentCard({ draftKey, quote, n, editing, onRemove, onAddI
           <button
             type="button"
             onClick={() => editNote(draftKey, id)}
-            className={cx("w-full rounded-[6px] text-left text-[13px] leading-[1.5] [overflow-wrap:anywhere] whitespace-pre-wrap transition-colors hover:bg-hover-2", c.body ? "text-ink" : "text-ink-3")}
+            className={cx("w-full rounded-[6px] text-left text-meta leading-[1.5] [overflow-wrap:anywhere] whitespace-pre-wrap transition-colors hover:bg-hover-2", c.body ? "text-ink" : "text-ink-3")}
           >
             {c.body || t("chat-comments.placeholder")}
           </button>
         )}
-        {preparing > 0 && <span role="status" className="text-xs text-ink-3">{t("chat-comments.preparing_images")}</span>}
+        {preparing > 0 && <span role="status" className="text-submeta text-ink-3">{t("chat-comments.preparing_images")}</span>}
         <AttachmentTray attachments={previews} onRemove={(imageId) => setCommentImages(draftKey, id, (images) => images.filter((image) => image.id !== imageId))} />
       </div>
       <button

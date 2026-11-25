@@ -1,4 +1,7 @@
-// The shared source and numbering of comments in draft cards, sent bubbles, and transcript marks.
+// A comment on picked words or on lines of code (#2437, Moshi's "Comment"), as a card in the quote list above the
+// composer (DraftCommentCard.tsx: a numbered header, the words or the code, the note to write, a click goes back to the spot) and
+// as a card in a sent bubble (CommentBlock). Same family as the quote bar next to it (Quote.tsx): one accent rule, the
+// same fill; the number is the one the spot carries in the transcript (CommentMarks.tsx) and the one the agent reads.
 import { jumpToComment } from "../../lib/comment-marks";
 import { codePreview, diffLabel, openSpot, rangeLabel, type CodeSpot, type ElementSpot } from "../../lib/comments";
 import { lazyPage } from "../../lib/lazy-page";
@@ -27,12 +30,12 @@ export function elementWhere(e: ElementSpot): string {
 }
 
 /** Where a comment points, worded for the reader: a file's lines, or an element of a preview. */
-function whereOf(c: NonNullable<DraftQuote["comment"]>): string {
+export function whereOf(c: NonNullable<DraftQuote["comment"]>): string {
   return c.element ? elementWhere(c.element) : c.spot ? spotWhere(c.spot) : "";
 }
 
 /** Lines of code (or of an element's HTML) a comment carries beyond the ones sent. */
-function omittedOf(c: NonNullable<DraftQuote["comment"]>): number {
+export function omittedOf(c: NonNullable<DraftQuote["comment"]>): number {
   return c.element?.omitted ?? c.spot?.omitted ?? 0;
 }
 
@@ -46,7 +49,7 @@ export function NumberDot({ n, className }: { n: number; className?: string }) {
 }
 
 /** The words or the lines a comment is about: two lines in the card, code in mono, one line of it each. */
-function Excerpt({ q, lines }: { q: DraftQuote; lines: number }) {
+export function Excerpt({ q, lines }: { q: DraftQuote; lines: number }) {
   const spot = q.comment?.spot ?? q.comment?.element;
   const text = q.text.trim();
   if (!text) return null;
@@ -92,23 +95,12 @@ export function goToComment(q: DraftQuote): boolean {
   toast(t("chat-comments.jump_text_gone"));
   return false;
 }
-export function CommentExcerpt({ quote, lines }: { quote: DraftQuote; lines: number }) {
-  const c = quote.comment!;
-  const where = whereOf(c);
-  const omitted = omittedOf(c);
-  return (
-    <>
-      {where && <span className="max-w-full truncate font-mono text-[11px] text-ink-3">{where}</span>}
-      <Excerpt q={quote} lines={lines} />
-      {omitted > 0 && <span className="text-[11px] text-ink-3">{t("chat-comments.omitted", { count: omitted })}</span>}
-    </>
-  );
-}
 
 /** A comment in a sent bubble: its number and where, the words or the code, the note. The code one opens its file or
  *  diff when the session's folder is known (`cwd`). */
 export function CommentBlock({ quote, n, open }: { quote: DraftQuote; n: number; open?: () => void }) {
   const c = quote.comment!;
+  const where = whereOf(c);
   const head = (
     <>
       <NumberDot n={n} />
@@ -127,7 +119,9 @@ export function CommentBlock({ quote, n, open }: { quote: DraftQuote; n: number;
         ) : (
           <span className={headClass}>{head}</span>
         )}
-        <CommentExcerpt quote={quote} lines={3} />
+        {where && <span className="max-w-full truncate font-mono text-[11px] text-ink-3">{where}</span>}
+        <Excerpt q={quote} lines={3} />
+        {omittedOf(c) > 0 && <span className="text-[11px] text-ink-3">{t("chat-comments.omitted", { count: omittedOf(c) })}</span>}
         {c.body && <span className="text-[13px] leading-[1.55] whitespace-pre-wrap text-ink [overflow-wrap:anywhere]">{c.body}</span>}
       </div>
     </div>
