@@ -905,7 +905,7 @@ existing overview list style.
 
 ### 3.4 Lists and rows
 
-- Web History (#10240) is an Agents destination for non-running sessions, grouped by local activity day. It shares folded sidebar state and visibility before filtering; day counts equal the displayed filtered rows, including only loaded content-search matches. The primary switch stays Assistant / Agents. Agents + owns New Agent, New terminal and Open terminals; History never starts on a remembered terminal inventory (details in `docs/web/web.md`).
+- Web History (#10240) is an Agents destination for non-running sessions, grouped by local activity day. It shares folded sidebar state and visibility before filtering; day counts equal the displayed filtered rows, including only loaded content-search matches. The primary switch stays Assistant / Agents. Agents + offers New agent, New shell and Browse tabs; History never starts on a remembered terminal inventory (details in `docs/web/web.md`).
 
 - **Native workspace pins** (#9300): the Agents workspace tree shows a host-pinned workspace with the existing pin mark,
   ordered before its unpinned siblings (newest pin first, then the existing stable order). Its repository moves ahead
@@ -2839,12 +2839,25 @@ No HTTP codes, key algorithms, CLI flags or raw error text in the primary line. 
 | Hub | product term; "the hub machine" for the machine |
 | Computer | the user's own machine; "Machine" only for list and monitoring entries |
 | Node | never in user-facing English |
-| Agent | lowercase mid-sentence; "Agents" for the tab |
-| Session | what an Agent runs, titled by what it is doing. Not "task", which names the work Persona hands out |
 | Persona | the product and the main assistant |
 | Assistant | one of the hub's assistants, each with its own chats, inbox and computers (`manager` in code, the protocol and docs); zh-Hans 助手, ja アシスタント. Never "manager" in user-facing text |
 | Lark | in en and ja, except where Feishu is a separate option |
 | sign in / sign-in | verb / noun |
+
+#### Tabs, agents and sessions
+
+These words serve people who work with coding agents in Agents. Assistant uses everyday language such as “chat” where the distinction is unnecessary.
+
+| Term | Meaning in the UI |
+| --- | --- |
+| Tab | A herdr tab or its equivalent on another terminal host. Use “tab” for the running container, including when referring to where an agent runs. |
+| Agent | A running AI CLI such as Claude Code or Codex. In English, use lowercase mid-sentence and **Agents** for the navigation destination. |
+| Shell | A tab without an agent. |
+| Session | An agent's conversation, during or after execution. A session can outlive its tab. A task is the work assigned to the agent. |
+| History | Ended sessions. The tab inventory has its own label, **Tabs**. |
+| Start | The action that launches an agent. Launcher, model, effort and optional preset belong in the start flow. |
+
+Reserve “terminal” for the terminal view. Describe a split within a tab as a terminal split. Keep “slot” and “pane” out of this UI copy. The web's **In a tab** filter counts the sidebar agents currently associated with a running tab and shows those same agents. Shell rows are outside that selection.
 
 Full glossary: `docs/protocol/i18n.md`. Languages: en, zh-Hans, ja. Apple strings live in `apple/Shared/Localization/Localizable.xcstrings`; hub strings in the server locale files. Keys with a bracketed suffix are translator-context tags; the English value strips them. Japanese uses no space between Japanese and Latin text (the catalogs do not follow this yet; DS-29). Do not concatenate sentences.
 
