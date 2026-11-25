@@ -217,7 +217,7 @@ func lastLaunchers(failed error) ([]proto.Launcher, error) {
 // they are on the PATH, then pi, the Cursor CLI and the Antigravity CLI when their programs are (workagent.go: started in
 // a herdr pane with the model the start names). settings: the claude aliases' and scripts' own --settings, by
 // name (launcher_settings.go); an alias is what the shell runs for its name even when the helper lists the name too.
-// scripts: where each wrapper script is.
+// scripts: where each PATH launcher is. A helper row can learn its config directory from an unshadowed PATH file.
 func mergeLaunchers(out string) (list []proto.Launcher, codex map[string][]string, settings, scripts map[string]string) {
 	body, _ := launcherOutput(out)
 	helper, rest, _ := strings.Cut(body, "\x1d")
@@ -233,17 +233,17 @@ func mergeLaunchers(out string) (list []proto.Launcher, codex map[string][]strin
 	agyPath, rest, _ := strings.Cut(rest, "\x1d")
 	shellNames, pathVar, _ := strings.Cut(rest, "\x1d")
 	list = parseLaunchers(helper)
-	seen := map[string]bool{}
-	for _, l := range list {
-		seen[l.Name] = true
+	helperRows := map[string]int{}
+	for i, l := range list {
+		helperRows[l.Name] = i
 	}
 	claudeAliases, settings := parseAliasLaunchers(aliases)
 	for _, l := range claudeAliases {
-		if !seen[l.Name] {
+		if _, listed := helperRows[l.Name]; !listed {
 			list = append(list, l)
 		}
 	}
-	taken := maps.Clone(seen)
+	taken := map[string]bool{}
 	for _, name := range strings.Fields(shellNames) {
 		taken[name] = true
 	}
@@ -253,7 +253,16 @@ func mergeLaunchers(out string) (list []proto.Launcher, codex map[string][]strin
 		}
 	}
 	pathList, pathSettings, scripts := pathLaunchers(pathVar, taken)
-	list = append(list, pathList...)
+	for _, l := range pathList {
+		if i, listed := helperRows[l.Name]; listed {
+			// A name printed by the helper can still resolve to the file on PATH.
+			list[i].ConfigDir = l.ConfigDir
+			delete(pathSettings, l.Name)
+			delete(scripts, l.Name)
+			continue
+		}
+		list = append(list, l)
+	}
 	maps.Copy(settings, pathSettings)
 	if len(list) == 0 {
 		list = []proto.Launcher{{Name: "claude"}}
@@ -261,9 +270,10 @@ func mergeLaunchers(out string) (list []proto.Launcher, codex map[string][]strin
 	codex = map[string][]string{}
 	ls, words := parseCodexAliases(aliases)
 	codexWord := ""
+	_, helperCodex := helperRows["codex"]
 	if strings.TrimSpace(codexPath) != "" {
 		codexWord = "codex"
-	} else if !taken["codex"] {
+	} else if !taken["codex"] && !helperCodex {
 		codexWord = bundledCodexCLI() // the ChatGPT app's own, by its path: the shell would not find it
 	}
 	if codexWord != "" && words["codex"] == nil {
@@ -271,15 +281,15 @@ func mergeLaunchers(out string) (list []proto.Launcher, codex map[string][]strin
 		codex["codex"] = []string{codexWord}
 	}
 	for _, l := range ls {
-		if !seen[l.Name] {
+		if _, listed := helperRows[l.Name]; !listed {
 			list = append(list, l)
 			codex[l.Name] = words[l.Name]
 		}
 	}
-	if strings.TrimSpace(traexPath) != "" && !seen[traexAgent] && codex[traexAgent] == nil {
+	if _, listed := helperRows[traexAgent]; strings.TrimSpace(traexPath) != "" && !listed && codex[traexAgent] == nil {
 		list = append(list, proto.Launcher{Name: traexAgent, Agent: traexAgent, Source: "zshrc", DisplayName: "TRAE CLI"})
 	}
-	if strings.TrimSpace(ompPath) != "" && !seen["omp"] && codex["omp"] == nil {
+	if _, listed := helperRows["omp"]; strings.TrimSpace(ompPath) != "" && !listed && codex["omp"] == nil {
 		list = append(list, proto.Launcher{Name: "omp", Agent: "omp", Source: "zshrc"})
 	}
 	for _, bin := range []struct{ name, agent, path string }{
@@ -287,7 +297,7 @@ func mergeLaunchers(out string) (list []proto.Launcher, codex map[string][]strin
 		{"cursor", cursorAgent, cursorPath},
 		{"agy", agyAgent, agyPath},
 	} {
-		if strings.TrimSpace(bin.path) != "" && !seen[bin.name] && codex[bin.name] == nil {
+		if _, listed := helperRows[bin.name]; strings.TrimSpace(bin.path) != "" && !listed && codex[bin.name] == nil {
 			list = append(list, proto.Launcher{Name: bin.name, Agent: bin.agent, Source: "zshrc",
 				RuntimeFallback: bin.agent == agyAgent && !taken[bin.name]})
 		}

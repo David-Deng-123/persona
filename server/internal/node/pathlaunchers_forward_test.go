@@ -118,3 +118,41 @@ func TestInferLauncherRejectsSharedDefaultConfigDir(t *testing.T) {
 		t.Errorf("matched %q despite two launchers sharing the directory", got)
 	}
 }
+
+func TestLauncherHelperListKeepsUnshadowedPathConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bin := filepath.Join(home, "bin")
+	writeScript(t, filepath.Join(home, "lib", "claude-account"), accountHelper, 0o755)
+	for _, account := range []string{"work", "home", "play"} {
+		writeScript(t, filepath.Join(bin, "claude-"+account), `#!/bin/bash
+exec "$HOME/lib/claude-account" `+account+` 9000 `+account+` "$@"
+`, 0o755)
+	}
+	defs := `export PATH="$HOME/bin:$PATH"
+_claude_launchers() {
+  printf '%-26s%-40s%s\n' claude-work - listed-model
+  printf '%-26s%-40s%s\n' claude-home - listed-model
+  printf '%-26s%-40s%s\n' claude-play - listed-model
+}
+alias claude-home='echo account'
+claude-play() { echo account; }
+`
+	list, _, settings, scripts := mergeLaunchers(asBashIn(t, home, defs, launcherScript))
+	list = withoutInstalledWorkAgents(list)
+	workDir := filepath.Join(home, ".config", "claude-accounts", "work", "config")
+	if got := launcherNames(list); !slices.Equal(got, []string{"claude-work:", "claude-home:", "claude-play:"}) {
+		t.Fatalf("helper order, source or deduplication changed: %v", got)
+	}
+	if list[0].ConfigDir != workDir || list[0].Model != "listed-model" || len(settings) != 0 || len(scripts) != 0 {
+		t.Errorf("want helper metadata plus the PATH config directory, got %+v", list[0])
+	}
+	for _, shadowed := range list[1:] {
+		if shadowed.ConfigDir != "" {
+			t.Errorf("%s inherited a config directory from a shadowed file", shadowed.Name)
+		}
+	}
+	if got := matchLauncher(list, "", "", workDir); got != "claude-work" {
+		t.Errorf("match = %q, want claude-work", got)
+	}
+}
