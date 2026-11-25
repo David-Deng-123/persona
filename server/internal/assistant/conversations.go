@@ -160,6 +160,7 @@ func (s *Service) setArchived(ctx context.Context, machine, id string, on bool, 
 	}
 	if on {
 		_ = s.call(ctx, machine, "assistant.cache_clear", map[string]any{"session_id": id}, nil)
+		s.handOverArchivedSide(ctx, id)
 	}
 	s.publish(ctx) // the apps get the list with the flag now
 	return true, nil
@@ -937,7 +938,8 @@ func (s *Service) sendRelay(ctx context.Context, machine, to string, msg relayMs
 	if strings.TrimSpace(text) != "" && relayWords(text) == "" {
 		text = prompts.RelayMessageText(text, source, onceID)
 	}
-	params := map[string]any{"session_id": to, "text": text, "message_source": source, "resume_only": true, holdPushesParam: msg.Tool == superviseTool,
+	hold := s.shouldHoldSupervisionPushes(ctx, to, msg)
+	params := map[string]any{"session_id": to, "text": text, "message_source": source, "resume_only": true, holdPushesParam: hold,
 		"once_id": onceID} // every try of it under one id: the node sends it once (relay_once.go)
 	if msg.Interject {
 		params["interject_background"] = true
@@ -958,8 +960,12 @@ func (s *Service) sendRelay(ctx context.Context, machine, to string, msg relayMs
 	}
 	s.availInput(machine, to, relayKind(msg), time.Now())
 	if msg.Tool == superviseTool {
-		// Register only after admission, but before dispatch: a fast MCP call may precede assistant.send's answer.
-		s.holdPushes(ctx, to)
+		if hold {
+			// Register only after admission, but before dispatch: a fast MCP call may precede assistant.send's answer.
+			s.holdPushes(ctx, to)
+		} else {
+			s.noteSideSupervisionPush(ctx, to, msg)
+		}
 	}
 	// A supervision message rendered as a round starts from the first turn (supervise_round.go): what the text says
 	// and the switch now decide, also for one queued before a restart or a change of the switch, and whatever model runs it.
@@ -1005,6 +1011,9 @@ func (s *Service) relayDelivered(ctx context.Context, to string, msg relayMsg) {
 	if msg.Tool == superviseTool {
 		s.backgroundRoundDelivered(ctx, to, msg, time.Now())
 		s.askRelayDelivered(to, msg)
+		if !s.shouldHoldSupervisionPushes(ctx, to, msg) {
+			s.noteReportTurn(to)
+		}
 		return
 	}
 	if msg.Tool == taskEndTool || msg.Tool == prFollowupTool || msg.Tool == relayRefusedTool {
@@ -1649,12 +1658,15 @@ func (s *Service) toolConversationNew(ctx context.Context, self string, args jso
 		return "", err
 	}
 	var preset ModelTier
+	var tierChoice tierPick
 	a.Tier = strings.TrimSpace(a.Tier)
 	if a.Tier != "" {
-		preset, err = s.tierModel(ctx, a.Tier)
+		// the conversation starts on the main chat's computer: the tier's candidate is picked for that one
+		tierChoice, err = s.pickTierCandidate(ctx, a.Tier, tierFacts{Machine: s.settings(ctx).MachineID})
 		if err != nil {
 			return "", err
 		}
+		preset = tierChoice.Tier
 	}
 	counted := time.Now()
 	hop, _, err := s.relayAllowedOn(s.relayRouteFor(ctx, self), self, relayNewKey, counted) // an opening message is a request, never an answer
@@ -1703,6 +1715,9 @@ func (s *Service) toolConversationNew(ctx context.Context, self string, args jso
 	if a.Tier != "" {
 		run := ModelTier{Launcher: c.Launcher, Model: c.Model, Effort: c.Effort}
 		note += " " + i18n.T(lang, "assistant-conversations.started_on", i18n.Args{"run": run.runs()})
+		row := modelRoutingOf(tierChoice, c.MachineID)
+		row.SessionID = c.SessionID
+		s.recordModelRouting(ctx, row)
 		pick := modelPick{MachineID: c.MachineID, Launcher: preset.Launcher, Model: preset.Model, Effort: preset.Effort, At: time.Now().UTC()}
 		if err := s.setModelPick(sctx, c.SessionID, &pick); err != nil {
 			note += " " + i18n.T(lang, "assistant-conversations.pick_save_failed", i18n.Args{"error": err.Error()})
@@ -1911,14 +1926,16 @@ func (s *Service) queuedFor(id string) int {
 }
 
 // selfSpace is the space of conversation self ("" the assistant's own, and for a caller that is no conversation), and
-// whether it could be told (the assistant's machine lists it).
+// whether it could be told (the assistant's machine lists it or attests its launch directory).
 func (s *Service) selfSpace(ctx context.Context, self string) (string, bool) {
 	if self == "" {
 		return "", true
 	}
-	c, ok := s.session(ctx, s.settings(ctx).MachineID, self)
+	machine := s.settings(ctx).MachineID
+	c, ok := s.callerSpaceSession(ctx, machine, self)
 	if !ok {
-		return "", false
+		cwd := s.callerCwd(ctx, machine, self)
+		return runSpace(proto.Session{Cwd: cwd}), cwd != ""
 	}
 	return spaceOf(c), true
 }
