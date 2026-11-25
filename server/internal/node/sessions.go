@@ -291,6 +291,12 @@ func (n *Node) sessionListIn(ctx context.Context, refreshAgents bool, pass *code
 					if s.OutputTokens == 0 && runtimeRow.OutputTokens > 0 {
 						s.OutputTokens = runtimeRow.OutputTokens
 					}
+					if s.UpdatedAt.IsZero() && !runtimeRow.UpdatedAt.IsZero() {
+						s.UpdatedAt = runtimeRow.UpdatedAt
+					}
+					if s.LastText == "" && runtimeRow.LastText != "" {
+						s.LastText = runtimeRow.LastText
+					}
 					// The companion has already applied the native rewind cut.
 					agyBackgroundTasks{running: runtimeRow.Background, ended: runtimeRow.BackgroundEnded()}.apply(&s)
 					n.agyRuntimeTaskLogs(&s, agyConversations[id])

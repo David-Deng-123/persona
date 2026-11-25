@@ -390,6 +390,11 @@ func (n *Node) resolveAgyContext(s *proto.Session, conversation string) {
 	if s.ContextTokens > 0 && s.ContextWindow <= 0 {
 		s.ContextWindow = proto.Tokens32(n.agyContextWindowFor(s, s.Model, 0, int(s.ContextTokens)))
 	}
+	if s.UpdatedAt.IsZero() && conversation != "" {
+		if u, ok := n.agyTranscriptMeta(conversation); ok && !u.modTime.IsZero() {
+			s.UpdatedAt = u.modTime
+		}
+	}
 	if bd := s.ContextBreakdown(); bd != nil && (bd.Source == proto.ContextBreakdownExact || s.ContextTokens > 0) {
 		fillBreakdownDerived(s, bd, 0)
 		return
@@ -457,7 +462,9 @@ func (n *Node) agyTranscriptMeta(conversation string) (agySessionMeta, bool) {
 	}
 	raw = raw[:bytes.LastIndexByte(raw, '\n')+1]
 	steps, _ := parseAgySteps(raw, conversation)
-	meta := agySessionMeta{agyTranscriptUsage: extractAgyUsage(steps), background: agyBackground(steps, conversation, dir, root)}
+	usage := extractAgyUsage(steps)
+	usage.modTime = info.ModTime().UTC()
+	meta := agySessionMeta{agyTranscriptUsage: usage, background: agyBackground(steps, conversation, dir, root)}
 
 	n.mu.Lock()
 	if n.agyMetas == nil {
@@ -480,6 +487,9 @@ func (n *Node) mergeAgyTranscript(s *proto.Session, conversation string) {
 		}
 		if u.outputTokens > 0 {
 			s.OutputTokens = u.outputTokens
+		}
+		if s.UpdatedAt.IsZero() && !u.modTime.IsZero() {
+			s.UpdatedAt = u.modTime
 		}
 		n.setAgyTranscriptContext(s, u.agyTranscriptUsage)
 		return
