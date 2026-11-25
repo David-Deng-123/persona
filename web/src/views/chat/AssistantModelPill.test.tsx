@@ -9,7 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { t } from "../../i18n";
 import { agentName } from "../../lib/agent-kind";
-import { NEW_CONVERSATION, pickedEffort, pickedFast, pickedLauncher, pickedModel, pickEffort, pickFast, pickLauncher, pickModel } from "../../lib/assistant-chat";
+import { NEW_CONVERSATION, pickedEffort, pickedLauncher, pickedModel, pickedServiceTier, pickEffort, pickLauncher, pickModel, pickServiceTier } from "../../lib/assistant-chat";
 import { panelSections } from "../../lib/model-panel";
 import { parseAPIError } from "../../lib/api-errors";
 import { requestModelPicker } from "../../lib/model-switch";
@@ -48,6 +48,7 @@ const claudeList = { agent: "claude", models: [
 ] };
 const codexList = { agent: "codex", models: [
   { id: "gpt-fast", name: "GPT Fast", efforts: ["low", "high"], service_tiers: [{ id: "default", name: "Standard" }, { id: "priority", name: "Fast" }] },
+  { id: "gpt-ultrafast", name: "GPT Ultrafast", efforts: ["low", "high"], service_tiers: [{ id: "priority", name: "Fast" }, { id: "ultrafast", name: "Ultrafast" }] },
   { id: "gpt-standard", name: "GPT Standard", efforts: ["low", "high"] },
 ] };
 const sharedLaunchers = launcherFixture.cases[0];
@@ -123,7 +124,7 @@ afterEach(() => {
   pickLauncher(`${mid()}/c1`, undefined);
   pickLauncher(NEW_CONVERSATION, undefined);
   pickEffort(NEW_CONVERSATION, undefined);
-  pickFast(false);
+  pickServiceTier(undefined);
 });
 
 async function show(s?: Session) {
@@ -273,6 +274,12 @@ describe("a Persona chat's pill on a hub that keeps picks", () => {
     expect(calls.filter((c) => c.url.endsWith("/modes")).map((c) => c.body)).toEqual([{ service_tier: "priority" }]);
   });
 
+  it("names the acknowledged Ultrafast tier in a running Assistant chat", async () => {
+    await show(chat({ agent: "codex", launcher: "codex", model: "gpt-ultrafast", service_tier: "ultrafast" }));
+    expect(pill().querySelector('[data-pill-speed="ultrafast"]')).not.toBeNull();
+    expect(pill().title).toContain(t("ui-modelpanel.speed_ultrafast"));
+  });
+
   it("re-reads the effective Main chat model when a hub push bumps the conversation revision (#6542)", async () => {
     const s = chat();
     await show(s);
@@ -379,7 +386,27 @@ describe("an older hub and the new-conversation page", () => {
     expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast", speed: "fast" });
     expect(await act(() => panel.props!.onPick({ provider: "codex", model: "gpt-standard" }))).toBe(true);
     expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-standard" });
-    expect(pickedFast()).toBe(false);
+    expect(pickedServiceTier()).toBeUndefined();
+  });
+
+  it("shows a draft's advertised Ultrafast choice and clears its mark when switching to a Fast-only model", async () => {
+    pickLauncher(NEW_CONVERSATION, "codex");
+    pickModel(NEW_CONVERSATION, "gpt-ultrafast");
+    pickEffort(NEW_CONVERSATION, "high");
+    await show(undefined);
+    await open();
+    const models = panel.props!.providers.find((p) => p.id === "codex")!.models!;
+    expect(models.find((m) => m.id === "gpt-ultrafast")!.speeds?.map(({ id }) => id)).toEqual(["standard", "fast", "ultrafast"]);
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "ultrafast" }))).toBe(true);
+    expect(pickedServiceTier()).toBe("ultrafast");
+    expect(panel.props!.state.current).toMatchObject({ effort: "high", speed: "ultrafast" });
+    expect(pill().querySelector('[data-pill-speed="ultrafast"]')).not.toBeNull();
+    expect(pill().title).toContain(t("ui-modelpanel.speed_ultrafast"));
+
+    expect(await act(() => panel.props!.onPick({ provider: "codex", model: "gpt-fast" }))).toBe(true);
+    expect(await act(() => panel.props!.onApplyCurrent!({ speed: "ultrafast" }))).toBe(false);
+    expect(pickedServiceTier()).toBeUndefined();
+    expect(pill().querySelector("[data-pill-speed]")).toBeNull();
   });
 
   it("a Fast-only choice pins the displayed launcher, model and effort for a cleared main", async () => {
@@ -391,7 +418,7 @@ describe("an older hub and the new-conversation page", () => {
     expect(pickedLauncher(NEW_CONVERSATION)).toBe("codex");
     expect(pickedModel(NEW_CONVERSATION)).toBe("gpt-fast");
     expect(pickedEffort(NEW_CONVERSATION)).toBe("low");
-    expect(pickedFast()).toBe(true);
+    expect(pickedServiceTier()).toBe("priority");
     expect(await act(() => panel.props!.onApplyCurrent!({ speed: "fast", effort: "high" }))).toBe(true);
     expect(pickedEffort(NEW_CONVERSATION)).toBe("high");
   });
@@ -406,16 +433,16 @@ describe("an older hub and the new-conversation page", () => {
     expect(pickedLauncher(NEW_CONVERSATION)).toBe("codex");
     expect(pickedModel(NEW_CONVERSATION)).toBe("gpt-fast");
     expect(pickedEffort(NEW_CONVERSATION)).toBe("low");
-    expect(pickedFast()).toBe(true);
+    expect(pickedServiceTier()).toBe("priority");
     // A speed-only edit keeps the setup; only the explicit Follow default resets every part.
     expect(await act(() => panel.props!.onApplyCurrent!({ speed: "standard" }))).toBe(true);
     expect(pickedLauncher(NEW_CONVERSATION)).toBe("codex");
     expect(pickedModel(NEW_CONVERSATION)).toBe("gpt-fast");
     expect(pickedEffort(NEW_CONVERSATION)).toBe("low");
-    expect(pickedFast()).toBe(false);
+    expect(pickedServiceTier()).toBeUndefined();
     await act(async () => strip()!.querySelector("button")!.click());
     expect([pickedLauncher(NEW_CONVERSATION), pickedModel(NEW_CONVERSATION), pickedEffort(NEW_CONVERSATION)]).toEqual([undefined, undefined, undefined]);
-    expect(pickedFast()).toBe(false);
+    expect(pickedServiceTier()).toBeUndefined();
   });
 
   it("a Recent row for the shown default with Fast is pickable and sends Fast", async () => {
@@ -434,7 +461,7 @@ describe("an older hub and the new-conversation page", () => {
     expect(recent?.provider.unavailable).toBeUndefined();
     expect(recent?.setup).toEqual({ provider: "codex", model: "gpt-fast", effort: "low", speed: "fast" });
     expect(await act(() => panel.props!.onPick(recent!.setup))).toBe(true);
-    expect(pickedFast()).toBe(true);
+    expect(pickedServiceTier()).toBe("priority");
     expect([pickedLauncher(NEW_CONVERSATION), pickedModel(NEW_CONVERSATION), pickedEffort(NEW_CONVERSATION)]).toEqual(["codex", "gpt-fast", "low"]);
   });
 
@@ -442,13 +469,13 @@ describe("an older hub and the new-conversation page", () => {
     Object.assign(getState(), { features: ["assistant_model_pick", "typed_models"] });
     pickLauncher(NEW_CONVERSATION, "codex");
     pickModel(NEW_CONVERSATION, "gpt-fast");
-    pickFast(true); // a draft left by a hub that just downgraded
+    pickServiceTier("priority"); // a draft left by a hub that just downgraded
     await show(undefined);
     await open();
     const models = panel.props!.providers.find((p) => p.id === "codex")!.models!;
     expect(models.find((m) => m.id === "gpt-fast")!.speeds).toBeUndefined();
     expect(panel.props!.state.current).toEqual({ provider: "codex", model: "gpt-fast" });
-    expect(pickedFast()).toBe(false);
+    expect(pickedServiceTier()).toBeUndefined();
   });
 
   it("the new-conversation page keeps its pick, the effort too, for the start", async () => {

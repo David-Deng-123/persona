@@ -116,7 +116,7 @@ export function SpeedSwitch({ options, speed, disabled, onSpeed }: {
   onSpeed: (speed: string) => void;
 }) {
   return (
-    <div role="group" aria-label={t("ui-modelpanel.speed")} className="inline-flex max-w-full min-w-0 items-center rounded-control bg-hover-2 p-0.5">
+    <div role="group" aria-label={t("ui-modelpanel.speed")} className="inline-flex w-fit max-w-full shrink-0 flex-wrap items-center rounded-control bg-hover-2 p-0.5">
       {options.map((option) => {
         const { id } = option;
         const label = speedLabel(option);
@@ -133,8 +133,8 @@ export function SpeedSwitch({ options, speed, disabled, onSpeed }: {
             aria-disabled={disabled || undefined}
             onClick={() => !disabled && !selected && onSpeed(id)}
             className={cx(
-              "flex h-7 min-w-0 items-center gap-1 rounded-[7px] px-2.5 text-label whitespace-nowrap transition-colors duration-150 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 [@media(pointer:coarse)]:min-h-11",
-              selected ? "bg-surface text-ink shadow-sm" : "text-ink-2 hover:text-ink",
+              "flex min-h-7 max-w-full shrink-0 items-center gap-1 rounded-[7px] px-2.5 text-label whitespace-nowrap transition-colors duration-150 focus-visible:-outline-offset-2! aria-disabled:cursor-not-allowed aria-disabled:opacity-50 [@media(pointer:coarse)]:min-h-11",
+              selected ? "bg-surface text-ink" : "text-ink-2 hover:text-ink",
             )}
           >
             {id === "fast" && <Icon name="bolt" size={12} className="shrink-0 fill-current" />}

@@ -10,15 +10,14 @@ import { t } from "../../i18n";
 import { api, ApiError, errorText, sessionPath } from "../../lib/api";
 import { assistantPickKey, assistantSetup, ASSISTANT_START_SERVICE_TIER_FEATURE, type AssistantChat, type AssistantSetup } from "../../lib/assistant-models";
 import { assistantPanel, assistantPickOf } from "../../lib/assistant-panel";
-import { pickEffort, pickFast, pickLauncher, pickModel } from "../../lib/assistant-chat";
+import { pickEffort, pickLauncher, pickModel, pickServiceTier } from "../../lib/assistant-chat";
 import { conversationModelPath, dropConversationPick } from "../../lib/assistant-pick";
-import { modelSupportsFast } from "../../lib/launcher-models";
 import { useChosenManager } from "../../lib/manager-choice";
 import type { PanelConfig, PanelOverride } from "../../lib/model-panel";
 import { usePanelQuotas } from "../../lib/panel-quotas";
 import { TYPED_MODELS_FEATURE } from "../../lib/model-id";
 import { providerTitle } from "../../lib/provider-names";
-import { speedId, speedOptions } from "../../lib/session-speed";
+import { speedOptions, startSpeedTier } from "../../lib/session-speed";
 import { speedStep } from "../../lib/session-panel";
 import { assistantLaunchers, forgetModel, modelList, readModels, useModelLists } from "../../lib/session-models";
 import { getSession, hubHas, refreshAssistant, upsertSession, useStore } from "../../lib/store";
@@ -109,12 +108,12 @@ export function AssistantModelPanel({ chat, mid, anchor, onClose }: { chat: Assi
   }, [canSwitch, roleMachine, roleSession]);
   // a chat that runs keeps its engine; one whose agent isn't known is refused nothing on a guess, as on the hub
   const running = Boolean(chat.session?.agent);
-  const speed = chat.session?.service_tier && speedId(chat.session.service_tier);
   const tiers = chat.session?.service_tiers;
+  const starting = !chat.session && startServiceTier;
   const { providers, state } = useMemo(
-    () => assistantPanel(setup, info, (name) => modelList(mid, name, "assistant"), { typed, engine, running, switching: Boolean(canSwitch && chat.kept && chat.session), supervision: supervisionRequired, starting: !chat.session && startServiceTier, speeds: speedOptions(chat.session), speed }),
+    () => assistantPanel(setup, info, (name) => modelList(mid, name, "assistant"), { typed, engine, running, switching: Boolean(canSwitch && chat.kept && chat.session), supervision: supervisionRequired, starting, speeds: speedOptions({ service_tiers: tiers }) }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `version` stands for what was read
-    [setup.provider, setup.model, setup.effort, setup.fast, info, mid, typed, engine, running, tiers, speed, startServiceTier, canSwitch, supervisionRequired, version],
+    [setup.provider, setup.model, setup.effort, setup.speed, info, mid, typed, engine, running, tiers, starting, canSwitch, supervisionRequired, version],
   );
   const latest = () => (chat.session ? (getSession(chat.session.machine_id, chat.session.session_id) ?? chat.session) : undefined);
   const key = assistantPickKey(chat);
@@ -153,8 +152,7 @@ export function AssistantModelPanel({ chat, mid, anchor, onClose }: { chat: Assi
     }
     if (!chat.session) {
       const row = list?.models.find((m) => m.id === config.model);
-      const fast = Boolean(startServiceTier && config.speed === "fast" && modelSupportsFast(row));
-      pickFast(fast);
+      pickServiceTier(startServiceTier ? startSpeedTier(row, config.speed) : undefined);
     }
     return true;
   };
@@ -167,15 +165,16 @@ export function AssistantModelPanel({ chat, mid, anchor, onClose }: { chat: Assi
       if (!s) {
         const list = modelList(mid, now.provider, "assistant").list;
         const row = list?.models.find((m) => m.id === now.model);
-        if (patch.speed === "fast" && (!startServiceTier || !modelSupportsFast(row))) return false;
-        if (patch.speed === "fast") {
+        const tier = startServiceTier ? startSpeedTier(row, patch.speed) : undefined;
+        if (patch.speed !== "standard" && !tier) return false;
+        if (tier) {
           // Pin every displayed start option: a cleared main must not revive its carried launcher, model or effort.
           const pick = assistantPickOf({ ...now, effort: patch.effort ?? now.effort }, list, null);
           if (!pick) return false;
           keepHere(pick);
           effortApplied = patch.effort !== undefined;
         }
-        pickFast(patch.speed === "fast");
+        pickServiceTier(tier);
       } else {
         const speed = speedStep(s, patch.speed, true);
         if (!(speed && "service_tier" in speed && (await setServiceTier(s, speed.service_tier)))) return false;
@@ -191,7 +190,7 @@ export function AssistantModelPanel({ chat, mid, anchor, onClose }: { chat: Assi
     else {
       pickLauncher(key, undefined);
       pickEffort(key, undefined);
-      pickFast(false);
+      pickServiceTier(undefined);
     }
   };
   const onReload = (provider: string) => void readModels(mid, provider, { purpose: "assistant", again: true, first: provider === setup.provider });

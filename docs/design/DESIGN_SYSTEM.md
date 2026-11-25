@@ -1591,12 +1591,12 @@ chat (#5033), where the panel only offers models and says plainly which one the 
   mark of the Agent the launcher runs (#5497: `AgentMark` at 15 px, `ink-2` for the one-colour marks, 4 px before the
   name; an Agent with no mark of its own gets the generic `agent` icon, never a letter, unless its runtime names it
   (#8142), when it is drawn as the Agents list draws it), the model name (truncates), the canonical effort label in the
-  text colour 4 px after it, a filled bolt for Fast and the workflow
-  `UltraMark` (`ink-2`), a 14 px chevron (`ink-2`). Widths by the composer card (`@container/composer`): ≥ 600 px 72–320 px;
+  text colour 4 px after it, a filled bolt for Fast or a gauge for Ultrafast, the workflow
+  `UltraMark` (`ink-2`), and a 14 px chevron (`ink-2`). Widths by the composer card (`@container/composer`): ≥ 600 px 72–320 px;
   < 600 px the width its words need (name ≤ 108 px without a trailing bracketed qualifier, a context size kept as a short
   mark, "Opus 5.5 1M"; the whole name in the tooltip;
   shrinking only when the row is short, the name truncating first, the effort only once the name has no room); < 520 px 12 px text, marks a step smaller; < 420 px 64 px, the
-  mark and chevron only. States: loading (a 13 px `Spinner` and "Loading model…"), failed (the `warning` icon in `--red`),
+  engine mark, speed mark when set, and chevron. States: loading (a 13 px `Spinner` and "Loading model…"), failed (the `warning` icon in `--red`),
   pending (#5035, a switch to another launcher that the next message carries out: a 12 px clock in `ink-3` first, then
   the target engine's mark and the launcher's name in `ink-3` up to 96 px, hidden under 600 px, before the target's model and
   effort; the engine's name in its place when the engine changes; the tooltip "Current: …" over "Next message: …"),
@@ -3298,9 +3298,10 @@ changing (principle 3).
 ## Codex speed controls (#3865)
 
 In the web model panel, Agents can change the speed of a writable Codex thread or a supported Claude Code
-terminal session. The same segmented control sits in the wide footer and the narrow flyout. It lists only
-advertised choices and keeps the acknowledged selection visible while a change is pending. A faster option
-explains the extra usage, and Claude Code's Fast detail explains that the runtime may save the preference for
+terminal session. The same segmented control sits in the wide footer and the narrow flyout. The track sizes to its
+labels and wraps whole segments if space runs out. It lists only advertised choices and keeps the acknowledged
+selection visible while a change is pending. The composer pill names Fast or Ultrafast in its tooltip and accessible
+label. A faster option explains the extra usage, and Claude Code's Fast detail explains that the runtime may save the preference for
 future sessions. To undo a speed change, pick the previous option. Settings > Agents > Codex still owns the
 native default for new Codex sessions.
 
@@ -3316,10 +3317,10 @@ component, style or navigation pattern.
 
 A new Persona conversation on the web reuses that same model flyout (#6240), inside Agents-facing customization rather
 than adding an everyday-facing setting. While the default manager is in use, the hub feature
-`assistant_start_service_tier` comes from that manager's hello, and a selected model whose native `service_tiers`
-advertise `priority` has its Fast toggle available before the first message; other models, managers and older hubs do not
-show it. The local Fast choice and reasoning effort are independent (principle 5), enabling Fast pins the displayed
-launcher, model and effort, and an untouched start preserves the native default (principle 1). The first request carries
+`assistant_start_service_tier` comes from that manager's hello, and a selected Codex model whose native `service_tiers`
+advertise Fast or Ultrafast offers those speeds before the first message. Other models, managers and older hubs do not
+show it. The local speed choice and reasoning effort are independent (principle 5). Picking a faster speed pins the displayed
+launcher, model and effort. An untouched start preserves the native default (principle 1). The first request carries
 only an explicit choice, which must be natively acknowledged before the first turn; a refusal is recoverable and never
 silently means Standard (principles 3 and 7). A successful start, Follow default, a dropped pick or a manager change
 clears the one-off draft; a refused start retains it. New Agent has no start speed control.

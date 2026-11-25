@@ -176,7 +176,7 @@ describe("what the pill says", () => {
   it("the list's name for the model once read, a short id before; the launcher, engine, effort and speed", () => {
     expect(pillView(session(), { list: claudeList })).toEqual({ engine: "claude", provider: "gateway", model: "Opus 5.5", effort: "high", loading: false, failed: false });
     expect(pillView(session(), {}).model).toBe("opus 5.5");
-    expect(pillView(codex({ service_tier: "priority" }), {})).toMatchObject({ engine: "codex", provider: "cx", model: "5.5", fast: true });
+    expect(pillView(codex({ service_tier: "priority" }), {})).toMatchObject({ engine: "codex", provider: "cx", model: "5.5", speed: "fast" });
     expect(pillView(session({ launcher: undefined, agent: undefined }), {})).toMatchObject({ engine: "claude", provider: "claude" });
   });
 
