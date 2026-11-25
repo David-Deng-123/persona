@@ -1,6 +1,6 @@
 // One row of the model panel's list (#5032, after Cindy's UnifiedModelRow), two lines. The first: the Agent's mark (#5497),
 // the model's name, a star and Customize that show under the pointer (or on keyboard focus, or always on a touch screen),
-// and on the right what a pick applies: the effort, ⚡ for Fast. The second: where it comes from (All,
+// and on the right what a pick applies: the effort and speed. The second: where it comes from (All,
 // Recent, Favorites) or what the model is (a provider's own view). The model that runs now has a whole-row fill and no
 // check mark. Enter or Space picks it, ← or a right-click opens its setup flyout. A name cut short shows the model's whole
 // ID as its second line (a touch screen has no tooltip), and a touch screen adds the full ID to the provider's line.
@@ -12,6 +12,7 @@ import { agentName } from "../../lib/agent-kind";
 import { cx } from "../atoms";
 import { Icon, type IconName } from "../icons";
 import { ProviderMark } from "./ProviderMark";
+import { SpeedMark } from "./SpeedMark";
 
 // the row's small square buttons, shown under the pointer, on keyboard focus and always without hover
 const REVEAL = "opacity-0 group-hover/row:opacity-100 group-focus-visible/row:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100";
@@ -78,7 +79,7 @@ export function Row({ row, second, describes, keepSecond, asButton, dense, block
   const speedName = speed && speedLabel(model.speeds?.find((choice) => choice.id === speed) ?? { id: speed });
   const speedMark = speedName && (
     <span data-row-speed title={speedName} aria-label={speedName} role="img" className="flex shrink-0 items-center gap-1 text-label text-ink-3">
-      <Icon name="bolt" size={11} className="fill-current" />
+      <SpeedMark speed={speed} size={11} />
       {speed !== "fast" && speedName}
     </span>
   );

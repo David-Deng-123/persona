@@ -2721,10 +2721,10 @@ selector; where Persona's earlier rules differ, Cindy's wins, built from Persona
   of its bottom row, before voice / Stop / Send (`Composer`'s `trailing` slot, `views/chat/ModelPill.tsx`). The permission
   chip stays at the left; the thinking-effort chip, a Persona chat's launcher chip and an Agent's "launcher · model" text
   are gone, and the context bar below the composer does not name the model.
-- **What the pill shows**: `[engine][model][effort][⚡][⌄]`: the mark of the Agent the launcher runs, drawn once and first
+- **What the pill shows**: `[engine][model][effort][speed][⌄]`: the mark of the Agent the launcher runs, drawn once and first
   (#5497: `AgentMark`, as in the Agents list; an Agent with no mark of its own gets the generic `agent` icon, never a
   letter, unless its runtime names it, #8142), the model as its launcher's list names it (before that list is in, a short form of the ID such as `opus 5.5`),
-  the thinking effort in the text colour, a filled bolt for Fast or a gauge for Ultrafast, and the workflow mark while ultracode (or a
+  the thinking effort in the text colour, one filled bolt for Fast or two for Ultrafast, and the workflow mark while ultracode (or a
   Codex thread's ultra) is on. The pill, effort controls and settings use Minimal, Low, Medium, High, XHigh, Max and Ultra
   in all three languages. Explanations use the page's language. When the pill shows a tier, it drops the effort qualifier
   from the model name and retains context sizes. An Antigravity variant can supply the pill's tier from its catalog ID.
@@ -2734,7 +2734,8 @@ selector; where Persona's earlier rules differ, Cindy's wins, built from Persona
   never `paseo`; the panel's rows, its Agent block and its reasons name it the same way.
 - The wide panel's footer and the narrow model flyout show the same ordered **Speed** selector. Standard / Fast
   stay a compact pair where those are the only choices. Codex may offer Ultrafast or other catalog tiers, and
-  supported Claude Code sessions offer Standard / Fast. The selected speed follows session acknowledgment. Saved
+  supported Claude Code sessions offer Standard / Fast. The selector and model rows use the same bolts as the pill.
+  Standard has no mark. The selected speed follows session acknowledgment. Saved
   setups that used the old Fast flag still read as Fast, and saved setups without a speed read as Standard where
   the model offers it. Choosing a different model sends no speed request based on the previous model's tiers.
 - **Widths**: the composer card is a container (`@container/composer`). From 600 px the pill takes 72–320 px; under 600 it

@@ -478,7 +478,7 @@ describe("an Agent's pill", () => {
     upsertSession(fast);
     act(() => root.render(<AgentModelPill session={fast} />));
     await flush();
-    expect(pill()!.querySelector('[data-pill-speed="fast"] svg')?.classList.contains("fill-current")).toBe(true);
+    expect(pill()!.querySelectorAll('[data-pill-speed="fast"] svg.fill-current path')).toHaveLength(1);
     expect(await act(() => panel.props!.onApplyCurrent!({ speed: "ultrafast" }))).toBe(true);
     expect(modes().at(-1)).toEqual({ service_tier: "ultrafast" });
     expect(pill()!.querySelector('[data-pill-speed="ultrafast"]')).toBeNull();
@@ -486,9 +486,9 @@ describe("an Agent's pill", () => {
     upsertSession(ultra);
     act(() => root.render(<AgentModelPill session={ultra} />));
     await flush();
-    expect(pill()!.querySelector('[data-pill-speed="ultrafast"] svg')?.classList.contains("fill-current")).toBe(false);
-    expect(pill()!.title).toContain(t("ui-modelpanel.speed_ultrafast"));
-    expect(pill()!.getAttribute("aria-label")).toContain(t("ui-modelpanel.speed_ultrafast"));
+    expect(pill()!.querySelectorAll('[data-pill-speed="ultrafast"] svg.fill-current path')).toHaveLength(2);
+    expect(pill()!.title).toContain(` · ${t("ui-modelpanel.speed_ultrafast")}`);
+    expect(pill()!.getAttribute("aria-label")).toContain(` · ${t("ui-modelpanel.speed_ultrafast")}`);
     calls.length = 0;
     await act(() => panel.props!.onApplyCurrent!({ speed: "standard" }));
     expect(modes()).toEqual([{ service_tier: "default" }]);

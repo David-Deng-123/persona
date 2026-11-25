@@ -1591,7 +1591,7 @@ chat (#5033), where the panel only offers models and says plainly which one the 
   mark of the Agent the launcher runs (#5497: `AgentMark` at 15 px, `ink-2` for the one-colour marks, 4 px before the
   name; an Agent with no mark of its own gets the generic `agent` icon, never a letter, unless its runtime names it
   (#8142), when it is drawn as the Agents list draws it), the model name (truncates), the canonical effort label in the
-  text colour 4 px after it, a filled bolt for Fast or a gauge for Ultrafast, the workflow
+  text colour 4 px after it, the shared speed mark when present, the workflow
   `UltraMark` (`ink-2`), and a 14 px chevron (`ink-2`). Widths by the composer card (`@container/composer`): ≥ 600 px 72–320 px;
   < 600 px the width its words need (name ≤ 108 px without a trailing bracketed qualifier, a context size kept as a short
   mark, "Opus 5.5 1M"; the whole name in the tooltip;
@@ -3300,9 +3300,11 @@ changing (principle 3).
 In the web model panel, Agents can change the speed of a writable Codex thread or a supported Claude Code
 terminal session. The same segmented control sits in the wide footer and the narrow flyout. The track sizes to its
 labels and wraps whole segments if space runs out. It lists only advertised choices and keeps the acknowledged
-selection visible while a change is pending. The composer pill names Fast or Ultrafast in its tooltip and accessible
-label. A faster option explains the extra usage, and Claude Code's Fast detail explains that the runtime may save the preference for
-future sessions. To undo a speed change, pick the previous option. Settings > Agents > Codex still owns the
+selection visible while a change is pending. The composer pill, model row and speed selector share `SpeedMark`.
+Standard has no mark. Fast uses the filled `bolt`, and Ultrafast uses `bolt-double`, two offset filled bolts drawn in
+one icon. Both icons share the same height and stroke weight. The pill names Fast and Ultrafast in its tooltip and
+accessible label. A faster option explains the extra usage, and Claude Code's Fast detail explains that the runtime
+may save the preference for future sessions. To undo a speed change, pick the previous option. Settings > Agents > Codex still owns the
 native default for new Codex sessions.
 
 The iOS main Assistant conversation offers the same current-session choice inside its existing composer Model / Thinking

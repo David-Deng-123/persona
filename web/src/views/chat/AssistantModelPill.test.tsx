@@ -276,8 +276,10 @@ describe("a Persona chat's pill on a hub that keeps picks", () => {
 
   it("names the acknowledged Ultrafast tier in a running Assistant chat", async () => {
     await show(chat({ agent: "codex", launcher: "codex", model: "gpt-ultrafast", service_tier: "ultrafast" }));
-    expect(pill().querySelector('[data-pill-speed="ultrafast"]')).not.toBeNull();
-    expect(pill().title).toContain(t("ui-modelpanel.speed_ultrafast"));
+    expect(pill().querySelectorAll('[data-pill-speed="ultrafast"] svg.fill-current path')).toHaveLength(2);
+    const speed = t("ui-modelpanel.speed_ultrafast");
+    expect(pill().title).toContain(`High · ${speed}`);
+    expect(pill().getAttribute("aria-label")).toContain(`High · ${speed}`);
   });
 
   it("re-reads the effective Main chat model when a hub push bumps the conversation revision (#6542)", async () => {
@@ -400,8 +402,10 @@ describe("an older hub and the new-conversation page", () => {
     expect(await act(() => panel.props!.onApplyCurrent!({ speed: "ultrafast" }))).toBe(true);
     expect(pickedServiceTier()).toBe("ultrafast");
     expect(panel.props!.state.current).toMatchObject({ effort: "high", speed: "ultrafast" });
-    expect(pill().querySelector('[data-pill-speed="ultrafast"]')).not.toBeNull();
-    expect(pill().title).toContain(t("ui-modelpanel.speed_ultrafast"));
+    expect(pill().querySelectorAll('[data-pill-speed="ultrafast"] svg.fill-current path')).toHaveLength(2);
+    const speed = t("ui-modelpanel.speed_ultrafast");
+    expect(pill().title).toContain(`High · ${speed}`);
+    expect(pill().getAttribute("aria-label")).toContain(`High · ${speed}`);
 
     expect(await act(() => panel.props!.onPick({ provider: "codex", model: "gpt-fast" }))).toBe(true);
     expect(await act(() => panel.props!.onApplyCurrent!({ speed: "ultrafast" }))).toBe(false);

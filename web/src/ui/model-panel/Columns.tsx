@@ -11,6 +11,7 @@ import { effortTitle } from "../../lib/session-actions";
 import { cx } from "../atoms";
 import { Icon } from "../icons";
 import { ProviderMark } from "./ProviderMark";
+import { SpeedMark } from "./SpeedMark";
 
 /** The left column's entry for the saved setups (favorites, then recent) and the presets. */
 export const SAVED_SIDE = "\nsaved";
@@ -137,7 +138,7 @@ export function SpeedSwitch({ options, speed, disabled, onSpeed }: {
               selected ? "bg-surface text-ink" : "text-ink-2 hover:text-ink",
             )}
           >
-            {id === "fast" && <Icon name="bolt" size={12} className="shrink-0 fill-current" />}
+            <SpeedMark speed={id} size={12} />
             <span className="truncate">{label}</span>
           </button>
         );

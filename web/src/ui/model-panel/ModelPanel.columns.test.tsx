@@ -196,7 +196,10 @@ describe("the model panel's columns", () => {
     const choices = [...document.querySelectorAll<HTMLButtonElement>("[data-panel-speed]")];
     expect(choices.map((choice) => choice.dataset.panelSpeed)).toEqual(["standard", "fast", "ultrafast"]);
     expect(choices.map((choice) => choice.getAttribute("aria-pressed"))).toEqual(["false", "false", "true"]);
-    expect(document.querySelector("[data-row-speed]")?.getAttribute("aria-label")).toBe(t("ui-modelpanel.speed_ultrafast"));
+    expect(choices.map((choice) => choice.querySelectorAll("svg.fill-current path").length)).toEqual([0, 1, 2]);
+    const rowSpeed = document.querySelector("[data-row-speed]");
+    expect(rowSpeed?.getAttribute("aria-label")).toBe(t("ui-modelpanel.speed_ultrafast"));
+    expect(rowSpeed?.querySelector("svg")?.innerHTML).toBe(choices[2].querySelector("svg")?.innerHTML);
     act(() => choices[0].click());
     expect(onApplyCurrent).toHaveBeenCalledWith({ speed: "standard" });
     expect(choices.every((choice) => choice.getAttribute("aria-disabled") === "true")).toBe(true);

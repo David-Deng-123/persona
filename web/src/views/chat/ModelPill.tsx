@@ -33,6 +33,7 @@ import type { AssistantInfo, Session } from "../../lib/types";
 import { cx, Spinner, toast } from "../../ui/atoms";
 import { Icon } from "../../ui/icons";
 import { ProviderMark } from "../../ui/model-panel/ProviderMark";
+import { SpeedMark } from "../../ui/model-panel/SpeedMark";
 import { lazyOverlay } from "../LazyOverlay";
 import { UltraMark } from "./Ultracode";
 
@@ -147,7 +148,7 @@ export function ModelPill({
       )}
       {speedLabel && (
         <span data-pill-speed={shown.speed} aria-hidden className="ml-0.5 flex shrink-0 text-ink-2">
-          <Icon name={shown.speed === "fast" ? "bolt" : "gauge"} stroke={2} className={cx("size-[13px] @max-[520px]/composer:size-[12px]", shown.speed === "fast" && "fill-current")} />
+          <SpeedMark speed={shown.speed} className="size-[13px] @max-[520px]/composer:size-[12px]" />
         </span>
       )}
       {workflow && !pending && <UltraMark size={12} label={workflow.label} title={workflow.title} className={cx("ml-0.5", ULTRA_HIDDEN)} />}
