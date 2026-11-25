@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -346,6 +347,10 @@ func (n *Node) inferLauncher(id string) string {
 	}
 	if env.ConfigDir == "" {
 		return ""
+	}
+	if env.BaseURL == "" {
+		// A default-endpoint match must be unique across both launcher lists.
+		return matchLauncher(slices.Concat(cached, managed), "", env.Model, env.ConfigDir)
 	}
 	if name := matchLauncher(cached, env.BaseURL, env.Model, env.ConfigDir); name != "" {
 		return name

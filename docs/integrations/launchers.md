@@ -233,6 +233,12 @@ The script frames what it prints with begin/end markers, and node reads only bet
   Only the first file of a name on PATH counts, as for the shell; a name the shell has as a function or alias (both run before a file) is not a script launcher,
   and neither is `claude` / `codex` / `omp` itself. The scan stats only regular files and links, reads two bytes before the rest, and gets 3 seconds (a hung
   network mount): past them the last scan's scripts stand.
+  A thin wrapper such as `claude-work` can also exec a shell helper by absolute path or alongside the wrapper,
+  with literal arguments and `"$@"` at the end. The node reads one helper within the same bounds. It resolves simple
+  positional parameters, assignments and exports, and recognizes `dirname "$0"` and `dirname "$(readlink -f "$0")"`
+  as script locations. If the helper execs Claude Code with a known `CLAUDE_CONFIG_DIR` and no configured endpoint,
+  the node can attribute a terminal session with an empty endpoint to the one launcher with that directory.
+  Configuration directories stay on the node. Sourced files, dynamic paths and further helper hops are outside this scan.
 - **Codex** (since 2026-11-02): If `codex` is on PATH, add `codex`, plus aliases running only one `codex` command, after the Claude entries, with `agent: "codex"`.
   On a Mac where the login shell finds no `codex` (and has no alias or function of that name), the ChatGPT app's bundled CLI
   (`/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`) is plain `codex` instead, run by that path (#10437).

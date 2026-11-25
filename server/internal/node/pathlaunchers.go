@@ -141,6 +141,9 @@ func scanPath(pathVar string, taken map[string]bool) *pathScan {
 			}
 			w, ok := wrapperScript(head)
 			if !ok {
+				w, ok = forwardedClaudeWrapper(path, head, userHome())
+			}
+			if !ok {
 				continue
 			}
 			s.list = append(s.list, proto.Launcher{
