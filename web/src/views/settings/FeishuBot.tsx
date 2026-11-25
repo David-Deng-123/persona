@@ -724,7 +724,7 @@ export function TopicGroups({ status, saving, save }: { status: FeishuBotStatus;
             </Row>
             {g.todo_mode !== undefined && (
               <Row label={t("settings-feishubot.topic_todo_for", { name: group })} wrapHint stackOnNarrow>
-                <select aria-label={t("settings-feishubot.topic_todo_for", { name: group })} className={settingsInputClass} disabled={saving} value={g.todo_mode}
+                <select aria-label={t("settings-feishubot.topic_todo_for", { name: group })} className={`${settingsInputClass} min-h-11`} disabled={saving} value={g.todo_mode}
                   onChange={(e) => {
                     const mode = e.target.value as TopicTodoMode;
                     void save(groups.map((item) => ({
