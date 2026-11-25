@@ -111,7 +111,10 @@ func (n *Node) terminalSpeedRow(s *proto.Session, m quickMeta) {
 		return
 	}
 	if tiers := n.terminalSpeedChoices(s.SessionID, s.Agent, s.PaneID, m); len(tiers) > 0 {
-		s.ServiceTiers, s.ServiceTier = tiers, m.speed.Tier
+		s.ServiceTiers = tiers
+		if m.speed.Tier != "" {
+			s.ServiceTier = m.speed.Tier
+		}
 	}
 }
 

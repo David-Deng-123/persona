@@ -45,11 +45,12 @@ type entry struct {
 	} `json:"compactMetadata"`
 	Content json.RawMessage `json:"content"`
 	Message *struct {
-		Role    string                `json:"role"`
-		Model   string                `json:"model"`
-		ID      string                `json:"id"`
-		Content json.RawMessage       `json:"content"`
-		Usage   *tokenuse.ClaudeUsage `json:"usage"`
+		StopReason string                `json:"stop_reason"`
+		Role       string                `json:"role"`
+		Model      string                `json:"model"`
+		ID         string                `json:"id"`
+		Content    json.RawMessage       `json:"content"`
+		Usage      *tokenuse.ClaudeUsage `json:"usage"`
 	} `json:"message"`
 	AITitle        string `json:"aiTitle"`
 	CustomTitle    string `json:"customTitle"`
@@ -104,6 +105,7 @@ type block struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text"`
 	Thinking  string          `json:"thinking"`
+	Signature string          `json:"signature"`
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
@@ -130,11 +132,14 @@ type Meta struct {
 	VersionAt      time.Time
 	PermissionMode string
 	// ModeAt / Effort / EffortAt / ModelAt: when the permission mode was last seen, and when the latest reply or turn_context named Effort or Model.
-	ModeAt   time.Time
-	Effort   string
-	EffortAt time.Time
-	ModelAt  time.Time
-	Speed    SpeedObservation
+	// ServiceTier / ServiceTierAt: the Codex service tier from the latest thread settings, and when they were applied.
+	ModeAt        time.Time
+	Effort        string
+	EffortAt      time.Time
+	ModelAt       time.Time
+	ServiceTier   string
+	ServiceTierAt time.Time
+	Speed         SpeedObservation
 	// Ultracode is independent of effort: nil means the transcript has no dated evidence. Since, when set by a
 	// caller, ignores observations from before the current Claude process (resume resets the session-only switch).
 	Ultracode        *bool
@@ -191,10 +196,11 @@ type Meta struct {
 	// Goal is the goal the agent works toward (Claude Code's /goal, a Codex thread goal), nil when none is set (goal.go).
 	Goal *proto.GoalInfo
 	// Plan is the agent's latest task list, counted (TodoWrite, TaskCreate / TaskUpdate; plan.go), nil when it keeps none.
-	Plan        *proto.PlanInfo
-	planItems   []planItem
-	planUses    map[string]proto.Item // tool_use_id → a plan tool's call, waiting for its result
-	planPending [][]byte              // planUses' ids (PlanPending)
+	Plan              *proto.PlanInfo
+	planItems         []planItem
+	desktopPlanDeltas []string              // accepted relative updates to the current checklist
+	planUses          map[string]proto.Item // tool_use_id → a plan tool's call, waiting for its result
+	planPending       [][]byte              // planUses' ids (PlanPending)
 	// LastActivity is the time of the last real exchange (user input, assistant output, tool calls). Claude Code
 	// also appends recaps, titles and mode lines to idle sessions, so the file mtime is not "last used".
 	LastActivity time.Time
@@ -264,6 +270,9 @@ type Meta struct {
 	codexSeen   map[string]bool
 	codexTurnID string
 	codexUserID string
+	// A native plan event and the successful update_plan tool receipt can describe the same revision.
+	codexPlanCalls []codexPlanCall
+	codexLastPlan  json.RawMessage
 	// codexPending: the ids of backgrounded commands whose terminal record has not been read. A command can finish in
 	// a later turn, so task_started does not clear it; the id leaves when its completed/failed record is read.
 	// codexPendingIDs keeps them oldest first and codexPendingKept (codex.go) bounds them.
@@ -311,13 +320,29 @@ type Meta struct {
 	Updated      time.Time
 }
 
+func (m *Meta) observeCodexSettings(s codexThreadSettings, at time.Time) {
+	if s.Model != "" && !at.Before(m.ModelAt) {
+		m.Model, m.ModelAt = s.Model, at
+	}
+	if len(s.ServiceTier) != 0 && !at.Before(m.ServiceTierAt) {
+		var tier string
+		if json.Unmarshal(s.ServiceTier, &tier) == nil {
+			if tier == "" {
+				tier = "default"
+			}
+			m.ServiceTier, m.ServiceTierAt = tier, at
+		}
+	}
+}
+
 // ObserveNamingMetadata reads title provenance, usage and Codex turn settings during an existing incremental scan.
 // It never decodes message content (which can contain large screenshots or tool output).
 func (m *Meta) ObserveNamingMetadata(line []byte) {
 	if !bytes.Contains(line, []byte(`"custom-title"`)) && !bytes.Contains(line, []byte(`"ai-title"`)) &&
 		!bytes.Contains(line, []byte(`"usage"`)) && !bytes.Contains(line, []byte(`"turn_context"`)) &&
 		!bytes.Contains(line, []byte(`"compact_boundary"`)) && !bytes.Contains(line, []byte(`"compacted"`)) &&
-		!bytes.Contains(line, []byte(`"context_compacted"`)) && !bytes.Contains(line, []byte(`"token_count"`)) {
+		!bytes.Contains(line, []byte(`"context_compacted"`)) && !bytes.Contains(line, []byte(`"token_count"`)) &&
+		!bytes.Contains(line, []byte(`"thread_settings_applied"`)) {
 		return
 	}
 	var e struct {
@@ -334,10 +359,11 @@ func (m *Meta) ObserveNamingMetadata(line []byte) {
 			Usage *tokenuse.ClaudeUsage `json:"usage"`
 		} `json:"message"`
 		Payload struct {
-			Type   string              `json:"type"`
-			Model  string              `json:"model"`
-			Effort string              `json:"effort"`
-			Info   *tokenuse.CodexInfo `json:"info"`
+			Type     string              `json:"type"`
+			Model    string              `json:"model"`
+			Effort   string              `json:"effort"`
+			Settings codexThreadSettings `json:"thread_settings"`
+			Info     *tokenuse.CodexInfo `json:"info"`
 		} `json:"payload"`
 	}
 	if json.Unmarshal(line, &e) != nil {
@@ -345,9 +371,7 @@ func (m *Meta) ObserveNamingMetadata(line []byte) {
 	}
 	switch e.Type {
 	case "turn_context":
-		if e.Payload.Model != "" && !e.Timestamp.Before(m.ModelAt) {
-			m.Model, m.ModelAt = e.Payload.Model, e.Timestamp
-		}
+		m.observeCodexSettings(codexThreadSettings{Model: e.Payload.Model}, e.Timestamp)
 		if e.Payload.Effort != "" && !e.Timestamp.Before(m.EffortAt) {
 			m.Effort, m.EffortAt = e.Payload.Effort, e.Timestamp
 		}
@@ -378,6 +402,8 @@ func (m *Meta) ObserveNamingMetadata(line []byte) {
 		switch e.Payload.Type {
 		case "context_compacted":
 			m.restartContext.compact()
+		case "thread_settings_applied":
+			m.observeCodexSettings(e.Payload.Settings, e.Timestamp)
 		case "token_count":
 			if info := e.Payload.Info; info != nil {
 				m.OutputTokens = int(info.Total.Output)
@@ -982,6 +1008,7 @@ func parseLine(seq int, line []byte, meta *Meta) []proto.Item {
 				}
 				it := mk(i, "assistant", proto.KindText)
 				it.Text = clip(b.Text)
+				it.Narration = e.Message.StopReason == "tool_use" && !e.IsAPIErrorMessage
 				meta.said(withoutBotmuxSentinel(b.Text), e.Timestamp)
 				out = append(out, it)
 			case "thinking":
@@ -991,6 +1018,9 @@ func parseLine(seq int, line []byte, meta *Meta) []proto.Item {
 				meta.ContextStats.ConversationBytes += estimateWeightedBytes(b.Thinking)
 				it := mk(i, "assistant", proto.KindThinking)
 				it.Text = clip(b.Thinking)
+				if claudeNarration(b.Signature) {
+					it.Kind, it.Narration = proto.KindText, true
+				}
 				out = append(out, it)
 			case "tool_use", "server_tool_use":
 				meta.ContextStats.ToolOutputBytes += int64(len(b.Name)) + estimateWeightedBytes(string(b.Input))

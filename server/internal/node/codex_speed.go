@@ -70,7 +70,9 @@ func (n *Node) codexSpeedRow(s *proto.Session) {
 	c.mu.Lock()
 	tiers := c.models[n.codexModelNow(s.SessionID, c, thread, s.Model)].tiers
 	c.mu.Unlock()
-	s.ServiceTier = thread.serviceTier
+	if thread.serviceTier != "" {
+		s.ServiceTier = thread.serviceTier
+	}
 	s.ServiceTiers = codexSpeedChoices(tiers)
 }
 
