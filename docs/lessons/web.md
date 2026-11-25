@@ -6,6 +6,11 @@ The browser's repeat read and the computer's forced discovery are separate. Use 
 and send `refresh=1` for an explicit refresh or Retry. Keep the previous list visible while the request runs, and
 verify that a changed catalog replaces its rows in the same opening.
 
+## A text shimmer needs an opaque source color (#15367)
+
+Setting `color: transparent` also clears any gradient stop that reads `currentColor`.
+Use a transparent glyph fill for the animated gradient and check the painted text in a browser.
+
 ## A folder of trees names its repository, it is not one (#13453)
 
 Path inference keys a tree in a folder kept apart from its repository (herdr's `~/.herdr/worktrees/<repository>/<tree>`)
