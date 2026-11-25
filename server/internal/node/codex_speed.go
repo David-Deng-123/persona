@@ -89,7 +89,7 @@ func (n *Node) setCodexSpeed(ctx context.Context, id, tier string) error {
 
 // setCodexTerminalSpeed uses the same checked input and rollout acknowledgment as terminal model changes.
 func (n *Node) setCodexTerminalSpeed(ctx context.Context, id, tier string) error {
-	t, why, live := n.codexOnTerminal(id)
+	t, why, live := n.codexOnTerminalCtx(ctx, id, true)
 	if !live {
 		return fmt.Errorf("this session does not support Codex speed changes")
 	}
