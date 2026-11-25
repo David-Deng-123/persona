@@ -193,7 +193,7 @@ export function AssistantModelPanel({ chat, mid, anchor, onClose }: { chat: Assi
       pickFast(false);
     }
   };
-  const onReload = (provider: string) => void readModels(mid, provider, { purpose: "assistant", again: true, first: provider === setup.provider });
+  const onReload = (provider: string) => void readModels(mid, provider, { purpose: "assistant", refresh: true, first: provider === setup.provider });
   const onForget = (provider: string, model: string) => {
     void forgetModel(mid, provider, model, "assistant").then((error) => error && toast(error, "error"));
   };

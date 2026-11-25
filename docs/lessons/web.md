@@ -1,5 +1,11 @@
 # Lessons: web UI and interactions
 
+## Reopening a model picker can reuse the computer's catalog (#15481)
+
+The browser's repeat read and the computer's forced discovery are separate. Use the opening read for fast results
+and send `refresh=1` for an explicit refresh or Retry. Keep the previous list visible while the request runs, and
+verify that a changed catalog replaces its rows in the same opening.
+
 ## A folder of trees names its repository, it is not one (#13453)
 
 Path inference keys a tree in a folder kept apart from its repository (herdr's `~/.herdr/worktrees/<repository>/<tree>`)
