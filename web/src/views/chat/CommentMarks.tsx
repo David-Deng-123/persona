@@ -2,7 +2,7 @@
 // the selection (pressing C focuses it immediately); Enter or ✓ saves (empty note allowed), Esc cancels. Saved comments
 // stay lit in the transcript with a numbered pin beside them; clicking a pin reopens the same floating bar anchored at
 // that pin to edit or delete in place without jumping focus down to the bottom composer.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { anchorOf, onJumpToComment, rangeFor } from "../../lib/comment-marks";
 import { textQuote, type TextAnchor } from "../../lib/comments";
 import { addQuote, removeQuote, setNote, useQuotes } from "../../lib/drafts";
@@ -35,14 +35,50 @@ interface PinEdit {
   originalBody: string;
 }
 
+interface HighlightBucket {
+  base: Range[];
+  pulsed: Range[];
+}
+
 const DOT = 16;
 const FLASH_MS = 1400;
 const HIGHLIGHT_NAME = "persona-comment";
 const HIGHLIGHT_FLASH_NAME = "persona-comment-flash";
 const isCommentPin = (el: Element) => Boolean(el.closest("[data-comment-pin]"));
 
+// CSS.highlights is document-global while CommentMarks mounts per chat scroller (e.g. main chat + SidePanel).
+// Track each mounted instance's ranges separately and publish their union so panes never wipe each other.
+const highlightBuckets = new Map<symbol, HighlightBucket>();
+
 function supportsCustomHighlight(): boolean {
-  return typeof CSS !== "undefined" && "highlights" in CSS && typeof Highlight !== "undefined";
+  return typeof CSS !== "undefined" && Boolean(CSS.highlights) && typeof Highlight !== "undefined";
+}
+
+function publishCustomHighlights(): void {
+  if (!supportsCustomHighlight()) return;
+  const base: Range[] = [];
+  const pulsed: Range[] = [];
+  for (const bucket of highlightBuckets.values()) {
+    for (const r of bucket.base) base.push(r);
+    for (const r of bucket.pulsed) pulsed.push(r);
+  }
+  if (base.length) CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(...base));
+  else CSS.highlights.delete(HIGHLIGHT_NAME);
+  if (pulsed.length) CSS.highlights.set(HIGHLIGHT_FLASH_NAME, new Highlight(...pulsed));
+  else CSS.highlights.delete(HIGHLIGHT_FLASH_NAME);
+}
+
+function setInstanceHighlights(owner: symbol, base: Range[], pulsed: Range[]): void {
+  if (base.length || pulsed.length) {
+    highlightBuckets.set(owner, { base, pulsed });
+    publishCustomHighlights();
+  } else if (highlightBuckets.delete(owner)) {
+    publishCustomHighlights();
+  }
+}
+
+function clearInstanceHighlights(owner: symbol): void {
+  if (highlightBuckets.delete(owner)) publishCustomHighlights();
 }
 
 function sameAnchor(a: CommentBarAnchor | null, b: CommentBarAnchor | null): boolean {
@@ -232,7 +268,11 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
   const boxesNow = useRef(boxes);
   boxesNow.current = boxes;
   const [flash, setFlash] = useState<string | null>(null);
+  const flashNow = useRef(flash);
+  flashNow.current = flash;
+  const flashTimer = useRef<number | undefined>(undefined);
   const nativeHighlight = useMemo(() => supportsCustomHighlight(), []);
+  const [highlightOwner] = useState(() => Symbol());
   const rangesNow = useRef(new Map<string, Range>());
 
   const syncCustomHighlights = useCallback(
@@ -244,12 +284,9 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
         if (id === activeFlash) pulsed.push(range);
         else base.push(range);
       }
-      if (base.length) CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(...base));
-      else CSS.highlights.delete(HIGHLIGHT_NAME);
-      if (pulsed.length) CSS.highlights.set(HIGHLIGHT_FLASH_NAME, new Highlight(...pulsed));
-      else CSS.highlights.delete(HIGHLIGHT_FLASH_NAME);
+      setInstanceHighlights(highlightOwner, base, pulsed);
     },
-    [nativeHighlight],
+    [highlightOwner, nativeHighlight],
   );
 
   // Close the pin editor if its comment was removed from elsewhere (e.g. composer popover).
@@ -284,25 +321,30 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
       if (rects.length) out.push({ id: m.id, n: m.n, rects });
     }
     rangesNow.current = nextRanges;
-    syncCustomHighlights(flash);
+    syncCustomHighlights(flashNow.current);
     setBoxes((prev) => (JSON.stringify(prev) === JSON.stringify(out) ? prev : out));
-  }, [marks, scroller, syncCustomHighlights, flash]);
+  }, [marks, scroller, syncCustomHighlights]);
 
   useEffect(() => {
     syncCustomHighlights(flash);
   }, [flash, syncCustomHighlights]);
 
   useEffect(() => {
-    if (!nativeHighlight) return;
     return () => {
-      CSS.highlights.delete(HIGHLIGHT_NAME);
-      CSS.highlights.delete(HIGHLIGHT_FLASH_NAME);
+      window.clearTimeout(flashTimer.current);
+      flashTimer.current = undefined;
+      rangesNow.current = new Map();
+      if (nativeHighlight) clearInstanceHighlights(highlightOwner);
     };
-  }, [nativeHighlight]);
+  }, [highlightOwner, nativeHighlight]);
 
-  useLayoutEffect(() => {
+  // Passive effect so ancestor refs (ChatView's ref={scrollRef} wrapping CommentMarks) are attached before measuring.
+  useEffect(() => {
     if (!marks.length) {
       rangesNow.current = new Map();
+      window.clearTimeout(flashTimer.current);
+      flashTimer.current = undefined;
+      setFlash((f) => (f ? null : f));
       syncCustomHighlights(null);
       setBoxes((prev) => (prev.length ? [] : prev));
       return;
@@ -326,11 +368,13 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
       mutations.disconnect();
       sizes.disconnect();
     };
-  }, [marks, measure, scroller]);
+  }, [marks, measure, scroller, syncCustomHighlights]);
 
   // the chip popover's click: scroll to the words and pulse them
   const marksNow = useRef(marks);
   marksNow.current = marks;
+  const jumpNow = useRef(jump);
+  jumpNow.current = jump;
   useEffect(
     () =>
       onJumpToComment((id) => {
@@ -338,14 +382,19 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
         const el = scroller.current;
         if (!box || !el) return false;
         const anchor = marksNow.current.find((m) => m.id === id)?.anchor;
-        const words = jump && anchor ? rangeFor(el, anchor) : null;
-        if (words && jump) jump(words, -el.clientHeight / 3);
+        const jumpFn = jumpNow.current;
+        const words = jumpFn && anchor ? rangeFor(el, anchor) : null;
+        if (words && jumpFn) jumpFn(words, -el.clientHeight / 3);
         else el.scrollTo({ top: Math.max(0, box.rects[0].y - el.clientHeight / 3), behavior: scrollBehavior() });
+        window.clearTimeout(flashTimer.current);
         setFlash(id);
-        window.setTimeout(() => setFlash((f) => (f === id ? null : f)), FLASH_MS);
+        flashTimer.current = window.setTimeout(() => {
+          flashTimer.current = undefined;
+          setFlash((f) => (f === id ? null : f));
+        }, FLASH_MS);
         return true;
       }),
-    [scroller, jump],
+    [scroller],
   );
 
   const openPin = (id: string, e: React.MouseEvent<HTMLButtonElement>) => {
