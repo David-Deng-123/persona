@@ -35,6 +35,9 @@
 
 ## A one-start speed must not become a resume default (#11141)
 
+- A terminal Codex speed switch uses `/model --speed=standard` to reset the speed on Codex 0.172. The native setting
+  records `default`. Confirm the switch from a new `thread_settings_applied` record because an already-running turn
+  can still write its previous speed.
 - Codex's per-start `service_tier` belongs only in the initial argv; validate it against the selected model's catalog rather than trusting Codex to refuse an unadvertised tier.
 - Claude Code fast mode needs `"fastMode": true` in the effective single `--settings` file. Give the initial command a merged copy and keep the base `claudeLaunch` spec for herdr's `resume_argv`, or an automatic resume silently inherits the billable choice. A shell function that supplies its own `--settings` cannot be merged: refuse fast mode rather than appending a fast-only file that would discard the function's credentials and model.
 - A new `session.start` field needs its own node capability: older nodes otherwise accept it and start at the launcher's speed. Faster speed on a resume or another runtime is a coded refusal before approval or launch.
@@ -1425,6 +1428,9 @@ node RPC so an older node cannot silently ignore a billable setting in `session.
 
 Persona-owned Codex conversations use a separate stdio connection. Share catalog parsing across both transports and
 include the owned connection in session projection, setting routing and native notifications.
+
+The web composer keeps the tier ID through live updates and the new-conversation draft. A Fast boolean drops
+Ultrafast from the pill and loses the tier needed by the first request.
 
 ## Runtime assistant identity comes from persisted state (#4202)
 

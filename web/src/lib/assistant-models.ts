@@ -8,10 +8,11 @@ import { assistantSwitchNeeded } from "./assistant-execution";
 // code: the panel's own data is lib/assistant-panel.ts, loaded with the panel.
 import { agentId, sessionAgent } from "./agent-kind";
 import { explicitLauncherModel } from "./compatibility";
-import { conversationKey, launcherOffered, NEW_CONVERSATION, pickedEffort, pickedFast, pickedLauncher, pickedModel } from "./assistant-chat";
-import { modelSupportsFast, type LauncherDefault } from "./launcher-models";
+import { conversationKey, launcherOffered, NEW_CONVERSATION, pickedEffort, pickedLauncher, pickedModel, pickedServiceTier } from "./assistant-chat";
+import type { LauncherDefault } from "./launcher-models";
 import { providerTitle } from "./provider-names";
 import { currentModelRow, pillModel, type AssistantLaunchers, type ModelList, type PillView } from "./session-models";
+import { speedId, startSpeedTier } from "./session-speed";
 import type { ModelPick, Session } from "./types";
 
 /** The hub keeps a Persona chat's pick (`model_pick`, PUT / DELETE …/conversations/{id}/model). */
@@ -46,8 +47,8 @@ export interface AssistantSetup {
   provider: string;
   model?: string;
   effort?: string;
-  /** Fast selected for this start, or acknowledged on the running native thread. */
-  fast?: boolean;
+  /** Speed selected for this start, or acknowledged on the running native thread. */
+  speed?: string;
   source: SetupSource;
 }
 
@@ -98,26 +99,27 @@ export function mainChatAgentMismatch(c: AssistantChat, info: AssistantLaunchers
 export function assistantSetup(c: AssistantChat, info: AssistantLaunchers | undefined): AssistantSetup {
   const s = c.session;
   const pick = assistantPick(c);
-  const fast = s?.service_tier === "priority" || (!s && pickedFast());
+  const tier = s ? s.service_tier : pickedServiceTier();
+  const speed = tier ? { speed: speedId(tier) } : {};
   // An Antigravity variant pick carries its effort in the new model ID.
   const sessionEffort = (model?: string) => s?.agent === "agy" && model && model !== s.model ? undefined : s?.effort;
-  if (pick) return { provider: pick.launcher, model: pick.model, effort: pick.effort ?? sessionEffort(pick.model), ...(fast ? { fast: true } : {}), source: "pick" };
+  if (pick) return { provider: pick.launcher, model: pick.model, effort: pick.effort ?? sessionEffort(pick.model), ...speed, source: "pick" };
   const mismatch = mainChatAgentMismatch(c, info);
-  if (s && mismatch) return { provider: mismatch.actualLauncher, model: s.model, effort: s.effort, ...(fast ? { fast: true } : {}), source: "own" };
+  if (s && mismatch) return { provider: mismatch.actualLauncher, model: s.model, effort: s.effort, ...speed, source: "own" };
   const def = c.def === undefined ? info?.def : c.def;
   if (!s || (c.followsDefault ?? c.isMain)) {
     const provider = def?.provider || c.config || s?.launcher || "claude";
     const model = def?.model || (s?.launcher === provider ? s.model : undefined);
     const effort = sessionEffort(model);
-    return { provider, model, effort: c.isMain ? def?.effort || effort : effort ?? (def?.effort || undefined), ...(fast ? { fast: true } : {}), source: "default" };
+    return { provider, model, effort: c.isMain ? def?.effort || effort : effort ?? (def?.effort || undefined), ...speed, source: "default" };
   }
   // a launcher the list no longer offers is not what the next message runs on: the hub moves the chat to the assistant's
   const own = launcherOffered(info?.launchers ?? null, s.launcher) ? s.launcher : undefined;
-  return { provider: own || c.config || "claude", model: own ? s.model : undefined, effort: s.effort, ...(fast ? { fast: true } : {}), source: "own" };
+  return { provider: own || c.config || "claude", model: own ? s.model : undefined, effort: s.effort, ...speed, source: "own" };
 }
 
 /** What the pill draws: the launcher (its name for people), the model as its list names it (none set: its default entry,
- *  else the model it is configured with), the effort, Fast. */
+ *  else the model it is configured with), the effort and speed. */
 export function assistantPillView(c: AssistantChat, setup: AssistantSetup, info: AssistantLaunchers | undefined, e: ModelList): PillView {
   const launcher = info?.launchers.find((l) => l.name === setup.provider);
   const id = setup.model || explicitLauncherModel(launcher?.model);
@@ -131,6 +133,6 @@ export function assistantPillView(c: AssistantChat, setup: AssistantSetup, info:
     failed: e.list === undefined && Boolean(e.error),
   };
   if (setup.effort) out.effort = setup.effort;
-  if (setup.fast && (c.session || modelSupportsFast(row))) out.fast = true;
+  if (setup.speed && (c.session || startSpeedTier(row, setup.speed))) out.speed = setup.speed;
   return out;
 }

@@ -782,16 +782,21 @@ A new local Codex launched inside Orca must keep that terminal’s hook environm
 
 ## Speed
 
-The web composer's effort menu includes a Speed submenu for Persona conversations running Codex and writable external app-server threads whose current model advertises
-`serviceTiers` through `model/list`. Standard sends `default`; Fast uses the advertised tier ID, currently `priority`.
-The submenu explains increased usage or cost before selection. It is independent of reasoning effort and takes effect
-on subsequent turns. Settings > Agents > Codex also exposes the native `service_tier` default for new sessions.
+The web model panel lists the running model's advertised speeds. It offers Standard, Fast, Ultrafast and any other
+tiers the runtime advertises, such as Flex. The control is independent of reasoning effort and takes effect on
+subsequent turns. Settings > Agents > Codex also exposes the native speed default for new sessions.
 
-An explicit choice uses `thread/settings/update` and waits for acknowledgment. Refusals, unsupported methods and lost
-connections return errors without retaining a next-turn speed override. `thread/resume` and `thread/settings/updated`
-provide the current speed. A native null means Standard. Missing speed stays unknown because `thread/read` does not
-currently report it. Refreshes preserve acknowledged state, and reconnects start with unknown state until native
-settings arrive. Terminal-only panes, subagents and models without advertised tiers have no speed control.
+An app-server thread uses `thread/settings/update` with the advertised native ID. The default ID is `default` and
+the common Fast ID is `priority`. `thread/resume` and `thread/settings/updated` report the acknowledged speed.
+Native null means Standard. Missing speed stays unknown because `thread/read` does not report it.
+
+A live terminal-route Codex whose rollout identifies CLI 0.169 or later uses the current model's tiers in that
+Codex home's `models_cache.json`. The node checks the terminal for a draft or dialog, then types one
+`/model --speed=<tier>` command. The terminal takes `standard` for Standard and `fast` for Fast, with the other tier
+IDs passed through. No model or effort argument is sent. The row reads the recorded speed from the rollout, including
+`thread_settings_applied` before the next turn. A timeout reports an uncertain change and leaves the terminal alone.
+A resume on a different binary may retain the version written when the rollout started. Panes without a verified
+rollout or cached tiers, screenless hosts and subagents do not offer this control.
 
 The iOS main Assistant conversation reads the same session fields in its existing composer menu. A Speed section appears
 only when the session advertises `default` or `priority`; it uses localized Standard / Fast labels, explains Fast's extra

@@ -2724,25 +2724,31 @@ selector; where Persona's earlier rules differ, Cindy's wins, built from Persona
   of its bottom row, before voice / Stop / Send (`Composer`'s `trailing` slot, `views/chat/ModelPill.tsx`). The permission
   chip stays at the left; the thinking-effort chip, a Persona chat's launcher chip and an Agent's "launcher · model" text
   are gone, and the context bar below the composer does not name the model.
-- **What the pill shows**: `[engine][model][effort][⚡][⌄]`: the mark of the Agent the launcher runs, drawn once and first
+- **What the pill shows**: `[engine][model][effort][speed][⌄]`: the mark of the Agent the launcher runs, drawn once and first
   (#5497: `AgentMark`, as in the Agents list; an Agent with no mark of its own gets the generic `agent` icon, never a
   letter, unless its runtime names it, #8142), the model as its launcher's list names it (before that list is in, a short form of the ID such as `opus 5.5`),
-  the thinking effort in the text colour, a filled bolt for Codex's Fast, and the workflow mark while ultracode (or a
+  the thinking effort in the text colour, one filled bolt for Fast or two for Ultrafast, and the workflow mark while ultracode (or a
   Codex thread's ultra) is on. The pill, effort controls and settings use Minimal, Low, Medium, High, XHigh, Max and Ultra
   in all three languages. Explanations use the page's language. When the pill shows a tier, it drops the effort qualifier
   from the model name and retains context sizes. An Antigravity variant can supply the pill's tier from its catalog ID.
   No frame at rest; on hover and while the panel is open, a 1 px `--line-strong` capsule on `--hover`. Tooltip:
-  "Claude Code · Opus 5.5 · gateway · High[ · Fast]"; accessible name "Select model. Current: Opus 5.5, thinking effort: High".
+  "Claude Code · Opus 5.5 · gateway · High[ · Fast]". The accessible name also includes the speed when shown.
   One of Paseo's providers is its own engine (#8142): its mark, and its label in the tooltip ("Grok · Grok 4 · grok"),
   never `paseo`; the panel's rows, its Agent block and its reasons name it the same way.
+- The wide panel's footer and the narrow model flyout show the same ordered **Speed** selector. Standard / Fast
+  stay a compact pair where those are the only choices. Codex may offer Ultrafast or other catalog tiers, and
+  supported Claude Code sessions offer Standard / Fast. The selector and model rows use the same bolts as the pill.
+  Standard has no mark. The selected speed follows session acknowledgment. Saved
+  setups that used the old Fast flag still read as Fast, and saved setups without a speed read as Standard where
+  the model offers it. Choosing a different model sends no speed request based on the previous model's tiers.
 - **Widths**: the composer card is a container (`@container/composer`). From 600 px the pill takes 72–320 px; under 600 it
   takes the width its words need with the name at most 108 px, and a name's trailing qualifier in brackets is left out
   there ("Default (recommended)" reads "Default", "GPT-5 (beta)" "GPT-5"), except a context size, which names another
   model and stays as a short mark, as the model change divider has it ("Opus 5.5 (1M context)" and "Opus 5.5 [1m]" read
   "Opus 5.5 1M"; `pillShortName`, the tooltip and the accessible name keep the whole name). A fixed 148 px used to cut "Opus 5.5" to "Opus …" beside free room (web usability
   audit 2026-11-14, item 50). It shrinks only when the row is short of room: the name gives way first, the engine mark stays, and the effort truncates only
-  once the name has no room left (Cindy lets both shrink alike; her own rule says the name goes first); under 520 its text is 12 px and its marks a step smaller; under 420 it is 64 px: the engine's mark and the chevron; only a
-  waiting switch's clock makes it grow there (a spinner or a warning stays within the 64 px).
+  once the name has no room left. Under 520 px its text is 12 px and its marks a step smaller. Under 420 px the
+  compact pill is 64 px for the engine mark and chevron, and grows to fit a speed mark or a waiting switch's clock.
 - **Agent launcher label (#10248)**: an explicit session launcher is shown as **launcher · model**, matching its
   model-panel row. The launcher's name and shortened model remain visible on phones, with full names in the tooltip
   and accessible name. The engine mark remains; a pending switch names the target launcher even across engines and
@@ -2913,21 +2919,21 @@ selector; where Persona's earlier rules differ, Cindy's wins, built from Persona
   at once as the session's `model_pick` and put back with the hub's words when it says no (`launcher_out_of_scope`,
   `launcher_own_service`, `launcher_missing`, `launcher_other_kind`, a launcher that can't run assistant chats);
   **Follow default** / **Undo pick** is a `DELETE`. It holds from the next message on every device; the messages carry nothing of it. An effort set
-  in the flyout of the model that runs is kept the same way; Codex's Fast is the speed request. On an older hub the pick
+  in the flyout of the model that runs is kept the same way. Codex speed changes use the speed request. On an older hub the pick
   lives on this page and goes with each message (`launcher`, `model`) and the effort with `POST …/modes`, as the old
   chips did, and a pick of a launcher the list no longer offers goes back to the default with a word. The new-chat page
   keeps its pick for the start (`POST /assistant/conversations` `{launcher, model?, effort?}`), which the new chat keeps
   as its own pick on a hub with `assistant_model_pick` (an older hub ignores the model and keeps nothing). While the
   roster's default manager is in use and the hub lists `assistant_start_service_tier` from that manager's hello, a new
-  chat whose selected model natively advertises `priority` in `service_tiers` also offers Fast in the same Customize
-  flyout: its independent local choice adds `service_tier: "priority"` to the first request, and the node acknowledges
-  it before the first turn. Effort changes preserve Fast and Fast changes preserve effort; enabling Fast pins every
-  displayed start option (launcher, model and effort), so a cleared main cannot revive a carried value. Model or provider
-  switches keep Fast only with the destination row's own setup and advertised support. A manager change disarms the
+  chat offers Fast and Ultrafast in the Customize flyout when the selected Codex model advertises them. The first request
+  sends the chosen tier (`priority` or `ultrafast`), and the node acknowledges it before the first turn. Speed and effort
+  can change independently. Choosing a faster speed pins the displayed launcher, model and effort, so a cleared main
+  cannot revive a carried value. Model or provider switches keep a speed only with the destination row's own setup and
+  advertised support. A manager change disarms the
   draft before the destination catalog answers, even while the panel is closed; the always-mounted pill also clears it
   after a hub downgrade or a native catalog change. An untouched start omits the tier, a refused start retains it for
   retry, and success, Follow default or a dropped pick clears it. An older hub or a non-default manager gets no pre-start
-  Fast control or tier field; an older manager gets 501 `assistant_service_tier_manager_outdated` for an explicit tier,
+  speed control or tier field. An older manager gets 501 `assistant_service_tier_manager_outdated` for an explicit tier,
   and an older node refuses it rather than running Standard. New Agent has no start speed setting.
   If Model configuration › Main chat later changes to another agent kind, the existing main conversation does not migrate:
   with no pick and a confirmed cross-kind mismatch, its pill and setup use the actual session launcher / model / effort,

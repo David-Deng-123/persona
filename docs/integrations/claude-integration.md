@@ -44,6 +44,17 @@ For Persona-started sessions, node state records the launcher. Manually started 
 if exactly one launcher matches both base URL and model, use it; otherwise, if exactly one launcher has that base URL (runtime-selected model, displayed as `(claude-choose)`), use it too.
 Leave other cases blank (multiple launchers share a base URL with no model match, or no base URL), without guessing between candidates. Listing sessions does not wait for the launcher list, which requires a login shell: use cache, refresh expired cache in background. The first list after node startup may therefore lack inferred launchers.
 
+## Running-session speed
+
+The web model panel offers Standard and Fast in eligible Claude Code terminal sessions on supported versions and
+models. The node only offers Fast for models that can keep their current identity when Fast is enabled. Claude Code
+checks account and provider eligibility when it handles `/fast on` or `/fast off`. It may save the Fast preference
+for future sessions under its own settings. The node never writes that preference itself.
+
+The node checks the input box and waits for Claude Code to record its response. The selection shows the last
+acknowledged setting, or the last recorded usage speed if there has been no settings acknowledgment. An account
+limit can still make a turn run at standard speed.
+
 ## Default thinking effort
 
 **Settings › Claude Code › Thinking effort** changes the machine's `settings.json` default. It offers `auto`, `low`, `medium`, `high`, and `xhigh`. Choosing `auto` removes `effortLevel`, letting the model choose its default. `max` is available through the session's effort control or `/effort max`; it cannot be stored as an effective `settings.json` default.

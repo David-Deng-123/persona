@@ -1239,7 +1239,7 @@ func (n *Node) handleMethod(ctx context.Context, method string, params json.RawM
 		return n.restoreModel(ctx, p.SessionID)
 	}
 	if method == "session.speed" {
-		return ok(n.setCodexSpeed(ctx, p.SessionID, p.ServiceTier))
+		return ok(n.setSessionSpeed(ctx, p.SessionID, p.ServiceTier))
 	}
 	if method == "session.ultracode" {
 		return ok(n.setUltracode(ctx, p.SessionID, p.Ultracode, p.DismissLost))

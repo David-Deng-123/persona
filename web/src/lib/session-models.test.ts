@@ -97,9 +97,9 @@ describe("the providers of an Agent's chat", () => {
     expect(own.typable).toBeUndefined();
     expect(state.recommended).toEqual([]);
     expect(state.busy).toBeUndefined();
-    expect(state.current).toEqual({ provider: "cx", model: "gpt-5.5", effort: "high", fast: true });
-    expect(own.models![0]).toMatchObject({ id: "gpt-5.5", efforts: ["low", "medium", "high"], fast: true });
-    expect(own.models![1].fast).toBeUndefined();
+    expect(state.current).toEqual({ provider: "cx", model: "gpt-5.5", effort: "high", speed: "fast" });
+    expect(own.models![0]).toMatchObject({ id: "gpt-5.5", efforts: ["low", "medium", "high"], speeds: [{ id: "standard" }, { id: "fast" }] });
+    expect(own.models![1].speeds).toBeUndefined();
     expect(providers.find((p) => p.id === "gateway")!.unavailable).toBe(t("chat-modelpanel.other_engine", { from: "Codex", to: "Claude Code" }));
   });
 
@@ -151,10 +151,10 @@ describe("what a pick sends", () => {
   });
 
   it("a Codex thread: its effort and its speed, Standard back from Fast", () => {
-    expect(pickPlan(codex(), { provider: "cx", model: "gpt-5.5", effort: "low", fast: true }, () => codexList)).toEqual([{ effort: "low" }, { service_tier: "priority" }]);
-    expect(pickPlan(codex({ service_tier: "priority" }), { provider: "cx", model: "gpt-5.5", fast: false }, () => codexList)).toEqual([{ service_tier: "default" }]);
-    // a saved Standard setup has no `fast` (cleanSetup drops false): picking it turns Fast off
-    expect(pickPlan(codex({ service_tier: "priority" }), { provider: "cx", model: "gpt-5.5" }, () => codexList)).toEqual([{ service_tier: "default" }]);
+    expect(pickPlan(codex(), { provider: "cx", model: "gpt-5.5", effort: "low", speed: "fast" }, () => codexList)).toEqual([{ effort: "low" }, { service_tier: "priority" }]);
+    expect(pickPlan(codex({ service_tier: "priority" }), { provider: "cx", model: "gpt-5.5", speed: "standard" }, () => codexList)).toEqual([{ service_tier: "default" }]);
+    // An ordinary model pick leaves the current speed alone.
+    expect(pickPlan(codex({ service_tier: "priority" }), { provider: "cx", model: "gpt-5.5" }, () => codexList)).toEqual([]);
   });
 
   it("an Antigravity variant brings its own thinking level", () => {
@@ -176,7 +176,7 @@ describe("what the pill says", () => {
   it("the list's name for the model once read, a short id before; the launcher, engine, effort and speed", () => {
     expect(pillView(session(), { list: claudeList })).toEqual({ engine: "claude", provider: "gateway", model: "Opus 5.5", effort: "high", loading: false, failed: false });
     expect(pillView(session(), {}).model).toBe("opus 5.5");
-    expect(pillView(codex({ service_tier: "priority" }), {})).toMatchObject({ engine: "codex", provider: "cx", model: "5.5", fast: true });
+    expect(pillView(codex({ service_tier: "priority" }), {})).toMatchObject({ engine: "codex", provider: "cx", model: "5.5", speed: "fast" });
     expect(pillView(session({ launcher: undefined, agent: undefined }), {})).toMatchObject({ engine: "claude", provider: "claude" });
   });
 
@@ -407,15 +407,15 @@ describe("reading the lists", () => {
 describe("a speed change", () => {
   const tiers = [{ id: "default", name: "Standard" }, { id: "priority", name: "Fast" }];
   it("is sent only where the thread has Fast and only when it changes", () => {
-    expect(speedStep(session({ service_tiers: tiers }), true)).toEqual({ service_tier: "priority" });
-    expect(speedStep(session({ service_tiers: tiers }), false)).toBeUndefined();
-    expect(speedStep(session({ service_tiers: tiers, service_tier: "priority" }), false)).toEqual({ service_tier: "default" });
-    expect(speedStep(session({ service_tiers: tiers, service_tier: "priority" }), true)).toBeUndefined();
-    expect(speedStep(session(), true)).toBeUndefined();
+    expect(speedStep(session({ service_tiers: tiers }), "fast")).toEqual({ service_tier: "priority" });
+    expect(speedStep(session({ service_tiers: tiers, service_tier: "default" }), "standard")).toBeUndefined();
+    expect(speedStep(session({ service_tiers: tiers, service_tier: "priority" }), "standard")).toEqual({ service_tier: "default" });
+    expect(speedStep(session({ service_tiers: tiers, service_tier: "priority" }), "fast")).toBeUndefined();
+    expect(speedStep(session(), "fast")).toBeUndefined();
     expect(speedStep(session({ service_tiers: tiers }), undefined)).toBeUndefined();
     // the flyout's switch goes whatever the session says (its speed arrives only with the push)
-    expect(speedStep(session({ service_tiers: tiers }), false, true)).toEqual({ service_tier: "default" });
-    expect(speedStep(session(), false, true)).toBeUndefined();
+    expect(speedStep(session({ service_tiers: tiers }), "standard", true)).toEqual({ service_tier: "default" });
+    expect(speedStep(session(), "standard", true)).toBeUndefined();
   });
 });
 
