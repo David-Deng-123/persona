@@ -58,6 +58,7 @@ let failList = "";
 let failLaunchersOf = "";
 let workspaceRows: HostWorkspace[] = [];
 let tiers: PickerTier[] = [];
+let wideScreen = false;
 const asked: string[] = [];
 
 let host: HTMLDivElement;
@@ -92,12 +93,18 @@ beforeEach(() => {
   failLaunchersOf = "";
   workspaceRows = [];
   tiers = [];
+  wideScreen = false;
   asked.length = 0;
   localStorage.clear();
   localStorage.setItem("new.machine", "mac");
   localStorage.setItem("new.cwd.mac", "/code/app");
   localStorage.setItem("new.cwd.studio", "/code/studio-app");
-  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  vi.stubGlobal("matchMedia", (q: string) => ({
+    get matches() { return wideScreen && (q === "(any-pointer: fine)" || q === "(min-width: 768px)"); },
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+  }));
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     asked.push(url);
@@ -128,12 +135,12 @@ afterEach(() => {
 });
 
 async function open() {
-  act(() => root.render(<NewAgent open onClose={() => {}} />));
+  await act(async () => root.render(<NewAgent open onClose={() => {}} />));
   await flush();
 }
 
 async function openPanel() {
-  act(() => pill().click());
+  await act(async () => pill().click());
   await act(async () => vi.dynamicImportSettled());
   await flush();
   expect(panel()).not.toBeNull();
@@ -167,11 +174,11 @@ const start = () => act(() => button("启动").click());
 describe("New agent's model panel (#5104)", () => {
   it("left alone, follows Model settings: nothing of the model is sent, the pill names what they run with the engine's mark", async () => {
     await open();
-    expect(pill().title).toBe("Claude Code · Opus 5.5 · claude · 高");
+    expect(pill().title).toBe("Claude Code · Opus 5.5 · claude · High");
     expect(pill().querySelector("[data-pill-engine]")!.getAttribute("data-pill-engine")).toBe("claude");
     await openPanel();
     expect(follow().getAttribute("aria-pressed")).toBe("true");
-    expect(follow().textContent).toBe("跟随模型配置claude · Opus 5.5 · 高");
+    expect(follow().textContent).toBe("跟随模型配置claude · Opus 5.5 · High");
     // the row lit is the launcher's Default row, named after the model the settings run
     const lit = row("model:claude\ndefault");
     expect(lit.getAttribute("aria-pressed")).toBe("true");
@@ -187,19 +194,21 @@ describe("New agent's model panel (#5104)", () => {
   it("a model row sets the launcher, the model and the effort it shows, and unchecks Follow Model settings", async () => {
     await open();
     await openPanel();
-    // the row says the effort a pick applies: the one running now, which this model takes
-    expect(row("model:claude\nsonnet").querySelector("[data-row-setup]")!.textContent).toBe("高");
+    // the row says the effort a pick applies: none (the model's own), not the one running now (#12315)
+    expect(row("model:claude\nsonnet").querySelector("[data-row-setup]")!.textContent).toBe("");
     act(() => row("model:claude\nsonnet").click());
     await flush();
     expect(panel()).toBeNull();
-    expect(pill().title).toBe("Claude Code · Sonnet 5 · claude · 高");
+    // nothing sent for the effort: the pill says the one Model settings starts it with
+    expect(pill().title).toBe("Claude Code · Sonnet 5 · claude · High");
     await openPanel();
     expect(follow().getAttribute("aria-pressed")).toBe("false");
     expect(row("model:claude\nsonnet").getAttribute("aria-pressed")).toBe("true");
     expect(row("model:claude\ndefault").getAttribute("aria-pressed")).toBe("false");
     act(() => pill().click());
     start();
-    expect(launched[0]).toMatchObject({ launcher: "claude", model: "sonnet", effort: "high" });
+    expect(launched[0]).toMatchObject({ launcher: "claude", model: "sonnet" });
+    expect(launched[0].effort).toBeUndefined();
   });
 
   it("Follow Model settings goes back to the default after a pick", async () => {
@@ -210,7 +219,7 @@ describe("New agent's model panel (#5104)", () => {
     act(() => follow().click());
     await flush();
     expect(panel()).toBeNull();
-    expect(pill().title).toBe("Claude Code · Opus 5.5 · claude · 高");
+    expect(pill().title).toBe("Claude Code · Opus 5.5 · claude · High");
     start();
     expect(launched[0]?.launcher).toBe("");
     expect(launched[0]?.model).toBeUndefined();
@@ -222,13 +231,14 @@ describe("New agent's model panel (#5104)", () => {
     await pick("model:relay\nglm-5");
     await openPanel();
     await customize("model:relay\nglm-5");
-    expect(flyout()!.querySelector('[role="slider"]')!.getAttribute("aria-valuetext")).toBe("高");
+    expect(flyout()!.querySelector('[role="slider"]')!.getAttribute("aria-valuetext")).toBe("模型默认");
+    // from none, ← lands on the lowest
     await slide("ArrowLeft");
-    expect(pill().title).toBe("Claude Code · GLM 5 · relay · 中");
+    expect(pill().title).toBe("Claude Code · GLM 5 · relay · Low");
     expect(flyout()!.textContent).toContain("已自定义");
     act(() => pill().click());
     start();
-    expect(launched[0]).toMatchObject({ launcher: "relay", model: "glm-5", effort: "medium" });
+    expect(launched[0]).toMatchObject({ launcher: "relay", model: "glm-5", effort: "low" });
   });
 
   it("Reset to recommended in the flyout clears the effort again", async () => {
@@ -361,10 +371,11 @@ describe("New agent's model panel (#5104)", () => {
     await pick("model:relay\nglm-5");
     act(() => machineChip("Studio").click());
     await flush();
-    expect(pill().title).toBe("Claude Code · GLM 5 · relay · 高");
+    expect(pill().title).toBe("Claude Code · GLM 5 · relay");
     expect(q("[data-testid=new-agent-dropped]")).toBeNull();
     start();
-    expect(launched[0]).toMatchObject({ machineId: "studio", cwd: "/code/studio-app", launcher: "relay", model: "glm-5", effort: "high" });
+    expect(launched[0]).toMatchObject({ machineId: "studio", cwd: "/code/studio-app", launcher: "relay", model: "glm-5" });
+    expect(launched[0].effort).toBeUndefined();
   });
 
   it("falls back to the default on a computer without the picked launcher, and says so under the box", async () => {
@@ -374,7 +385,7 @@ describe("New agent's model panel (#5104)", () => {
     act(() => machineChip("Studio").click());
     await flush();
     expect(q("[data-testid=new-agent-dropped]")!.textContent).toBe("Studio 上用不了 only-mac，已换回这台电脑的默认设置。");
-    expect(pill().title).toBe("Claude Code · Opus 5.5 · claude · 高");
+    expect(pill().title).toBe("Claude Code · Opus 5.5 · claude · High");
     // a pick on this computer takes the note away
     await pick("model:claude\nsonnet");
     expect(q("[data-testid=new-agent-dropped]")).toBeNull();
@@ -392,7 +403,7 @@ describe("New agent's model panel (#5104)", () => {
     act(() => machineChip("Studio").click());
     act(() => machineChip("Mini").click());
     await flush();
-    expect(pill().title).toBe("Claude Code · GLM 5 · relay · 高");
+    expect(pill().title).toBe("Claude Code · GLM 5 · relay");
     start();
     expect(launched[0]).toMatchObject({ machineId: "mini", launcher: "relay", model: "glm-5" });
   });
@@ -454,5 +465,118 @@ describe("New agent's model panel (#5104)", () => {
     start();
     expect(launched[0]).toMatchObject({ machineId: "mac", launcher: "" });
     expect(launched[0].model).toBeUndefined();
+  });
+});
+
+describe("Codex reasoning effort in New Agent (#13764)", () => {
+  const codexCatalog = {
+    agent: "codex",
+    models: [
+      { id: "gpt-5.5", name: "GPT-5.5", default: true, efforts: ["minimal", "low", "medium", "high", "xhigh"], default_effort: "medium" },
+      { id: "gpt-5.5-mini", name: "GPT-5.5 Mini", efforts: ["low", "high"], default_effort: "low" },
+      { id: "gpt-5.5-plain", name: "GPT-5.5 Plain" },
+    ],
+  };
+
+  afterEach(() => {
+    LISTS.codex = { agent: "codex", models: [{ id: "default", name: "Default", default: true }, { id: "gpt-5.5", name: "GPT-5.5" }] };
+  });
+
+  it("keeps Codex effort unset by default and never leaks Claude permission modes", async () => {
+    LISTS.codex = codexCatalog;
+    localStorage.setItem("new.mode.mac", "plan");
+    await open();
+    await pick("model:codex\ngpt-5.5");
+    expect(pill().title).toBe("Codex · 5.5 · codex");
+    expect(radio("计划模式")).toBeUndefined();
+    await openPanel();
+    await customize("model:codex\ngpt-5.5");
+    expect(flyout()!.querySelector('[role="slider"]')!.getAttribute("aria-valuetext")).toBe("模型默认");
+    act(() => pill().click());
+    start();
+    expect(launched).toHaveLength(1);
+    expect(launched[0]).toMatchObject({ launcher: "codex", agentType: "codex", inlinePrompt: true });
+    expect(launched[0].model).toBeUndefined();
+    expect(launched[0].effort).toBeUndefined();
+    expect(launched[0].permissionMode).toBeUndefined();
+  });
+
+  it.each([false, true])("offers only reported Codex levels, sends explicit picks, and clears on Reset (reset=%s)", async (reset) => {
+    LISTS.codex = codexCatalog;
+    await open();
+    await pick("model:codex\ngpt-5.5-mini");
+    await openPanel();
+    await customize("model:codex\ngpt-5.5-mini");
+    const slider = flyout()!.querySelector('[role="slider"]')!;
+    expect(slider.getAttribute("aria-valuemin")).toBe("0");
+    expect(slider.getAttribute("aria-valuemax")).toBe("1");
+    expect(slider.getAttribute("aria-valuetext")).toBe("模型默认");
+    // End lands on the highest reported level ("high"), never an unreported level like "max".
+    await slide("End");
+    expect(pill().title).toBe("Codex · GPT-5.5 Mini · codex · High");
+    if (reset) {
+      act(() => button("恢复推荐").click());
+      await flush();
+      expect(pill().title).toBe("Codex · GPT-5.5 Mini · codex");
+      expect(flyout()!.querySelector('[role="slider"]')!.getAttribute("aria-valuetext")).toBe("模型默认");
+    }
+    act(() => pill().click());
+    start();
+    expect(launched).toHaveLength(1);
+    expect(launched[0]).toMatchObject({ launcher: "codex", agentType: "codex", inlinePrompt: true, model: "gpt-5.5-mini" });
+    expect(launched[0].effort).toBe(reset ? undefined : "high");
+  });
+
+  it("omits effort controls for Codex models with no reported levels and for typed Codex models", async () => {
+    LISTS.codex = codexCatalog;
+    await open();
+    await pick("model:codex\ngpt-5.5-plain");
+    await openPanel();
+    await customize("model:codex\ngpt-5.5-plain");
+    expect(flyout()!.querySelector('[role="slider"]')).toBeNull();
+    // Typing an unlisted Codex model also offers no effort slider.
+    const search = panel()!.querySelector<HTMLInputElement>("input")!;
+    type(search, "acme/codex-custom");
+    act(() => row("typed:codex\nacme/codex-custom").click());
+    await flush();
+    await openPanel();
+    await customize("model:codex\nacme/codex-custom");
+    expect(flyout()!.querySelector('[role="slider"]')).toBeNull();
+    act(() => pill().click());
+    start();
+    expect(launched[0]).toMatchObject({ launcher: "codex", model: "acme/codex-custom" });
+    expect(launched[0].effort).toBeUndefined();
+  });
+
+  it("shows only reported Codex levels in three-column mode and sends an explicit selection including the catalog default", async () => {
+    LISTS.codex = codexCatalog;
+    wideScreen = true;
+    await open();
+    await openPanel();
+    act(() => document.body.querySelector<HTMLButtonElement>('[data-panel-side="codex"]')!.click());
+    await flush();
+    act(() => row("model:codex\ngpt-5.5").click());
+    await flush();
+    const levelButtons = [...document.body.querySelectorAll<HTMLButtonElement>("[data-panel-level]")];
+    expect(levelButtons.map((b) => b.dataset.panelLevel)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+    // Unset: no level starts checked even though the catalog reports default_effort: "medium".
+    expect(levelButtons.some((b) => b.getAttribute("aria-pressed") === "true")).toBe(false);
+    // Explicitly selecting "medium" sends effort: "medium" to override Codex's config.toml.
+    act(() => levelButtons.find((b) => b.dataset.panelLevel === "medium")!.click());
+    await flush();
+    expect(pill().title).toBe("Codex · 5.5 · codex · Medium");
+    act(() => pill().click());
+    start();
+    expect(launched[0]).toMatchObject({ launcher: "codex", agentType: "codex", inlinePrompt: true, effort: "medium" });
+  });
+
+  it("preserves a Codex preset's reported effort while its model catalog loads", async () => {
+    LISTS.codex = codexCatalog;
+    tiers = [{ name: "codex-deep", launcher: "codex", model: "gpt-5.5-mini", effort: "high" }];
+    await open();
+    await pick("preset:codex-deep");
+    expect(pill().title).toBe("Codex · GPT-5.5 Mini · codex · High");
+    start();
+    expect(launched[0]).toMatchObject({ launcher: "codex", agentType: "codex", inlinePrompt: true, model: "gpt-5.5-mini", effort: "high" });
   });
 });

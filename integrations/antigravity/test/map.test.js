@@ -7,6 +7,7 @@ import { MCP_SERVER_NAMES } from '../../runtime-sdk/lib/compat.js'
 import { page } from '../../runtime-sdk/index.js'
 import {
   agyModeToPersona,
+  cleanAssistantText,
   cleanGenericOutput,
   cleanUserText,
   mapToolCall,
@@ -390,6 +391,65 @@ describe('antigravity transcript and tool mapping', () => {
     assert.equal(photoOnly.items[0].text, '<attached_images>\n/tmp/only-photo.png\n</attached_images>')
   })
 
+  it('normalizes local file:// Markdown links and images in assistant replies only', () => {
+    const cases = [
+      ['unix file link', 'See [notes.md](file:///work/repo/notes.md).', 'See [notes.md](/work/repo/notes.md).'],
+      ['line fragment', 'Check [app.go](file:///work/repo/app.go#L10-L20).', 'Check [app.go](/work/repo/app.go#L10-L20).'],
+      ['localhost authority', '[doc](file://localhost/work/repo/doc.md)', '[doc](/work/repo/doc.md)'],
+      ['uppercase scheme and percent spaces', '[a](FILE:///work/My%20Notes/a.md)', '[a](/work/My%20Notes/a.md)'],
+      ['angle-bracket destination', '[a](<file:///work/My Notes/a.md> "title")', '[a](</work/My Notes/a.md> "title")'],
+      ['balanced parens and title', '[p](file:///work/photo(1).png "shot")', '[p](/work/photo(1).png "shot")'],
+      ['image destination', '![chart](file:///work/repo/chart.png)', '![chart](/work/repo/chart.png)'],
+      ['windows drive', '[win](file:///C:/work/notes.md#L5)', '[win](C:/work/notes.md#L5)'],
+      ['windows encoded colon', '[win](file:///c%3A/work/notes.md)', '[win](c:/work/notes.md)'],
+      ['reference definition', '[ref]: file:///work/repo/notes.txt "Ref"', '[ref]: /work/repo/notes.txt "Ref"'],
+      ['list continuation', '- item\n    [notes](file:///work/notes.md)', '- item\n    [notes](/work/notes.md)'],
+      ['inline code untouched', 'Use `[notes](file:///work/notes.md)` literally.', 'Use `[notes](file:///work/notes.md)` literally.'],
+      ['fenced code untouched', '```md\n[notes](file:///work/notes.md)\n```\n[live](file:///work/live.md)', '```md\n[notes](file:///work/notes.md)\n```\n[live](/work/live.md)'],
+      ['indented code untouched', 'Example:\n\n    [notes](file:///work/notes.md)\n\n[live](file:///work/live.md)', 'Example:\n\n    [notes](file:///work/notes.md)\n\n[live](/work/live.md)'],
+      ['remote host untouched', '[r](file://other-host/share/notes.md)', '[r](file://other-host/share/notes.md)'],
+      ['unc double slash untouched', '[u](file:////server/share/notes.md)', '[u](file:////server/share/notes.md)'],
+      ['percent-encoded double slash untouched', '[u](file:///%2fserver/share/notes.md)', '[u](file:///%2fserver/share/notes.md)'],
+      ['percent-encoded double slash with invalid utf8 untouched', '[u](file:///%2f%ffserver/share/notes.md)', '[u](file:///%2f%ffserver/share/notes.md)'],
+      ['hub route untouched', '[api](file:///api/v1/sessions)', '[api](file:///api/v1/sessions)'],
+      ['dot-segment hub route untouched', '[api](file:///./api/v1/sessions)', '[api](file:///./api/v1/sessions)'],
+      ['parent-segment hub route untouched', '[api](file:///work/../api/v1/sessions)', '[api](file:///work/../api/v1/sessions)'],
+      ['duplicate-slash hub route untouched', '[api](file:///api//v1/sessions)', '[api](file:///api//v1/sessions)'],
+      ['percent-encoded hub route with bad percent untouched', '[api](file:///%61pi/v1/sessions%ZZ)', '[api](file:///%61pi/v1/sessions%ZZ)'],
+      ['query string untouched', '[q](file:///work/notes.md?x=1)', '[q](file:///work/notes.md?x=1)'],
+      ['nul byte untouched', '[n](file:///work/notes%00.md)', '[n](file:///work/notes%00.md)'],
+      ['percent-encoded control char untouched', '[c](file:///work/notes%0a.md)', '[c](file:///work/notes%0a.md)'],
+      ['percent literal in filename', '[p](file:///work/100%25_done.md)', '[p](/work/100%25_done.md)'],
+      ['percent literal before 00 in filename', '[p](file:///work/%2500_note.md)', '[p](/work/%2500_note.md)'],
+      ['percent literal before 2f in leading segment', '[p](file:///%252fdir/note.md)', '[p](/%252fdir/note.md)'],
+      ['relative file scheme untouched', '[rel](file:notes.md)', '[rel](file:notes.md)'],
+      ['escaped bracket untouched', 'text \\](file:///work/notes.md)', 'text \\](file:///work/notes.md)'],
+      ['partial streaming link untouched', 'See [notes](file:///work/no', 'See [notes](file:///work/no'],
+    ]
+    for (const [name, input, expected] of cases) {
+      assert.equal(cleanAssistantText(input), expected, name)
+    }
+
+    const { items, lastText } = stepsToItems([
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'Open [u](file:///work/u.md)' },
+      {
+        step_index: 1,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        thinking: 'Checking [t](file:///work/t.md)',
+        content: 'Opened [notes.md](file:///work/notes.md#L12) and ![img](file:///work/img.png).',
+        tool_calls: [{ name: 'view_file', args: { AbsolutePath: '/work/notes.md' } }],
+      },
+      { step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: '[out](file:///work/out.md)' },
+    ])
+    assert.equal(items[0].text, 'Open [u](file:///work/u.md)')
+    assert.equal(items[1].text, 'Checking [t](file:///work/t.md)')
+    assert.equal(items[2].text, 'Opened [notes.md](/work/notes.md#L12) and ![img](/work/img.png).')
+    assert.equal(items[4].text, '[out](file:///work/out.md)')
+    assert.equal(lastText, 'Opened [notes.md](/work/notes.md#L12) and ![img](/work/img.png).')
+  })
+
   it('maps modes between Persona and Antigravity ACP', () => {
     assert.equal(personaModeToAgy('plan'), 'plan')
     assert.equal(personaModeToAgy('acceptEdits'), 'accept-edits')
@@ -398,6 +458,84 @@ describe('antigravity transcript and tool mapping', () => {
     assert.equal(personaModeToAgy('default'), 'default')
     assert.equal(agyModeToPersona('accept-edits'), 'acceptEdits')
     assert.equal(cleanGenericOutput('Created At: 2026\nOutput:\nhello'), 'hello')
+  })
+
+  it('strips Antigravity RFC3339 Created At / Completed At headers from GENERIC tool results without altering ordinary text', () => {
+    const receipt = '{"level":"triage","summary":"All checks quiet.","visibility":"silent"}'
+    const cases = [
+      [
+        '4-line duplicate RFC3339 MCP header + silent receipt',
+        'Created At: 2026-11-23T16:10:40+08:00\nCompleted At: 2026-11-23T16:10:44+08:00\nCreated At: 2026-11-23T16:10:40+08:00\nCompleted At: 2026-11-23T16:10:44+08:00\n' + receipt,
+        receipt,
+      ],
+      [
+        '2-line fractional UTC header with CRLF',
+        'Created At: 2026-11-23T09:10:40.125Z\r\nCompleted At: 2026-11-23T09:10:44.500Z\r\n{"visibility":"user"}',
+        '{"visibility":"user"}',
+      ],
+      [
+        '2-line header + immediate Output marker',
+        'Created At: 2026-11-23T09:10:40Z\nCompleted At: 2026-11-23T09:10:44Z\nOutput:\ntotal 0\n',
+        'total 0\n',
+      ],
+      [
+        '2-line header + body containing later Output marker keeps body intact',
+        'Created At: 2026-11-23T09:10:40Z\nCompleted At: 2026-11-23T09:10:44Z\nShowing lines 1-3\nOutput:\nkeep me',
+        'Showing lines 1-3\nOutput:\nkeep me',
+      ],
+      [
+        '2-line header followed by ordinary Created At text keeps ordinary text',
+        'Created At: 2026-11-23T16:10:40+08:00\nCompleted At: 2026-11-23T16:10:44+08:00\nCreated At: yesterday\nNotes',
+        'Created At: yesterday\nNotes',
+      ],
+      [
+        'legacy single Created At + Output marker',
+        'Created At: 2026-11-05T10:00:02Z\nOutput:\ntotal 0\n',
+        'total 0\n',
+      ],
+      [
+        'ordinary Created At date-only text is untouched',
+        'Created At: 2026-11-23\nCompleted At: 2026-11-23\nHello',
+        'Created At: 2026-11-23\nCompleted At: 2026-11-23\nHello',
+      ],
+      [
+        'ordinary single Created At RFC3339 line without Completed At is untouched',
+        'Created At: 2026-11-23T16:10:40+08:00\nTitle: Weekly notes',
+        'Created At: 2026-11-23T16:10:40+08:00\nTitle: Weekly notes',
+      ],
+      [
+        'non-leading Created At / Completed At block is untouched',
+        'Summary:\nCreated At: 2026-11-23T16:10:40+08:00\nCompleted At: 2026-11-23T16:10:44+08:00\nBody',
+        'Summary:\nCreated At: 2026-11-23T16:10:40+08:00\nCompleted At: 2026-11-23T16:10:44+08:00\nBody',
+      ],
+      [
+        'invalid Completed At timestamp is untouched',
+        'Created At: 2026-11-23T16:10:40+08:00\nCompleted At: soon\n' + receipt,
+        'Created At: 2026-11-23T16:10:40+08:00\nCompleted At: soon\n' + receipt,
+      ],
+    ]
+    for (const [name, input, expected] of cases) {
+      assert.equal(cleanGenericOutput(input), expected, name)
+    }
+
+    const { items } = stepsToItems([
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-23T08:10:39Z', content: 'Supervision check' },
+      {
+        step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-23T08:10:40Z',
+        tool_calls: [{ name: 'mcp_persona_supervision_finish', args: { visibility: 'silent', summary: 'All checks quiet.' } }],
+      },
+      {
+        step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: '2026-11-23T08:10:44Z',
+        content: 'Created At: 2026-11-23T16:10:40+08:00\nCompleted At: 2026-11-23T16:10:44+08:00\nCreated At: 2026-11-23T16:10:40+08:00\nCompleted At: 2026-11-23T16:10:44+08:00\n' + receipt,
+      },
+      { step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-23T08:10:45Z', content: 'OK' },
+    ])
+    const use = items.find((it) => it.kind === 'tool_use')
+    const res = items.find((it) => it.kind === 'tool_result')
+    assert.equal(use.tool_name, 'mcp__persona__supervision_finish')
+    assert.equal(res.tool_use_id, use.tool_use_id)
+    assert.equal(res.text, receipt)
+    assert.deepEqual(JSON.parse(res.text), { level: 'triage', summary: 'All checks quiet.', visibility: 'silent' })
   })
 
   it('attaches per-step token usage and model in projected order and preserves usage across checkpoints and prefix cache reuse', () => {
@@ -454,6 +592,10 @@ describe('antigravity transcript and tool mapping', () => {
       assert.deepEqual(seq7.usage, [{
         model: 'gemini-4-neon-high', in: 12000, out: 220, cache_read: 3000, cache_write: 500,
       }])
+      const switched = [...extended, { step_index: 7, type: 'PLANNER_RESPONSE', model: 'custom', input_tokens: 8000 }]
+      const next = stepsToItems(switched, { full, cacheKey: `usage-prefix-${full}`, immutablePrefix: switched.length })
+      assert.equal(next.usage.contextTokens, 8000)
+      assert.equal(next.usage.contextWindow, 0)
     }
   })
 })

@@ -70,6 +70,13 @@ func (s *Service) logicalCall(ctx context.Context, machine, method string, raw j
 	if ctx.Value(logicalSourceKey{}) != nil || ctx.Value(historySourceKey{}) != nil {
 		return nil, false, nil
 	}
+	if method == DeviceSessionGet {
+		// One session's row is the manager's to answer from its projected list (logicalDevices.Session: the public
+		// root shows its active segment, a private segment is not found), never a node's: a node knows no
+		// session.get, and the fleet hides the active segment's physical id, so rewriting to it made every
+		// switched conversation look gone and no further switch could start.
+		return nil, false, nil
+	}
 	st, ok := s.store().(logicalConversationStore)
 	if !ok {
 		return nil, false, nil
@@ -184,7 +191,8 @@ func (s *Service) logicalCall(ctx context.Context, machine, method string, raw j
 			}
 			// Queues are used throughout a switch, including its first target turn.
 			pending := false
-			if queue, ok := s.store().(logicalSwitchStore); ok {
+			queue, queued := s.store().(logicalSwitchStore)
+			if queued {
 				var err error
 				pending, err = queue.ConversationInputPending(ctx, machine, id)
 				if err != nil {
@@ -200,6 +208,15 @@ func (s *Service) logicalCall(ctx context.Context, machine, method string, raw j
 				}
 			}
 			needsQueue := current.Switch != nil || pending
+			if _, external := ctx.Value(logicalTransportKey{}).(devicewire.NodeCall); !needsQueue && queued && current.Epoch > 1 && (client != "" || !external) {
+				// The handoff an idle acceptance kept goes with this input (#14488): the queue attaches it once. A node's
+				// own send without a message id cannot be queued, and goes on without it as before.
+				handoff, err := queue.ConversationPendingHandoff(ctx, machine, id, active.ID)
+				if err != nil {
+					return err
+				}
+				needsQueue = len(handoff) > 0
+			}
 			if client == "" && needsQueue {
 				if _, external := ctx.Value(logicalTransportKey{}).(devicewire.NodeCall); external {
 					return logicalRefusal(ctx, "message_id_required")
@@ -384,7 +401,8 @@ func (s *Service) logicalSendModel(ctx context.Context, machine, session string,
 	}
 	c, err := st.LogicalConversation(ctx, machine, session)
 	if err != nil {
-		return true, err
+		s.logf("load logical conversation model (%s/%s): %v", machine, short(session), err)
+		return true, i18n.Err("assistant-model_pick.err_unreadable")
 	}
 	if c == nil || c.Epoch == 1 {
 		return false, nil

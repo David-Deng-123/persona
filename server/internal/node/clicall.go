@@ -154,8 +154,9 @@ func (n *Node) mcpSession(c net.Conn, req sockRequest) (string, bool, *runtimeCo
 // Any other caller is not the assistant. The runtime is the one that vouches (nil: a process of this node's).
 func (n *Node) mcpAssistantOf(pid int, err error, parent func(int) (int, error), session string) (string, *runtimeConn, bool) {
 	if errors.Is(err, errNoPeer) {
-		if n.assistantSession(session) {
-			return session, nil, true
+		canonical := n.canonicalAssistantSession(session)
+		if n.assistantSession(canonical) {
+			return canonical, nil, true
 		}
 		if h, _, _ := n.runtimes.belongs(session); n.runtimeAssistantChat(h, session) {
 			return session, h, true
@@ -226,6 +227,9 @@ type assistantPrepareState struct {
 	connectors []string
 	workGuide  bool
 	clis       map[string]string // command name → connector id
+	// trackKind is the kind of the directory's track as the manager last said it (assistant.prepare track_kind):
+	// its processes' PERSONA_TRACK_KIND; "" from a manager that does not say it.
+	trackKind string
 }
 
 // assistantPrepareDir gives prepare and running sessions the same key, including symlinked data directories.
@@ -250,7 +254,7 @@ func (n *Node) mayCall(cwd, tool string) bool {
 func (n *Node) cliCall(ctx context.Context, c net.Conn, req sockRequest) proto.ToolResult {
 	if slices.Contains(callerTools, req.Name) {
 		session, assistant := n.cliAgentCaller(req), false
-		if assistantwire.IsA2ATool(req.Name) {
+		if assistantwire.IsA2ATool(req.Name) || req.Name == "secret_store" || strings.HasPrefix(req.Name, "resource_") {
 			session, assistant = n.a2aCaller(c, req, session)
 			if session == "" {
 				return proto.ErrorResult(proto.ToolErrorUnavailable, "A2A requires a verified local session", 0)
@@ -261,10 +265,13 @@ func (n *Node) cliCall(ctx context.Context, c net.Conn, req sockRequest) proto.T
 				return proto.ErrorResult(proto.ToolErrorUnavailable, "Persona hub error: not connected", 0)
 			}
 			var res proto.ToolResult
-			if err := n.peer.Call(ctx, "mcp.call", map[string]any{"name": req.Name, "args": req.Args, "session_id": session,
-				"assistant": assistant, "guest": n.guestOf(session) != nil}, &res); err != nil {
+			params := map[string]any{"name": req.Name, "args": req.Args, "session_id": session,
+				"assistant": assistant, "guest": n.guestOf(session) != nil}
+			n.putMCPCallerCwd(c, params, session)
+			if err := n.peer.Call(ctx, "mcp.call", params, &res); err != nil {
 				return proto.ErrorResult(proto.ToolErrorUnavailable, "Persona hub error: "+err.Error(), 0)
 			}
+			n.toolViews.stripResult(session, req.Name, &res)
 			return res
 		}
 		if req.Name == "task_spawn" {
@@ -302,6 +309,7 @@ func (n *Node) cliCall(ctx context.Context, c net.Conn, req sockRequest) proto.T
 	}
 	var res proto.ToolResult
 	params := map[string]any{"name": req.Name, "args": req.Args, "session_id": session, "assistant": true}
+	n.putMCPCallerCwd(c, params, session)
 	n.putSourcePermission(c, params, session, req.Name, req.Args)
 	if origin := n.assistantOrigin(session); origin != "" {
 		params["origin"] = origin
@@ -309,6 +317,7 @@ func (n *Node) cliCall(ctx context.Context, c net.Conn, req sockRequest) proto.T
 	if err := n.peer.Call(ctx, "mcp.call", params, &res); err != nil {
 		return proto.ErrorResult(proto.ToolErrorUnavailable, "Persona hub error: "+err.Error(), 0)
 	}
+	n.toolViews.stripResult(session, req.Name, &res)
 	return res
 }
 

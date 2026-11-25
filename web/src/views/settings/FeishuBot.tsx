@@ -21,7 +21,7 @@ import { Icon, type IconName } from "../../ui/icons";
 import { Group, Pill, Row, Switch, settingsInputClass } from "./SettingsParts";
 import { SignInSteps } from "./HubConnector";
 
-const SOURCE_REPORT_DELAYS = [0, 1, 2, 5, 10, 15, 30, 60];
+export const SOURCE_REPORT_DELAYS = [0, 1, 2, 5, 10, 15, 30, 60];
 
 const controlClass = "h-8 rounded-control bg-field px-2.5 text-[12.5px] text-ink shadow-inset-field outline-none focus:shadow-[inset_0_0_0_1px_var(--accent)]";
 const dotClass = { green: "bg-green", red: "bg-red", orange: "bg-orange" } as const;
@@ -57,7 +57,7 @@ function combinedLarkState(bot: FeishuBotStatus | null, loading: boolean, c: Hub
   return { label: botSummary(bot), tone: botTone(bot) };
 }
 
-const FEATURES: { key: keyof BotFeatures; icon: IconName; title: string; detail: string }[] = [
+export const FEATURES: { key: keyof BotFeatures; icon: IconName; title: string; detail: string }[] = [
   { key: "main", icon: "spark", title: t("settings-feishubot.feature_main_title"), detail: t("settings-feishubot.feature_main_detail") },
   { key: "cards", icon: "hand", title: t("settings-feishubot.feature_cards_title"), detail: t("settings-feishubot.feature_cards_detail") },
   { key: "all_cards", icon: "bell", title: t("settings-feishubot.feature_all_cards_title"), detail: t("settings-feishubot.feature_all_cards_detail") },
@@ -74,7 +74,7 @@ const FEATURES: { key: keyof BotFeatures; icon: IconName; title: string; detail:
   { key: "agents", icon: "agent", title: t("settings-feishubot.feature_agents_title"), detail: t("settings-feishubot.feature_agents_detail") },
 ];
 
-const STEPS = [
+export const STEPS = [
   t("settings-feishubot.step_create_app"),
   t("settings-feishubot.step_permissions"),
   t("settings-feishubot.step_events"),
@@ -82,19 +82,48 @@ const STEPS = [
 ];
 
 /** The bot's state, kept by whoever shows it (the row and its page share one). */
-function useBot() {
+export function useBot() {
   const [status, setStatus] = useState<FeishuBotStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const load = useCallback(() => {
-    setLoading(true);
-    return botStatus()
-      .then((s) => (setStatus(s), setError("")))
-      .catch((e) => setError(t("settings-feishubot.status_error", { error: errorText(e) })))
-      .finally(() => setLoading(false));
+  const requests = useRef({ issued: 0, confirmed: 0, loading: 0, live: false });
+  // Reads are ordered by when they started, but only successful responses advance the confirmed state.
+  // A confirmed write takes a new position at receipt time, fencing every read already in flight.
+  const accept = useCallback((next: FeishuBotStatus, sequence = ++requests.current.issued) => {
+    const state = requests.current;
+    if (!state.live || sequence < state.confirmed) return false;
+    state.confirmed = sequence;
+    setStatus(next);
+    setError("");
+    if (sequence >= state.loading) setLoading(false);
+    return true;
   }, []);
-  useEffect(() => void load(), [load]);
-  return { status, setStatus, loading, error, setError, load };
+  const readStatus = useCallback(async (feedback = false) => {
+    const sequence = ++requests.current.issued;
+    if (feedback) {
+      requests.current.loading = sequence;
+      setLoading(true);
+    }
+    try {
+      const next = await botStatus();
+      if (!accept(next, sequence)) return;
+      return { status: next, current: () => requests.current.live && requests.current.confirmed === sequence };
+    } catch (e) {
+      if (feedback && requests.current.live && sequence >= requests.current.confirmed) {
+        setError(t("settings-feishubot.status_error", { error: errorText(e) }));
+      }
+      throw e;
+    } finally {
+      if (feedback && requests.current.live && requests.current.loading === sequence) setLoading(false);
+    }
+  }, [accept]);
+  const load = useCallback(() => readStatus(true).then(() => {}, () => {}), [readStatus]);
+  useEffect(() => {
+    requests.current.live = true;
+    void load();
+    return () => { requests.current.live = false; };
+  }, [load]);
+  return { status, accept, readStatus, loading, error, setError, load };
 }
 
 export function FeishuBot({ onChannel, larkcli, onOpen }: { onChannel?: (id: string) => void; larkcli?: HubConnector | null; onOpen?: (id: string) => void } = {}) {
@@ -150,7 +179,7 @@ function CombinedLarkRow({ bot, connector, onOpen }: { bot: ReturnType<typeof us
 }
 
 function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<typeof useBot>; larkcli?: HubConnector | null; onClose: () => void; onOpen?: (id: string) => void }) {
-  const { status, setStatus, loading, error, setError, load } = bot;
+  const { status, accept, readStatus, loading, error, setError, load } = bot;
   const [dialogLarkcli, setDialogLarkcli] = useState<HubConnector | null | undefined>(larkcli);
   const [form, setForm] = useState<BotCredentials>(() => (status ? credentialsOf(status) : { appID: "", appSecret: "", domain: "feishu" }));
   const [saving, setSaving] = useState(false);
@@ -203,18 +232,22 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
   }, [fetchLarkcli, larkcli]);
 
   // A newer status: fill the form unless something is being typed (replace: the answer to saving the credentials).
-  const adopt = (s: FeishuBotStatus, replace = false) => {
+  const adoptForm = (s: FeishuBotStatus, replace = false) => {
     if (replace || !editedRef.current || !changedRef.current) {
       editedRef.current = false;
       setForm(credentialsOf(s));
     }
-    setStatus(s);
   };
 
-  const reloadAll = useCallback(async () => {
-    const [next] = await Promise.all([botStatus(), fetchLarkcli()]);
-    adopt(next);
-  }, [fetchLarkcli, changed]);
+  const reloadAll = useCallback(async (afterCreate = false) => {
+    // Keep the bot's successful response even if the optional connector read fails, but only start authorization
+    // after both reads succeed and no newer confirmed status or write has superseded this setup.
+    const [next] = await Promise.all([readStatus().then((result) => {
+      if (result?.current()) adoptForm(result.status);
+      return result;
+    }), fetchLarkcli()]);
+    if (afterCreate && next?.current()) setCreated(true);
+  }, [readStatus, fetchLarkcli, changed]);
   useEffect(() => {
     if (status && (!editedRef.current || !changed)) setForm(credentialsOf(status));
     // only when the hub's credentials change, not on each keystroke
@@ -227,7 +260,7 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
     if (!pairing || status?.owner) return;
     const tick = setInterval(() => setNow(Date.now()), 1000);
     let started = false;
-    const stop = visiblePoll(() => { if (started) void botStatus().then((s) => adopt(s), () => {}); }, 3000, documentPage);
+    const stop = visiblePoll(() => { if (started) void readStatus().then((result) => { if (result?.current()) adoptForm(result.status); }, () => {}); }, 3000, documentPage);
     started = true;
     return () => (clearInterval(tick), stop());
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -236,7 +269,8 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
   const run = async (what: string, call: () => Promise<FeishuBotStatus>, done?: string, replace = false) => {
     setSaving(true);
     try {
-      adopt(await call(), replace);
+      const next = await call();
+      if (accept(next)) adoptForm(next, replace);
       setError("");
       if (done) toast(done, "ok");
       return true;
@@ -274,10 +308,7 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
           title={t("settings-feishubot.create_title")}
           footer={t(dialogLarkcli ? "settings-feishubot.create_footer_shared" : "settings-feishubot.create_footer")}
           startLabel={t("settings-feishubot.create_start")}
-          onDone={async () => {
-            await reloadAll();
-            setCreated(true);
-          }}
+          onDone={() => reloadAll(true)}
         />
       )}
 
@@ -509,7 +540,7 @@ function FeishuBotDialog({ bot, larkcli, onClose, onOpen }: { bot: ReturnType<ty
   );
 }
 
-function LarkReadSection({ connector, status, waitsForApp, autoStart, reload, onOpen }: {
+export function LarkReadSection({ connector, status, waitsForApp, autoStart, reload, onOpen }: {
   connector: HubConnector;
   status: FeishuBotStatus | null;
   waitsForApp?: boolean;
@@ -660,7 +691,7 @@ function LarkReadSection({ connector, status, waitsForApp, autoStart, reload, on
 
 
 /** Group policies use the same acknowledged save as the other bot settings. */
-function TopicGroups({ status, saving, save }: { status: FeishuBotStatus; saving: boolean; save: (groups: BotTopicChat[]) => Promise<boolean> }) {
+export function TopicGroups({ status, saving, save }: { status: FeishuBotStatus; saving: boolean; save: (groups: BotTopicChat[]) => Promise<boolean> }) {
   const groups = status.topic_chats ?? [];
   const [adding, setAdding] = useState(false);
   const [chatID, setChatID] = useState("");

@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nwverse/persona/server/internal/bus"
 	"github.com/nwverse/persona/server/internal/db"
 	"github.com/nwverse/persona/server/internal/devicewire"
 	"github.com/nwverse/persona/server/internal/i18n"
@@ -56,9 +57,11 @@ type nodeStateStore interface {
 type Options struct {
 	// ProjectState lets the owning manager retain transport identities independently of computers.
 	ProjectState func(devicewire.States) devicewire.States
-	Hub          Host
-	Store        Store // nil: nothing is kept (tests)
-	Logf         func(format string, args ...any)
+	// PackageHub supplies the bound address, TLS transport and manager credential for confirmed development packages.
+	PackageHub func() *bus.Client
+	Hub        Host
+	Store      Store // nil: nothing is kept (tests)
+	Logf       func(format string, args ...any)
 	// ManagerID is the manager these devices are ("" and "assistant": the built-in one): its health space on a computer
 	// is named after it (identity.HealthDirName, healthreports.go).
 	ManagerID string
@@ -93,6 +96,9 @@ type Options struct {
 	HiddenAgentDirsChanged func(machine string)
 	// Location is the user's time zone ("today" of the token usage); nil: the machine's.
 	Location func() *time.Location
+	// UpdateHandoffGrace bounds how long a node update waits for natural idle before refusing new headless turns.
+	// Nil uses the shared default; zero preserves the indefinite natural-idle wait.
+	UpdateHandoffGrace func() time.Duration
 	// PromptLanguage is the owner language for newly generated node-side prompt wrappers.
 	// Nil retains legacy Chinese; it is display policy, never an authority input.
 	PromptLanguage func() string
@@ -120,8 +126,9 @@ type Devices struct {
 	opts Options
 	logf func(format string, args ...any)
 
-	transfers transfers // computer to computer file transfers running or just over (transfer.go)
-	held      heldBook  // the owner's messages held for Agents whose computer is away (held.go)
+	transfers  transfers     // computer to computer file transfers running or just over (transfer.go)
+	held       heldBook      // the owner's messages held for Agents whose computer is away (held.go)
+	heldStarts heldStartBook // the owner's new-Agent starts held while their computer is away (held_starts.go)
 
 	mu    sync.Mutex
 	cfg   devicewire.Config
@@ -619,6 +626,7 @@ func (d *Devices) BusUp() {
 	if ctx != nil {
 		d.rehook(ctx)
 	}
+	d.heldStartWakeAll() // held Agent starts waiting for the bus to the hub go now (held_starts.go)
 	for _, m := range d.machinesNow() {
 		m.mu.Lock()
 		list := slices.Clone(m.sessions)
@@ -870,7 +878,8 @@ func (d *Devices) List() []Summary {
 func (d *Devices) summaryOf(m *Machine) Summary {
 	m.mu.Lock()
 	s := Summary{ID: m.cfg.ID, Name: m.name(), Kind: m.cfg.Kind, SSHHost: m.cfg.SSHHost, Home: m.info.Home,
-		HomeReal: m.info.HomeReal, DataDir: m.info.DataDir, Online: m.online || m.warmLocked(time.Now())}
+		HomeReal: m.info.HomeReal, DataDir: m.info.DataDir, Executable: m.info.Executable,
+		Online: m.online || m.warmLocked(time.Now())}
 	m.mu.Unlock()
 	s.Trust = d.machineTrust(m)
 	s.Reachable = m.reachable()
@@ -972,7 +981,11 @@ func (d *Devices) Relist(ctx context.Context, id string) error {
 type Summary struct {
 	ID, Name, Kind, SSHHost, Home, DataDir, Trust string
 	// HomeReal is Home with its links followed, when the node says it is another path (proto.NodeInfo.HomeReal).
-	HomeReal          string
+	HomeReal string
+	// Executable is the file its node runs from (proto.NodeInfo.Executable), as the node.info its connection began with
+	// said: the same for as long as that connection lasts. "" from a node that does not say. The assistant names it to
+	// the Agents there without asking the node again (assistant/task_handoff.go, nodeExecutable).
+	Executable        string
 	Online, Reachable bool
 }
 

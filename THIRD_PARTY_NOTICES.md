@@ -1,5 +1,12 @@
 # Third-party notices
 
+## Container security profiles
+
+`deploy/docker/extension-seccomp.json` and `deploy/docker/persona-hub.apparmor` derive from `moby/profiles` at
+`9ee3204f0d0cfa19ca2c6a7b0fcf5a2b353954ae` (Apache-2.0), with additional
+namespace and mount setup rules for non-root bubblewrap. Its license is in
+`deploy/docker/MOBY-LICENSE`.
+
 ## Password login WebAssembly client
 
 `web/public/pake/client.wasm` uses `github.com/bytemare/opaque` v0.18.0 (MIT),
@@ -9,6 +16,8 @@ The build collects their full license texts in a generated
 `/pake/THIRD_PARTY_NOTICES.txt`. The generated notices must accompany binary distributions.
 
 ## Brand marks
+
+The Harmony phone resources named `machine_os_*.svg` reuse the operating-system marks from the iOS brand catalog and the Apple mark from Simple Icons 15.0.0. Simple Icons provides the SVG paths under CC0. The marks remain subject to their owners’ brand terms.
 
 `apple/Persona/Resources/Assets.xcassets/Brands` and `apple/PersonaWatch/Assets.xcassets/Brands` hold other products' marks
 (`web/src/views/inbox/lark.svg` is a copy of `brand-lark` for the web inbox, and
