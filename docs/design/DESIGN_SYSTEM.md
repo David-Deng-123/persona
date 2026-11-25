@@ -3845,6 +3845,10 @@ effort fields are gone. What the panel gained for it, each part optional and abs
   description as the second line, the launcher's tile and the `[engine] effort` setup on the right; no star, no Customize,
   never lit (a copy of a setup, like a favorite).
 - `state.starting`: no Recommended group, and the row lit shows the form's setup rather than a saved customization.
+- Speed for the selected Codex model (#15438): the composer’s Standard, Fast and Ultrafast segments appear in the
+  panel footer or the selected model’s flyout when the launcher and model support the choice. The marks are shared with
+  the composer. Choosing Standard keeps the launcher’s configured speed. The selection applies to this start.
+
 - Engine pills in the flyout (`engines`): when the model runs with more than one engine on this computer, Cindy's engine
   pills replace the static engine block: 26 px tall, no border, a 12 px `AgentMark` and the engine's name at 12 px, the
   row's own on `--hover-2` with a check; another is a quiet pill that picks that launcher's row of the model, at 50 % with

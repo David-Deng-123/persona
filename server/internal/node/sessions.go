@@ -840,4 +840,7 @@ func (n *Node) codexPaneControls(s *proto.Session, rollout quickMeta) {
 	if len(s.ServiceTiers) == 0 {
 		n.terminalSpeedRow(s, rollout)
 	}
+	if s.ServiceTier == "" {
+		s.ServiceTier = rollout.speed.Tier
+	}
 }
