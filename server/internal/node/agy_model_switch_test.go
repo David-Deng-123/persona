@@ -79,6 +79,27 @@ func TestAgyScreenDeltaAndDraft(t *testing.T) {
 		t.Fatal("draft in agy input box not detected")
 	}
 
+	// Background task / cron status bar rendered below the input box with an extra horizontal rule must not be treated as a draft.
+	cronFooterScreen := "" +
+		"Antigravity CLI\n\n" +
+		"────────────────────────────────────────────────────────────\n" +
+		">\n" +
+		"────────────────────────────────────────────────────────────\n" +
+		"  ● [01:15:13] cron (every hour) running\n" +
+		"────────────────────────────────────────────────────────────\n" +
+		"Gemini 4 Neon xhigh │ Ctx 20.8% 218.5k/1.05M\n"
+	if agyHasDraft(cronFooterScreen) {
+		t.Fatal("empty agy input box with background task footer reported as draft")
+	}
+	cronFooterDraft := strings.Replace(cronFooterScreen, "\n>\n", "\n> unsent text\n", 1)
+	if !agyHasDraft(cronFooterDraft) {
+		t.Fatal("draft in agy input box with background task footer not detected")
+	}
+	cronAfter := strings.Replace(cronFooterScreen, "Antigravity CLI\n\n", "Antigravity CLI\n> /model\n  ⎿  Model set to Gemini 4 Neon (XHigh)\n\n", 1)
+	if delta := agyScreenDelta(cronFooterScreen, cronAfter); !strings.Contains(delta, "Model set to Gemini 4 Neon (XHigh)") || strings.Contains(delta, "cron (every hour)") {
+		t.Fatalf("cron footer delta = %q", delta)
+	}
+
 	box := "" +
 		"────────────────────────────────────────────────────────────\n" +
 		">\n" +
@@ -103,6 +124,9 @@ func TestAgySwitchOutcomes(t *testing.T) {
 	if err := agyModelOutcome("> /model\n  ⎿  Model set to Gemini 4 Neon (Medium)\n", "gemini-4-neon-medium"); err != nil {
 		t.Fatalf("valid model switch: %v", err)
 	}
+	if err := agyModelOutcome("> /model\n  ⎿  Model already set to Gemini 4 Neon (Medium)\n", "gemini-4-neon-medium"); err != nil {
+		t.Fatalf("already-set model switch: %v", err)
+	}
 	if err := agyModelOutcome("> /model\n  ⎿  Invalid model \"bogus\" (available: gemini-4-neon-high)\n", "bogus"); err == nil || errors.As(err, &agySwitchUnconfirmed{}) {
 		t.Fatalf("invalid model err = %v, want explicit refusal", err)
 	}
@@ -112,6 +136,9 @@ func TestAgySwitchOutcomes(t *testing.T) {
 
 	if err := agyEffortOutcome("> /effort\n  ⎿  Effort set to low\n", "low"); err != nil {
 		t.Fatalf("valid effort switch: %v", err)
+	}
+	if err := agyEffortOutcome("> /effort\n  ⎿  Effort already set to xhigh\n", "xhigh"); err != nil {
+		t.Fatalf("already-set effort switch: %v", err)
 	}
 	if err := agyEffortOutcome("> /effort\n  ⎿  claude-opus-5-5 has no \"xhigh\" effort (available: low, medium, high)\n", "xhigh"); err == nil || errors.As(err, &agySwitchUnconfirmed{}) {
 		t.Fatalf("unsupported effort err = %v, want explicit refusal", err)

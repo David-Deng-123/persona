@@ -236,24 +236,40 @@ func (e agySwitchUnconfirmed) Error() string {
 
 func isAgyRuleLine(line string) bool {
 	trimmed := strings.TrimSpace(line)
-	return strings.HasPrefix(trimmed, "────")
+	count := 0
+	for _, r := range trimmed {
+		if r != '─' {
+			return false
+		}
+		count++
+	}
+	return count >= 4
 }
 
 // agyInputBoxBounds locates the top and bottom rule indices of agy's bottom input box, or (-1, -1) if absent.
+// Antigravity may render footer bars separated by horizontal rules below the input box (for example, running
+// background tasks or cron schedules), so scan rule pairs bottom-up and match the prompt box starting with `>`.
 func agyInputBoxBounds(lines []string) (top, bottom int) {
-	bottom = -1
-	for i := len(lines) - 1; i >= 0; i-- {
-		if isAgyRuleLine(lines[i]) {
-			bottom = i
-			break
+	var rules []int
+	for i, line := range lines {
+		if isAgyRuleLine(line) {
+			rules = append(rules, i)
 		}
 	}
-	if bottom < 2 {
-		return -1, -1
-	}
-	for i := bottom - 1; i >= 0; i-- {
-		if isAgyRuleLine(lines[i]) {
-			return i, bottom
+	for k := len(rules) - 2; k >= 0; k-- {
+		t, b := rules[k], rules[k+1]
+		if t+1 >= b || len(lines)-b > 16 {
+			continue
+		}
+		for _, line := range lines[t+1 : b] {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+			if strings.HasPrefix(trimmed, ">") {
+				return t, b
+			}
+			break
 		}
 	}
 	return -1, -1
@@ -328,7 +344,7 @@ func agyModelOutcome(delta, model string) error {
 	if flat == "" {
 		return agySwitchUnconfirmed{kind: "model", value: model}
 	}
-	if strings.Contains(flat, "Model set to ") {
+	if strings.Contains(flat, "Model set to ") || strings.Contains(flat, "Model already set to ") {
 		return nil
 	}
 	lower := strings.ToLower(flat)
@@ -346,10 +362,11 @@ func agyEffortOutcome(delta, effort string) error {
 	if flat == "" {
 		return agySwitchUnconfirmed{kind: "effort", value: effort}
 	}
-	if strings.Contains(flat, "Effort set to "+effort) {
+	lower := strings.ToLower(flat)
+	target := strings.ToLower(effort)
+	if strings.Contains(lower, "effort set to "+target) || strings.Contains(lower, "effort already set to "+target) {
 		return nil
 	}
-	lower := strings.ToLower(flat)
 	for _, bad := range []string{"has no \"", "invalid effort", "not supported", "does not support", "not available"} {
 		if strings.Contains(lower, bad) {
 			return fmt.Errorf("Antigravity CLI rejected effort %q", effort)

@@ -44,6 +44,7 @@ describe("which sessions can switch model", () => {
     expect(canSwitchModel(agyTerm)).toBe(true);
     expect(sessionLauncher(agyTerm)).toBe("agy");
     expect(modelBusy({ ...agyTerm, status: "working" })).toContain("正在工作");
+    expect(modelBusy({ ...agyTerm, status: "working", background_waiting: true })).toBe("");
     expect(modelBusy({ ...agyTerm, state: "needs_you" })).toContain("正在工作");
   });
 
