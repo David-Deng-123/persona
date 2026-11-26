@@ -526,14 +526,15 @@ func pack(files []File) ([]byte, error) {
 	sorted := append([]File(nil), files...)
 	// Keep small files and their headers together. Write the large files largest first so the following
 	// files can reuse more of the 32 KiB gzip window. Paths break ties for reproducibility.
+	// The 21 KiB cutoff keeps the current runtime packages within the embedded size budget.
+	const largeFile = 21 << 10
 	sort.Slice(sorted, func(i, j int) bool {
 		a, b := sorted[i], sorted[j]
 		aSize, bSize := len(a.Data), len(b.Data)
 		if aSize == bSize {
 			return a.Path < b.Path
 		}
-		const halfWindow = 16 << 10
-		if aSize >= halfWindow && bSize >= halfWindow {
+		if aSize >= largeFile && bSize >= largeFile {
 			return aSize > bSize
 		}
 		return aSize < bSize
