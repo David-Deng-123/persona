@@ -5,11 +5,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { anchorOf, onJumpToComment, rangeFor } from "../../lib/comment-marks";
 import { textQuote, type TextAnchor } from "../../lib/comments";
-import { addQuote, removeQuote, setNote, useQuotes } from "../../lib/drafts";
+import { addQuote, cancelNote, removeQuote, setCommentImages, setNote, useQuotes, type CommentImage, type CommentImagePicker } from "../../lib/drafts";
 import { focusKind } from "../../lib/shortcuts";
 import { cx } from "../../ui/atoms";
 import { scrollBehavior } from "../../ui/stream/motion";
-import { CommentBar, type CommentBarAnchor } from "./CommentBar";
+import type { CommentBarAnchor } from "./CommentBar";
+import { CommentBarOverlay, preloadCommentBar } from "./CommentBarOverlay";
 import { NumberDot } from "./CommentCard";
 import { useChatActions } from "./chat-actions";
 import { t } from "../../i18n";
@@ -27,12 +28,14 @@ interface SelectionDraft {
   range: Range;
   rect: CommentBarAnchor | null;
   focused: boolean;
+  quote: { id?: string; cancelled?: boolean };
 }
 
 interface PinEdit {
   id: string;
   rect: CommentBarAnchor | null;
   originalBody: string;
+  originalImages?: readonly CommentImage[];
 }
 
 interface HighlightBucket {
@@ -107,7 +110,9 @@ function rectInBounds(range: Range, bounds: DOMRect): CommentBarAnchor | null {
 
 /** `jump`: brings words into view `topOffset` px from the top and keeps them there while the exchanges around them are
  *  drawn (ChatView landRow); without it, the scroller's own smooth scroll. */
-export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivElement | null>; jump?: (words: Range, topOffset: number) => void }) {
+export function CommentMarks({ scroller, jump, onAddImages }: {
+  scroller: RefObject<HTMLDivElement | null>; jump?: (words: Range, topOffset: number) => void; onAddImages?: CommentImagePicker;
+}) {
   const chat = useChatActions();
   const key = chat?.draftKey ?? "";
   const can = Boolean(chat?.canCompose);
@@ -164,12 +169,14 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     const rect = rectInBounds(range, el.getBoundingClientRect());
     // the end of the words is out of sight: nothing to hang the bar under
     if (!rect) return hide();
+    void preloadCommentBar().catch(() => {});
     const next: SelectionDraft = {
       text,
       anchor: anchorOf(range),
       range: range.cloneRange(),
       rect,
       focused: false,
+      quote: {},
     };
     setDraft((prev) =>
       prev && prev.text === next.text && sameAnchor(prev.rect, next.rect) && sameRange(prev.range, next.range) ? prev : next,
@@ -225,10 +232,10 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     return () => window.removeEventListener("keydown", press);
   }, [draft]);
 
-  const saveDraft = useCallback(
-    (note: string) => {
-      const cur = draftRef.current;
-      if (!cur || !key) return;
+  const selectionQuoteId = useCallback(
+    (cur: SelectionDraft, note: string) => {
+      if (!key || cur.quote.cancelled) return;
+      if (cur.quote.id) return cur.quote.id;
       const el = scroller.current;
       // Re-resolve the live range before saving so streaming/re-renders never persist stale offsets or text.
       const liveRange =
@@ -239,18 +246,45 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
       const q = textQuote(liveText.trim() ? liveText : cur.text, liveAnchor ?? undefined);
       if (note) q.comment!.body = note;
       // write = false: note was already written in the floating bar; focus never jumps to the bottom composer
-      addQuote(key, q, false);
-      document.getSelection()?.removeAllRanges();
-      draftNoteRef.current = "";
-      setDraft(null);
+      return cur.quote.id = addQuote(key, q, false);
     },
     [key, scroller],
   );
 
-  const cancelDraft = useCallback(() => {
+  const closeDraft = useCallback(() => {
     draftNoteRef.current = "";
+    draftRef.current = null;
     setDraft(null);
   }, []);
+
+  const saveDraft = (note: string) => {
+    const cur = draftRef.current;
+    if (!cur) return;
+    const id = selectionQuoteId(cur, note);
+    if (id) setNote(key, id, note, true);
+    document.getSelection()?.removeAllRanges();
+    closeDraft();
+  };
+
+  const keepDraft = () => {
+    const note = draftNoteRef.current.trim();
+    if (note || draftRef.current?.quote.id) saveDraft(note);
+    else closeDraft();
+  };
+
+  const cancelDraft = () => {
+    const cur = draftRef.current;
+    if (cur) {
+      cur.quote.cancelled = true;
+      if (cur.quote.id) removeQuote(key, cur.quote.id);
+    }
+    closeDraft();
+  };
+
+  const selectionQuote = draft?.quote.id ? list.find((q) => q.id === draft.quote.id) : undefined;
+  useEffect(() => {
+    if (draft?.quote.id && !selectionQuote) closeDraft();
+  }, [draft, selectionQuote, closeDraft]);
 
   // ── the lit words ──
   const marks = useMemo(() => {
@@ -263,7 +297,10 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
     }
     return out;
   }, [list]);
-  const nextCommentNumber = useMemo(() => list.filter((q) => q.comment).length + 1, [list]);
+  const selectionNumber = useMemo(() => {
+    const comments = list.filter((q) => q.comment);
+    return selectionQuote ? comments.indexOf(selectionQuote) + 1 : comments.length + 1;
+  }, [list, selectionQuote]);
   const [boxes, setBoxes] = useState<Box[]>([]);
   const boxesNow = useRef(boxes);
   boxesNow.current = boxes;
@@ -399,16 +436,11 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
 
   const openPin = (id: string, e: React.MouseEvent<HTMLButtonElement>) => {
     if (editingPinRef.current?.id === id) return;
-    // Save any non-empty note typed in a new-selection bar before switching to the clicked pin.
-    if (draftRef.current && draftNoteRef.current.trim()) saveDraft(draftNoteRef.current.trim());
-    else {
-      draftNoteRef.current = "";
-      setDraft(null);
-    }
-    // Previous pin edits are already live-persisted via onDraftChange; snapshot the newly opened pin's originalBody once.
+    keepDraft();
+    // Previous pin edits are already live-persisted. Escape restores this pin's note and images.
     const nextQuote = list.find((q) => q.id === id);
     const r = e.currentTarget.getBoundingClientRect();
-    setEditingPin({ id, rect: { x: r.right, top: r.top, bottom: r.bottom }, originalBody: nextQuote?.comment?.body ?? "" });
+    setEditingPin({ id, rect: { x: r.right, top: r.top, bottom: r.bottom }, originalBody: nextQuote?.comment?.body ?? "", originalImages: nextQuote?.images });
   };
 
   return (
@@ -446,9 +478,9 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
         </div>
       )}
       {draft && !editingPin && (
-        <CommentBar
+        <CommentBarOverlay
           anchor={draft.rect}
-          number={nextCommentNumber}
+          number={selectionNumber}
           context={draft.text}
           inputRef={barInputRef}
           autoFocus={draft.focused}
@@ -457,23 +489,36 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
           onInputFocus={() => setDraft((d) => (d && !d.focused ? { ...d, focused: true } : d))}
           onDraftChange={(next) => {
             draftNoteRef.current = next;
+            if (draft.quote.id) setNote(key, draft.quote.id, next, true);
+          }}
+          images={selectionQuote?.images}
+          onAddImages={onAddImages && ((files, signal) => {
+            setDraft((d) => d && !d.focused ? { ...d, focused: true } : d);
+            return onAddImages(() => {
+              const current = draftRef.current;
+              return selectionQuoteId(draft, current?.quote === draft.quote ? draftNoteRef.current : "");
+            }, files, signal);
+          })}
+          onRemoveImage={(id) => {
+            if (draft.quote.id) setCommentImages(key, draft.quote.id, (images) => images.filter((image) => image.id !== id));
           }}
           onSave={saveDraft}
           onCancel={cancelDraft}
-          onYield={() => {
-            if (draftNoteRef.current.trim()) saveDraft(draftNoteRef.current.trim());
-            else cancelDraft();
-          }}
-          ariaLabel={t("chat-comments.note_label", { n: nextCommentNumber })}
+          onDismiss={keepDraft}
+          onYield={keepDraft}
+          ariaLabel={t("chat-comments.note_label", { n: selectionNumber })}
         />
       )}
       {editingPin && editingQuote && (
-        <CommentBar
+        <CommentBarOverlay
           key={editingPin.id}
           anchor={editingPin.rect}
           number={editingQuote.n}
           context={editingQuote.quote.text}
           initialValue={editingPin.originalBody}
+          images={editingQuote.quote.images}
+          onAddImages={onAddImages && ((files, signal) => onAddImages(editingPin.id, files, signal))}
+          onRemoveImage={(id) => setCommentImages(key, editingPin.id, (images) => images.filter((image) => image.id !== id))}
           autoFocus
           captureEscape
           ignoreOutside={isCommentPin}
@@ -485,7 +530,7 @@ export function CommentMarks({ scroller, jump }: { scroller: RefObject<HTMLDivEl
             setEditingPin(null);
           }}
           onCancel={() => {
-            if (key) setNote(key, editingPin.id, editingPin.originalBody, true);
+            if (key) cancelNote(key, editingPin.id, editingPin.originalBody, editingPin.originalImages);
             setEditingPin(null);
           }}
           onDismiss={() => setEditingPin(null)}

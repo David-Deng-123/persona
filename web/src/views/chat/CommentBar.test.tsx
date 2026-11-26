@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { onJumpToComment } from "../../lib/comment-marks";
 import { textQuote, parseCommentBlock } from "../../lib/comments";
 import { addQuote, getQuotes, removeQuote, setQuotes, withQuoteBlock } from "../../lib/drafts";
@@ -9,6 +9,7 @@ import { t } from "../../i18n";
 import { GutterNumber, LineBox, useLinePick } from "../session/files/LineComment";
 import { ChatActionsContext } from "./chat-actions";
 import { CommentBar, placeCommentBar } from "./CommentBar";
+import { preloadCommentBar } from "./CommentBarOverlay";
 import { CommentMarks } from "./CommentMarks";
 import { QuoteBars } from "./Quote";
 
@@ -29,6 +30,8 @@ describe("inline comment floating bar and compact composer chip (#11585)", () =>
   let host: HTMLDivElement;
   let root: Root;
   const draftKey = "m1/s1";
+
+  beforeAll(async () => { await preloadCommentBar(); });
 
   beforeEach(() => {
     host = document.createElement("div");

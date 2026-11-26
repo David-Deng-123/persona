@@ -4,7 +4,8 @@
 import { useEffect, useRef, useState } from "react";
 import { lineRange } from "../../../lib/comments";
 import { Icon } from "../../../ui/icons";
-import { CommentBar, type CommentBarAnchor } from "../../chat/CommentBar";
+import type { CommentBarAnchor } from "../../chat/CommentBar";
+import { CommentBarOverlay, preloadCommentBar } from "../../chat/CommentBarOverlay";
 import { NumberDot } from "../../chat/CommentCard";
 import { t } from "../../../i18n";
 
@@ -175,7 +176,10 @@ export function GutterNumber({ n, at = n, pick, marked, enabled, className, styl
       tabIndex={-1}
       aria-label={marked ? t("chat-comments.gutter_marked", { n: marked }) : t("chat-comments.gutter_add", { line: n })}
       title={t("chat-comments.gutter_add", { line: n })}
-      onPointerDown={(e) => pick.down(at, e)}
+      onPointerDown={(e) => {
+        void preloadCommentBar().catch(() => {});
+        pick.down(at, e);
+      }}
       onPointerEnter={(e) => pick.enter(at, e)}
       className={`${className ?? ""} relative flex cursor-pointer items-center justify-end`}
       style={style}
@@ -195,7 +199,7 @@ const isLineGutter = (el: Element) => Boolean(el.closest("[data-gutter]"));
 
 export function LineBox({ where, anchor, onAdd, onCancel }: { where: string; anchor?: CommentBarAnchor | null; onAdd: (body: string) => void; onCancel: () => void }) {
   return (
-    <CommentBar
+    <CommentBarOverlay
       anchor={anchor ?? null}
       context={where}
       showContextOnDesktop

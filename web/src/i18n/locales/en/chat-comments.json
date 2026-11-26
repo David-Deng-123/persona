@@ -8,6 +8,8 @@
   "count_one": "{count} comment",
   "count_other": "{count} comments",
   "list_label": "Comments",
+  "add_images": "Add images to comment",
+  "preparing_images": "Preparing images…",
   "remove": "Remove comment",
   "jump": "Go to the commented spot",
   "jump_text_gone": "That passage is not on screen any more",

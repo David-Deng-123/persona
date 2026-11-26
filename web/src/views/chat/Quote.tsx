@@ -4,7 +4,7 @@
 // task's card quotes as its title (and todo id, on the block's first line) and what its agent said last.
 import { useLayoutEffect, useRef, useState } from "react";
 import { openSpot } from "../../lib/comments";
-import { parseQuote, parseQuotes, type DraftQuote } from "../../lib/drafts";
+import { parseQuote, parseQuotes, type CommentImagePicker, type DraftQuote } from "../../lib/drafts";
 import { getSession } from "../../lib/store";
 import { clock } from "../../lib/format";
 import { plainMarkdown } from "../../lib/plain-markdown";
@@ -52,7 +52,9 @@ export function QuoteBar({ quote, onRemove }: { quote: DraftQuote; onRemove: () 
 }
 
 /** Everything waiting above the input: the message quote (at most one), then a single compact chip for all comments. */
-export function QuoteBars({ draftKey, quotes, onRemove }: { draftKey?: string; quotes: readonly DraftQuote[]; onRemove: (id: string) => void }) {
+export function QuoteBars({ draftKey, quotes, onRemove, onAddCommentImages }: {
+  draftKey?: string; quotes: readonly DraftQuote[]; onRemove: (id: string) => void; onAddCommentImages?: CommentImagePicker;
+}) {
   const messageQuotes = quotes.filter((q) => !q.comment);
   const comments = quotes.filter((q) => q.comment);
   return (
@@ -60,7 +62,7 @@ export function QuoteBars({ draftKey, quotes, onRemove }: { draftKey?: string; q
       {messageQuotes.map((q) => (
         <QuoteBar key={q.id} quote={q} onRemove={() => onRemove(q.id!)} />
       ))}
-      {comments.length > 0 && <CommentsChip draftKey={draftKey} comments={comments} onRemove={onRemove} />}
+      {comments.length > 0 && <CommentsChip draftKey={draftKey} comments={comments} onRemove={onRemove} onAddImages={onAddCommentImages} />}
     </div>
   );
 }

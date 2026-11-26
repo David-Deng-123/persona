@@ -71,6 +71,7 @@ type fleetBook struct {
 	upgradeEvery, upgradeFor time.Duration
 	upgrades                 sync.WaitGroup // active screen-upgrade loops; database-backed fixtures wait during teardown
 	completionRuns           sync.WaitGroup // delayed turn completions already running when a fixture tears down
+	resolvedRuns             sync.WaitGroup // answered cards' hooks still running (interactionResolvedSoon)
 	completionTimers         map[*time.Timer]struct{}
 	completionStopped        bool // test teardown only: no new delayed completion after the drain starts
 	// hooked: Persona's hooks run in the session (a hook event came since the manager started).
@@ -156,6 +157,7 @@ type fleetBook struct {
 type fleetReport struct {
 	mu        sync.RWMutex
 	got       bool
+	seq       uint64                 // highest sequenced Snapshot.Seq applied (0: none yet)
 	sessions  map[string]SessionView // by session id
 	work      map[[2]string]proto.WorkState
 	workOn    bool
@@ -204,6 +206,29 @@ func guard(err *error) {
 func (g guardedStore) InsertInteraction(ctx context.Context, ix proto.Interaction) (err error) {
 	defer guard(&err)
 	return g.st.InsertInteraction(ctx, ix)
+}
+
+// interactionDeadlineUpdater is the durable counterpart of publishing an extended prepared-approval deadline.
+// A store that keeps interaction history but cannot update it must not leave the database advertising a stale expiry.
+type interactionDeadlineUpdater interface {
+	UpdateInteractionDeadline(ctx context.Context, id string, created, expires time.Time) error
+}
+
+func (g guardedStore) UpdateInteractionDeadline(ctx context.Context, id string, created, expires time.Time) (err error) {
+	defer guard(&err)
+	st, ok := g.st.(interactionDeadlineUpdater)
+	if !ok {
+		return errNoTable
+	}
+	return st.UpdateInteractionDeadline(ctx, id, created, expires)
+}
+
+func (s *Service) updateInteractionDeadline(ctx context.Context, id string, created, expires time.Time) error {
+	st := s.fleetStore()
+	if st == nil {
+		return nil // no interaction table: the in-memory card is the only card
+	}
+	return st.(interactionDeadlineUpdater).UpdateInteractionDeadline(ctx, id, created, expires)
 }
 
 // resolvedInteractionInserter is the atomic history write and final outcome update used by reversible-setting
@@ -346,15 +371,40 @@ func agentState(sess proto.Session, seenAt time.Time) string {
 // goes on. Needs-you stays first; a stopped one (offline) has nothing running. Not the assistant's conversations:
 // their Monitors and background tasks stay on, and a conversation always "Working" would skip every scheduled run.
 // What waits for a turn to end (the finished push, scheduled runs, the hub's own update) reads the host's status.
+// Background commands the node found stalled, with nothing else running, do not make it working (#16418): they keep
+// their rows and background_stalled_since for a look, and the finished turn settles.
 func backgroundState(state string, sess proto.Session) string {
 	if sess.Assistant || !backgroundRunning(sess) {
 		return state
 	}
 	switch state {
 	case proto.StateUnread, proto.StateIdle, proto.StateUnknown:
+		if backgroundStalledShellOnly(sess) {
+			return state
+		}
 		return proto.StateWorking
 	}
 	return state
+}
+
+// stalledAfterTurn: an agent's finished turn that backgroundState left as it was for its stalled background commands
+// alone (backgroundStalledShellOnly): its row keeps background_stalled_since though it is not background_working.
+func stalledAfterTurn(sess proto.Session) bool {
+	switch sess.State {
+	case proto.StateUnread, proto.StateIdle, proto.StateUnknown:
+		return !sess.Assistant && sess.Status != proto.StatusWorking && backgroundStalledShellOnly(sess)
+	}
+	return false
+}
+
+// backgroundStalledShellOnly (#16418): all the background work left is background commands, and the node found them
+// stalled (Session.BackgroundStalledSince: no CPU and no output past its grace, or their shells gone). No subagent,
+// workflow or Monitor runs: a Monitor wakes the agent by itself, and those are work whatever its shells do.
+func backgroundStalledShellOnly(sess proto.Session) bool {
+	if sess.BackgroundStalledSince == 0 || len(sess.Background) == 0 || backgroundIsWork(sess) {
+		return false
+	}
+	return !slices.ContainsFunc(sess.Background, func(t proto.BackgroundTask) bool { return t.Kind != "shell" })
 }
 
 // stateWithBackground is backgroundState, and whether the background work is all that makes it working

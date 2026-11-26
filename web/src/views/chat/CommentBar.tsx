@@ -4,10 +4,13 @@
 // existing pin offers an in-place delete button.
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { base64File } from "../../lib/attachments";
 import { MAX_COMMENT_CHARS } from "../../lib/comments";
+import type { CommentImage } from "../../lib/drafts";
 import { useComposition } from "../../lib/ime";
 import { enterSends, hasFinePointer, NO_HOVER, PHONE, useMedia } from "../../lib/viewport";
-import { cx, EASE } from "../../ui/atoms";
+import { cx, EASE, IconButton } from "../../ui/atoms";
+import { AttachmentTray } from "../../ui/AttachmentTray";
 import { Icon } from "../../ui/icons";
 import { NumberDot } from "./CommentCard";
 import { t } from "../../i18n";
@@ -50,6 +53,10 @@ export interface CommentBarProps {
   onYield?: () => void;
   /** When editing an existing comment, shows an in-place delete button. */
   onDelete?: () => void;
+  /** Images belong to selection comments, including when they are reopened from a pin or the chip. */
+  images?: readonly CommentImage[];
+  onAddImages?: (files: File[], signal: AbortSignal) => Promise<void>;
+  onRemoveImage?: (id: string) => void;
   /** Accessible label for the input field. */
   ariaLabel?: string;
   /** Elements matching this predicate do not trigger outside-click dismissal (e.g. code line gutters for shift-click range extension). */
@@ -108,6 +115,9 @@ export function CommentBar({
   onDismiss,
   onYield,
   onDelete,
+  images,
+  onAddImages,
+  onRemoveImage,
   ariaLabel,
   ignoreOutside,
   captureEscape = false,
@@ -128,10 +138,51 @@ export function CommentBar({
   const onYieldRef = useRef(onYield);
   onYieldRef.current = onYield;
   const ime = useComposition();
+  const fileInput = useRef<HTMLInputElement>(null);
+  const reads = useRef<AbortController | null>(null);
+  const [preparing, setPreparing] = useState(0);
+  const [previews, setPreviews] = useState<{ id: string; name: string; url: string }[]>([]);
+  const previewUrls = useRef(new Map<CommentImage, string>());
+  useLayoutEffect(() => {
+    const urls = previewUrls.current;
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+      urls.clear();
+    };
+  }, []);
+  useLayoutEffect(() => {
+    const urls = previewUrls.current;
+    if (!urls.size && !images?.length) return;
+    for (const [image, url] of urls) {
+      if (images?.includes(image)) continue;
+      URL.revokeObjectURL(url);
+      urls.delete(image);
+    }
+    setPreviews((images ?? []).map((image) => {
+      const { id, name, mime, data } = image;
+      const url = urls.get(image) ?? URL.createObjectURL(base64File(name, mime, data));
+      urls.set(image, url);
+      return { id, name, url };
+    }));
+  }, [images]);
+  const addImages = async (files: File[]) => {
+    if (!onAddImages || !files.length) return;
+    const { signal } = reads.current ??= new AbortController();
+    setPreparing((n) => n + 1);
+    try {
+      await onAddImages(files, signal);
+    } finally {
+      if (!signal.aborted) setPreparing((n) => n - 1);
+    }
+  };
+  const cancel = () => {
+    reads.current?.abort();
+    onCancel();
+  };
   const [focused, setFocused] = useState(autoFocus);
   const active = focused || captureEscape;
   // Keep a mounted dirty bar registered across blur until it is saved, cancelled, or yielded to another bar.
-  const ownsBar = active || body !== initialValue;
+  const ownsBar = active || body !== initialValue || preparing > 0;
   const barRef = useRef<HTMLDivElement>(null);
   const localInput = useRef<HTMLTextAreaElement>(null);
   const field = inputRef ?? localInput;
@@ -190,7 +241,7 @@ export function CommentBar({
     const w = barRef.current.offsetWidth || BAR_MAX_W;
     const h = barRef.current.offsetHeight || 44;
     setPos(placeCommentBar(anchor, w, h, viewportWidth, viewportHeight));
-  }, [anchor, docked, showContextOnDesktop, context, viewportWidth, viewportHeight, body]);
+  }, [anchor, docked, showContextOnDesktop, context, viewportWidth, viewportHeight, body, preparing, previews.length]);
 
   // Dismiss on outside click only when the note is unchanged from initialValue (raw comparison so whitespace edits are kept).
   useEffect(() => {
@@ -198,7 +249,7 @@ export function CommentBar({
       if (!(e.target instanceof Node)) return;
       if (barRef.current?.contains(e.target)) return;
       if (e.target instanceof Element && ignoreOutside?.(e.target)) return;
-      if (bodyRef.current !== initialRef.current) return;
+      if (bodyRef.current !== initialRef.current || preparing > 0) return;
       (onDismissRef.current ?? onCancelRef.current)();
     };
     const onKeyDown = (e: KeyboardEvent) => {
@@ -207,7 +258,7 @@ export function CommentBar({
       if (!inside && !captureEscape) return;
       e.preventDefault();
       e.stopPropagation();
-      onCancel();
+      cancel();
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("keydown", onKeyDown, true);
@@ -215,7 +266,7 @@ export function CommentBar({
       document.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [onCancel, ignoreOutside, captureEscape, ime]);
+  }, [cancel, ignoreOutside, captureEscape, ime, preparing]);
 
   const submit = () => onSave(body.trim());
   const showContext = Boolean(context) && (docked || showContextOnDesktop);
@@ -231,7 +282,7 @@ export function CommentBar({
       data-docked={docked ? "true" : undefined}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => {
-        if (e.target instanceof Element && e.target.closest("button, textarea")) return;
+        if (e.target instanceof Element && e.target.closest("button, textarea, input")) return;
         field.current?.focus({ preventScroll: true });
       }}
       className={cx(
@@ -268,7 +319,7 @@ export function CommentBar({
               title={t("chat-comments.cancel")}
               onPointerDown={(e) => e.preventDefault()}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={onCancel}
+              onClick={cancel}
               className="flex size-5 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-hover-2 hover:text-ink"
             >
               <Icon name="x" size={11} stroke={2.4} />
@@ -298,6 +349,19 @@ export function CommentBar({
             setBody(e.target.value);
             onDraftChange?.(e.target.value);
           }}
+          onPaste={onAddImages && ((e) => {
+            const files = Array.from(e.clipboardData.files ?? []).filter((file) => file.type.startsWith("image/"));
+            if (!files.length) {
+              for (const item of Array.from(e.clipboardData.items ?? [])) {
+                if (item.kind !== "file") continue;
+                const file = item.getAsFile();
+                if (file?.type.startsWith("image/")) files.push(file);
+              }
+            }
+            if (!files.length) return;
+            e.preventDefault();
+            void addImages(files);
+          })}
           onKeyDown={(e) => {
             if (ime.busy(e.nativeEvent)) return;
             if (enterSends(e, hasFinePointer())) {
@@ -306,7 +370,7 @@ export function CommentBar({
             } else if (e.key === "Escape") {
               e.preventDefault();
               e.stopPropagation();
-              onCancel();
+              cancel();
             }
           }}
           className="max-h-24 min-h-7 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1.5 py-[5px] text-[13px] leading-[1.4] text-ink outline-none placeholder:text-ink-3"
@@ -320,6 +384,15 @@ export function CommentBar({
             {shortcutHint}
           </kbd>
         )}
+        {onAddImages && (
+          <>
+            <IconButton icon="image" label={t("chat-comments.add_images")} className="shrink-0" onClick={() => fileInput.current?.click()} />
+            <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={(e) => {
+              void addImages(Array.from(e.currentTarget.files ?? []));
+              e.currentTarget.value = "";
+            }} />
+          </>
+        )}
         {onDelete && (
           <button
             type="button"
@@ -328,7 +401,10 @@ export function CommentBar({
             title={t("chat-comments.remove")}
             onPointerDown={(e) => e.preventDefault()}
             onMouseDown={(e) => e.preventDefault()}
-            onClick={onDelete}
+            onClick={() => {
+              reads.current?.abort();
+              onDelete();
+            }}
             className="flex size-7 shrink-0 items-center justify-center rounded-[8px] text-ink-3 transition-colors hover:bg-hover-2 hover:text-red"
           >
             <Icon name="trash" size={13} />
@@ -347,6 +423,8 @@ export function CommentBar({
           <Icon name="check" size={14} stroke={2.4} />
         </button>
       </div>
+      {preparing > 0 && <span role="status" className="px-1 text-submeta text-ink-3">{t("chat-comments.preparing_images")}</span>}
+      <AttachmentTray attachments={previews} onRemove={onRemoveImage} />
     </div>
   );
 

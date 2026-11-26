@@ -7,10 +7,11 @@ import { jumpToComment } from "../../lib/comment-marks";
 import { codePreview, diffLabel, openSpot, rangeLabel, type CodeSpot, type ElementSpot } from "../../lib/comments";
 import { openPanel } from "../../lib/panel";
 import { addressOf } from "../../lib/preview";
-import { setNote, type DraftQuote } from "../../lib/drafts";
+import { cancelNote, setCommentImages, setNote, type CommentImage, type CommentImagePicker, type DraftQuote } from "../../lib/drafts";
 import { cx, EASE, toast } from "../../ui/atoms";
 import { Icon } from "../../ui/icons";
-import { CommentBar, type CommentBarAnchor } from "./CommentBar";
+import type { CommentBarAnchor } from "./CommentBar";
+import { CommentBarOverlay, preloadCommentBar } from "./CommentBarOverlay";
 import { t } from "../../i18n";
 
 /** `staged`, `unstaged`, `commit 1a2b3c4d`, worded for the reader. */
@@ -128,16 +129,21 @@ const EDGE = 8;
 const GAP = 6;
 
 /** Single compact `"N comments"` chip above the composer; clicking opens a popover list to jump to a pin, edit a note, or remove one. */
-export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: string; comments: readonly DraftQuote[]; onRemove: (id: string) => void }) {
+export function CommentsChip({ draftKey, comments, onRemove, onAddImages }: {
+  draftKey?: string; comments: readonly DraftQuote[]; onRemove: (id: string) => void; onAddImages?: CommentImagePicker;
+}) {
   const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState<{ id: string; n: number; context: string; originalBody: string; anchor: CommentBarAnchor | null } | null>(null);
+  const [editing, setEditing] = useState<{
+    id: string; n: number; context: string; originalBody: string; originalImages?: readonly CommentImage[]; anchor: CommentBarAnchor | null;
+  } | null>(null);
+  const editedQuote = editing && comments.find((q) => q.id === editing.id);
   const chipRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const [place, setPlace] = useState<{ left: number; bottom: number; maxHeight: number } | null>(null);
 
   useEffect(() => {
-    if (editing && !comments.some((q) => q.id === editing.id)) setEditing(null);
-  }, [editing, comments]);
+    if (editing && !editedQuote) setEditing(null);
+  }, [editing, editedQuote]);
 
   useLayoutEffect(() => {
     if (!open || !chipRef.current || typeof window === "undefined") return;
@@ -243,6 +249,7 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
                           n,
                           context: firstWords,
                           originalBody: c.body,
+                          originalImages: q.images,
                           anchor: r ? { x: (r.left + r.right) / 2, top: r.top, bottom: r.bottom } : null,
                         });
                       }}
@@ -278,6 +285,7 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => {
+          if (!open && draftKey) void preloadCommentBar().catch(() => {});
           // Edits are live-persisted to the quote store via onDraftChange, so closing the editor keeps any typed note.
           setEditing(null);
           setOpen((o) => !o);
@@ -290,14 +298,18 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
         <Icon name="chevron" size={11} className={cx("shrink-0 transition-transform duration-150", open && "rotate-180")} />
       </button>
       {popover}
-      {editing && draftKey && (
-        <CommentBar
+      {editing && editedQuote && draftKey && (
+        <CommentBarOverlay
           key={editing.id}
           anchor={editing.anchor}
           number={editing.n}
           context={editing.context}
           showContextOnDesktop
           initialValue={editing.originalBody}
+          images={editedQuote.images}
+          onAddImages={onAddImages && !editedQuote.comment?.spot && !editedQuote.comment?.element
+            ? (files, signal) => onAddImages(editing.id, files, signal) : undefined}
+          onRemoveImage={(id) => setCommentImages(draftKey, editing.id, (images) => images.filter((image) => image.id !== id))}
           autoFocus
           captureEscape
           onDraftChange={(next) => {
@@ -308,7 +320,7 @@ export function CommentsChip({ draftKey, comments, onRemove }: { draftKey?: stri
             setEditing(null);
           }}
           onCancel={() => {
-            setNote(draftKey, editing.id, editing.originalBody, true);
+            cancelNote(draftKey, editing.id, editing.originalBody, editing.originalImages);
             setEditing(null);
           }}
           onDismiss={() => setEditing(null)}

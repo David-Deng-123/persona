@@ -7,6 +7,8 @@
   "cancel": "取消",
   "count_other": "{count} 条评论",
   "list_label": "评论列表",
+  "add_images": "为评论添加图片",
+  "preparing_images": "正在处理图片…",
   "remove": "移除评论",
   "jump": "回到评论的位置",
   "jump_text_gone": "这段话已不在页面上",
