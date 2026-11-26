@@ -1,15 +1,18 @@
 {
-  "new_failed": "ターミナルを作成できませんでした：{error}",
+  "new_failed": "シェルを開けませんでした（{error}）",
+  "offline": "オフライン",
   "loading": "読み込み中…",
-  "no_panes_agent": "このコンピュータで Agent を開始すると、ここにターミナルが表示されます。",
-  "new_terminal": "新規ターミナル",
-  "new_in_space": "「{name}」に新しいターミナル",
+  "retry": "再試行",
+  "no_panes_agent": "このコンピューターでエージェントを起動すると、ここにタブが表示されます。",
+  "new_terminal": "新しいシェル",
+  "new_in_space": "「{name}」に新しいシェルを開く",
   "none_online": "オンラインのコンピューターがありません。",
-  "close_finished_title_other": "終了したターミナルを{count}個閉じますか？",
-  "close_finished_detail": "停止したエージェントが残したターミナルです。閉じると中のシェルは終了します。エージェントの会話は残り、「再開」で新しいターミナルが開きます。",
+  "close_finished_title_other": "残ったシェル{count}件を閉じますか？",
+  "close_finished_detail": "これらのシェルは閉じると停止します。セッションは残り、再開すると新しいタブが開きます。",
   "close_finished_kept_other": "ほかに{count}個はプログラムが動いているため、開いたままにします。",
-  "close_finished_confirm": "ターミナルを閉じる",
-  "close_finished_failed": "終了したターミナルを閉じられませんでした。{error}",
-  "closed_finished_other": "ターミナルを{count}個閉じました",
-  "finished_none": "閉じられる終了したターミナルはありません"
+  "close_finished_confirm": "シェルを閉じる",
+  "close_finished_failed": "シェルを閉じられませんでした。{error}",
+  "closed_finished_other": "シェルを{count}件閉じました",
+  "finished_none": "閉じるシェルはありません",
+  "terminals": "タブ"
 }

@@ -2,8 +2,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { t } from "../i18n";
 import { seedAgentsDisplay } from "../lib/agents-display";
 import { resetAgentListFilters } from "../lib/agent-list-filters";
+import { stateName } from "../lib/state-labels";
 import { connect, reset } from "../lib/store";
 import type { PanesResponse } from "../lib/terminals";
 import type { Machine, Session } from "../lib/types";
@@ -176,25 +178,29 @@ describe("Sidebar unified active shell tabs", () => {
     expect(agentLink.children[1]?.className).toContain("size-3.5");
   });
 
-  it("respects All, Terminals, and Working quick filters cleanly", async () => {
+  it("shows plain shells in All and counts only Agents in the In a tab filter", async () => {
     await mountSidebar();
 
-    // Terminals filter chip includes both the terminal-sourced agent (1) and the 2 active plain shells (= 3).
-    const filterButtons = () => [...host.querySelectorAll<HTMLButtonElement>('[role="radiogroup"] [role="radio"]')];
-    const terminalFilter = filterButtons().find((b) => b.getAttribute("aria-label")?.includes("3"));
-    expect(terminalFilter).toBeTruthy();
+    const shell = () => host.querySelector('a[data-shell-row="term:mac/pane:w1:p2"]');
+    const otherShell = () => host.querySelector('a[data-shell-row="term:mac/pane:w2:p1"]');
+    const filterButton = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('[role="radiogroup"] [role="radio"]')]
+      .find((button) => button.getAttribute("aria-label") === label)!;
+    expect(shell()).toBeTruthy();
+    expect(otherShell()).toBeTruthy();
 
-    await act(async () => terminalFilter!.click());
+    await act(async () => filterButton(`${t("lib-agent-filter.terminal")} 1`).click());
     await flush();
-    expect(host.querySelector('a[data-shell-row="term:mac/pane:w1:p2"]')).toBeTruthy();
-    expect(host.querySelector('a[data-shell-row="term:mac/pane:w2:p1"]')).toBeTruthy();
+    expect(host.querySelector('a[href*="/t/mac/w1/w1%3At1"]')).toBeTruthy();
+    expect(shell()).toBeNull();
+    expect(otherShell()).toBeNull();
 
-    // Switching to Working hides plain shell tabs.
-    const workingFilter = filterButtons().find((b) => b.textContent?.includes("1"));
-    expect(workingFilter).toBeTruthy();
-    await act(async () => workingFilter!.click());
+    await act(async () => filterButton(t("lib-agent-filter.all")).click());
     await flush();
-    expect(host.querySelector('a[data-shell-row="term:mac/pane:w1:p2"]')).toBeNull();
-    expect(host.querySelector('a[data-shell-row="term:mac/pane:w2:p1"]')).toBeNull();
+    expect(shell()).toBeTruthy();
+
+    await act(async () => filterButton(`${stateName("working")} 1`).click());
+    await flush();
+    expect(shell()).toBeNull();
+    expect(otherShell()).toBeNull();
   });
 });
