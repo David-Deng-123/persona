@@ -716,7 +716,30 @@ nonisolated struct Launcher: Codable, Identifiable, Hashable, Sendable {
     var title: String {
         let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let label = trimmed?.isEmpty == false ? trimmed : nil
-        return Self.traeCLITitle(name: name, source: source, agent: runtimeAgent, baseURL: baseURL, displayName: label) ?? label ?? name
+        return Self.traeCLITitle(name: name, source: source, agent: runtimeAgent, baseURL: baseURL, displayName: label)
+            ?? Self.builtinTitle(name: name, displayName: label)
+    }
+    /// Canonical product titles shown for built-in launchers when no explicit custom `display_name` is set.
+    static let builtinTitles: [String: String] = [
+        "claude": "Claude Code",
+        "codex": "Codex",
+        "claude-desktop": "Claude Desktop",
+        "codex-app": "Codex App",
+        "traex": Session.traeCLIName,
+        "traecli": Session.traeCLIName,
+        "trae-cli": Session.traeCLIName,
+        "agy": "Antigravity CLI",
+        "omp": "Oh My Pi",
+        "cursor": "Cursor",
+        "gemini": "Gemini CLI",
+    ]
+    static func builtinTitle(name: String, displayName: String? = nil) -> String {
+        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = trimmed?.isEmpty == false ? trimmed : nil
+        if let label, label.caseInsensitiveCompare(name) != .orderedSame {
+            return label
+        }
+        return builtinTitles[name.lowercased()] ?? label ?? name
     }
     /// Older hubs and runtime providers can supply a legacy label. Keep other labels chosen by the user.
     static func traeCLITitle(name: String, source: String?, agent: String?, baseURL: String?, displayName: String?) -> String? {
@@ -2614,16 +2637,48 @@ nonisolated struct Fold: Codable, Hashable, Sendable {
     var tasks: [FoldTasks]? = nil
     /// The hub proved this supervision round is user-visible, even while its visibility tools are folded away.
     var supervisionUser: Bool? = nil
+    /// The files the run's successful edits changed (docs/protocol/protocol.md「Folded work」 `fold.changes`):
+    /// always a list from hubs that compute it (empty when the run edited nothing); nil from older hubs.
+    var changes: [FoldChange]? = nil
     /// What the folded items used (#5426). Omitted when none of them carried usage, and from older nodes.
     var usage: [TokenUsage]? = nil
     /// Declarative UI views returned out-of-band by folded tool results (`Fold.toolViews`, UI version 12).
     var toolViews: [FoldToolView]? = nil
 
     enum CodingKeys: String, CodingKey {
-        case items, tools, thoughts, until, images, tasks, usage
+        case items, tools, thoughts, until, images, tasks, changes, usage
         case toolViews = "tool_views"
         case supervisionUser = "supervision_user"
         case throughSeq = "through_seq", throughID = "through_id"
+    }
+}
+
+/// One file a folded run's successful edits changed (`Fold.changes`, docs/protocol/protocol.md「Folded work」):
+/// the lines added and removed summed over the run's edits of that path. `exact` is false when an edit's input was
+/// clipped for good.
+nonisolated struct FoldChange: Codable, Hashable, Sendable {
+    var path: String
+    var add: Int
+    var del: Int
+    var exact: Bool
+
+    init(path: String, add: Int, del: Int, exact: Bool = true) {
+        self.path = path
+        self.add = add
+        self.del = del
+        self.exact = exact
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        add = try c.decodeIfPresent(Int.self, forKey: .add) ?? 0
+        del = try c.decodeIfPresent(Int.self, forKey: .del) ?? 0
+        exact = try c.decodeIfPresent(Bool.self, forKey: .exact) ?? true
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path, add, del, exact
     }
 }
 
@@ -3043,6 +3098,8 @@ nonisolated struct Interaction: Codable, Identifiable, Hashable, Sendable {
     var ownerProposal: Bool?
     var noExpiry: Bool?
     var ownerApprovalPhrases: [String]?
+    /// True when the card has no interactive computer terminal or UI to hand back to; absent/false keeps hand-back.
+    var noHandBack: Bool?
     var ownerApprovalPhrase: String? {
         guard kind == .permission, ownerProposal == true, let approvalBatchID, !approvalBatchID.isEmpty,
               !machineID.isEmpty, !sessionID.isEmpty,
@@ -3093,7 +3150,8 @@ nonisolated struct Interaction: Codable, Identifiable, Hashable, Sendable {
              agentID = "agent_id", agentType = "agent_type", foldedUnderText = "folded_under",
              foldedUnderMachineIDText = "folded_under_machine_id", foldedAsText = "folded_as",
              foldedSideText = "folded_side", approvalBatchID = "approval_batch_id", approvalItemID = "approval_item_id",
-             ownerProposal = "owner_proposal", noExpiry = "no_expiry", ownerApprovalPhrases = "owner_approval_phrases"
+             ownerProposal = "owner_proposal", noExpiry = "no_expiry", ownerApprovalPhrases = "owner_approval_phrases",
+             noHandBack = "no_hand_back"
     }
 }
 
