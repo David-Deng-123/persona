@@ -1,11 +1,13 @@
 const startPrefix = 'Tool is running as a background task with task id:'
 const endNotice = /\bTask id "([^"\n]+)" (?:was )?(finished|failed|canceled|cancelled|killed|stopped)\b/i
+const taskMessage = /^[ \t]*\[Message\] timestamp=\S+ sender=(\S+) priority=\S+ content=([\s\S]*)/m
+const cronIteration = /\(iteration [0-9]+\)$/
 const terminalStatuses = new Map([
   ['DONE', 'completed'], ['ERROR', 'failed'], ['CANCELED', 'killed'], ['CANCELLED', 'killed'],
 ])
 const kinds = new Map([['schedule', 'monitor'], ['run_workflow', 'workflow'], ['invoke_subagent', 'agent']])
 const retainedForMs = 24 * 60 * 60 * 1000
-const endedLimit = 8
+const endedLimit = 20
 const runningLimit = 50
 const taskName = /^task-[0-9]+$/
 const liveStep = new Set(['RUNNING', 'PENDING', 'IN_PROGRESS', 'QUEUED'])
@@ -71,6 +73,14 @@ export function extractBackground(steps, conversation) {
           const verb = notice[2].toLowerCase()
           const status = verb === 'finished' ? 'completed' : verb === 'failed' ? 'failed' : 'killed'
           finish(tasks.get(notice[1]), status, step.created_at)
+        } else {
+          const message = taskMessage.exec(step.content ?? '')
+          const task = message && tasks.get(message[1])
+          if (task?.oneShot) {
+            const content = message[2].trim().replace(/<\/SYSTEM_MESSAGE>$/, '').trim()
+            if (cronIteration.test(content)) task.oneShot = false
+            else if (!content.toLowerCase().includes('still running')) finish(task, 'completed', step.created_at)
+          }
         }
         break
       }
@@ -86,6 +96,9 @@ export function extractBackground(steps, conversation) {
           const description = details.map(line => line.trim()).find(line => line.startsWith('Task Description:'))
           task = { id, kind: kinds.get(call?.name) ?? 'shell', started_at: step.created_at }
           if (description) task.description = description.slice('Task Description:'.length).trim()
+          const schedule = call?.name === 'schedule' ? call.args : undefined
+          task.oneShot = !task.description?.startsWith('Cron:') && !toolString(schedule?.CronExpression).trim() &&
+            (schedule?.DurationSeconds != null || task.description?.startsWith('Timer:'))
           if (call?.name === 'run_command') task.command = toolString(call.args?.CommandLine) || toolString(call.args?.command)
           tasks.set(id, task)
         }
@@ -96,7 +109,7 @@ export function extractBackground(steps, conversation) {
     }
   }
   const running = [], ended = []
-  for (const { inferred, ...task } of tasks.values()) {
+  for (const { inferred, oneShot, ...task } of tasks.values()) {
     if (task.status) {
       if (Number.isFinite(Date.parse(task.ended_at))) ended.push(task)
     } else if (running.length < runningLimit) {

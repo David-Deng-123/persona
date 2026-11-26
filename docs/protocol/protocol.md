@@ -1169,7 +1169,7 @@ Provider responses carry only the description and `has_key`, never secrets. Defa
                 "output_file":"/private/tmp/…/b85polnoj.output","started_at":"...",
                 "expires_at":"...",          // Monitor: stops by itself at this time (the "expires in 30m" in the result); absent if not stated
                 "run_id":"wf_c1d9daf8-cd2"}], // workflow: which run in workflows it is; only running workflows are here (old clients still treat it as a background task)
- "background_ended":[{"id":"b85polnoj","kind":"shell|agent|monitor|workflow","description":"…","command":"…", // recent ended outcomes, oldest first, at most 8 and from the last day
+ "background_ended":[{"id":"b85polnoj","kind":"shell|agent|monitor|workflow","description":"…","command":"…", // recent ended outcomes, oldest first, at most 8 (20 for Antigravity) and from the last day
                       "output_file":"/private/tmp/…/b85polnoj.output","started_at":"...","ended_at":"...",
                       "status":"completed|failed|stopped|killed|ended","exit_code":0}], // exit_code only when the transcript states it; stopped work need not have one
  // Full session info only; bounded / summary list rows omit background_ended. Older nodes and hubs omit it: clients must not infer an outcome when a task only leaves background.

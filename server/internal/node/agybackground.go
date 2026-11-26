@@ -15,12 +15,14 @@ import (
 
 const (
 	agyTaskPrefix           = "Tool is running as a background task with task id:"
-	agyBackgroundEndedLimit = 8
+	agyBackgroundEndedLimit = 20
 )
 
 var (
-	agyTaskName = lazyre.New(`^task-[0-9]+$`)
-	agyTaskEnd  = lazyre.New(`(?i)\bTask id "([^"\n]+)" (?:was )?(finished|failed|canceled|cancelled|killed|stopped)\b`)
+	agyTaskName      = lazyre.New(`^task-[0-9]+$`)
+	agyTaskEnd       = lazyre.New(`(?i)\bTask id "([^"\n]+)" (?:was )?(finished|failed|canceled|cancelled|killed|stopped)\b`)
+	agyTaskMessage   = lazyre.New(`(?m)^[ \t]*\[Message\] timestamp=\S+ sender=(\S+) priority=\S+ content=([\s\S]*)`)
+	agyCronIteration = lazyre.New(`\(iteration [0-9]+\)$`)
 )
 
 func agyBackgroundNotice(content string) string {
@@ -63,6 +65,7 @@ func (b agyBackgroundTasks) apply(s *proto.Session) {
 type agyTaskRecord struct {
 	task     proto.BackgroundTask
 	inferred bool
+	oneShot  bool
 }
 
 func (r *agyTaskRecord) finish(status string, at time.Time, inferred bool) {
@@ -103,6 +106,18 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root) ag
 					status = proto.WorkflowFailed
 				}
 				byID[m[1]].finish(status, at, false)
+			} else if m := agyTaskMessage.FindStringSubmatch(step.Content); m != nil {
+				record := byID[m[1]]
+				if record == nil || !record.oneShot {
+					continue
+				}
+				message := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[2]), "</SYSTEM_MESSAGE>"))
+				if agyCronIteration.MatchString(message) {
+					record.oneShot = false
+				} else if !strings.Contains(strings.ToLower(message), "still running") {
+					at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
+					record.finish(proto.WorkflowCompleted, at, false)
+				}
 			}
 		case "GENERIC":
 			notice := agyBackgroundNotice(firstNonEmpty(step.backgroundStart, step.Content))
@@ -127,12 +142,14 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root) ag
 				}
 				// Result steps have one slot per planner tool call, even when they are exported out of order.
 				slot := step.seq - planner.seq - 1
+				var call *agyToolCall
 				if slot >= 0 && slot < len(planner.ToolCalls) {
-					if call := planner.ToolCalls[slot]; call != nil {
+					call = planner.ToolCalls[slot]
+					if call != nil {
 						setAgyTaskKind(&task, call.Name, call.Args)
 					}
 				}
-				record = &agyTaskRecord{task: task}
+				record = &agyTaskRecord{task: task, oneShot: agyOneShotSchedule(task.Description, call)}
 				byID[id] = record
 				ordered = append(ordered, record)
 			}
@@ -162,6 +179,24 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root) ag
 		result.ended = slices.Clone(result.ended[extra:])
 	}
 	return result
+}
+
+// agyOneShotSchedule recognizes timers from either the tool arguments or the task description.
+// A cron expression or description takes precedence when both forms are present.
+func agyOneShotSchedule(description string, call *agyToolCall) bool {
+	if strings.HasPrefix(description, "Cron:") {
+		return false
+	}
+	var args map[string]json.RawMessage
+	if call != nil && call.Name == "schedule" && json.Unmarshal(call.Args, &args) == nil {
+		if strings.TrimSpace(agyToolString(args["CronExpression"])) != "" {
+			return false
+		}
+		if duration := args["DurationSeconds"]; duration != nil && string(duration) != "null" {
+			return true
+		}
+	}
+	return strings.HasPrefix(description, "Timer:")
 }
 
 func setAgyTaskKind(task *proto.BackgroundTask, tool string, raw json.RawMessage) {

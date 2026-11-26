@@ -436,3 +436,6 @@ The CLI exports parallel tool results by completion order. Match each result to 
 A later record for the same running step can replace the task announcement with final output. Keep the task ID and
 its start metadata through that replacement, along with the intervening steps. Tool arguments can be JSON strings
 inside JSON, including both the action and the task ID in a `manage_task` kill.
+
+A one-shot timer can report its firing through a system message whose `sender` is the task ID. Use the message
+step's creation time for completion. Cron iterations and heartbeat messages leave the schedule active.

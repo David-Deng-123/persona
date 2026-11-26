@@ -102,6 +102,43 @@ func TestAgyBackgroundLifecycle(t *testing.T) {
 	}
 }
 
+func TestAgyBackgroundScheduleMessages(t *testing.T) {
+	const started = "2026-06-01T10:00:00Z"
+	const fired = "2026-06-01T10:01:01Z"
+	const id = agyTestID + "/task-1"
+	for _, tc := range []struct {
+		name, args, description, sender, message string
+		completed                                bool
+	}{
+		{"timer duration", `{"DurationSeconds":60}`, "Check status", id, "Check again", true},
+		{"timer description", `{}`, "Timer: 60s", id, "Check again", true},
+		{"cron expression", `{"CronExpression":"0 * * * *"}`, "Timer: 60s", id, "Check again", false},
+		{"cron description", `{"DurationSeconds":"60"}`, "Cron: 0 * * * *", id, "Check again", false},
+		{"cron iteration", `{"DurationSeconds":"60"}`, "Timer: 60s", id, "Check again (iteration 1)", false},
+		{"heartbeat", `{"DurationSeconds":"60"}`, "Timer: 60s", id, "Task is still running", false},
+		{"different sender", `{}`, "Timer: 60s", id + "0", "Check again", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			planner := fmt.Sprintf(`{"step_index":0,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"schedule","args":%s}]}`+"\n", tc.args)
+			message := fmt.Sprintf("<SYSTEM_MESSAGE>\n[Message] timestamp=%s sender=%s priority=MESSAGE_PRIORITY_HIGH content=%s\n</SYSTEM_MESSAGE>", started, tc.sender, tc.message)
+			notice := fmt.Sprintf(`{"step_index":2,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", fired, message)
+			steps, _ := parseAgySteps([]byte(planner+agyBackgroundStep(1, "RUNNING", started, 1, tc.description, "")+notice), agyTestID)
+			tasks := agyBackground(steps, agyTestID, "", nil)
+			if tc.completed {
+				if len(tasks.running) != 0 || len(tasks.ended) != 1 {
+					t.Fatalf("expected one ended timer: %+v", tasks)
+				}
+				ended := tasks.ended[0]
+				if ended.ID != id || ended.Status != proto.WorkflowCompleted || ended.EndedAt.Format(time.RFC3339) != fired {
+					t.Fatalf("unexpected timer outcome: %+v", ended)
+				}
+			} else if len(tasks.running) != 1 || tasks.running[0].ID != id || len(tasks.ended) != 0 {
+				t.Fatalf("expected the task to keep running: %+v", tasks)
+			}
+		})
+	}
+}
+
 func TestAgyBackgroundSessionListMerge(t *testing.T) {
 	n, herdr, home := herdrNode(t)
 	t.Setenv("ANTIGRAVITY_CLI_CONFIG_DIR", "")
