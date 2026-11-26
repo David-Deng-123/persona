@@ -1,5 +1,35 @@
 # Lessons: assistant (headless Claude / Codex)
 
+- Node preparation can call back into the hub for settings (#16065). Release the database connection before the RPC
+  and use the existing durable start claim and candidate receipt to reconcile it. Recheck the epoch when mapping the
+  receipt and keep late candidate identities for cleanup. A batch larger than the pool should exercise a real
+  same-pool read while the node is still waiting.
+
+- A supervision transcript fixture must not use push policy as its write switch (#15498). Side conversations can
+  receive user-level supervision with `hold_pushes=false`; it still writes a user item. Select fake writes by message
+  source, keep missing-item injection independent, and name push-held fixtures explicitly. Test both notification
+  policies without relaxing transcript confirmation, once-ID or retry assertions.
+
+- Mixed core/module fixtures must keep testing the core when a module is absent (#15500). Check generic scheduled
+  failure routing first, then make the optional briefing hook assert absence or its normal fallback. Do not skip the
+  whole test, weaken the default-build assertion or wait for a notification from a module that is not loaded.
+
+- Timer completion accounting belongs to the registered callback wrapper (#15499). A direct call of a stopped
+  callback guard has no matching `WaitGroup.Add`; decrementing there can panic and strand teardown on a negative
+  counter. Keep the real timer's Add/Done pairing and prove shutdown drains an in-flight callback without rearming.
+
+- A single-reviewer guard must preserve conversationless supervisor fallbacks (#15497). A legacy reporting-only
+  direction can retain its recorded assignment while its review reminder goes to main. Authorize that same reviewer
+  without authorizing an unrelated conversation or taking over a real supervisor's offline queue; test direct, busy
+  and restart-restored delivery with the assignment unchanged.
+
+
+- A scheduled-workout fixture must clear unrelated default routines before admission (#15442). `acceptWorkout`
+  appends its task to the existing schedule; unlike `setTasks`, it does not replace the morning and evening routines.
+  Near their due time, a catalog test can count both the workout report and a briefing, while waiting for only the
+  first recorded run can hide the second dispatch. Isolate the fixture, verify the workout's `RefID`, and reproduce
+  with a due default routine and settled asynchronous work; keep the single-send and requested-binding assertions.
+
 - `assistant.New` must not read the database (#13408). Many tests build the Service on a fake store that embeds a nil
   `Store` and implements only the methods it needs; one new `Setting` call in `New` (reading the feature-module switch)
   panicked dozens of unrelated tests. Read what the constructor needs where the manager starts (`main.go`, next to the
@@ -266,6 +296,7 @@ Pitfalls, unusual behavior, and decisions at the time (formerly `CLAUDE.md`; ind
 - Scheduled assistant work needs one table only (2026-10-31, `docs/assistant/assistant.md` “Scheduled tasks”). Separate schedules / follow-ups forced repeated checks to `schedule_followup` each round; entry disappeared on start, invisible / unstopppable during hour-long approval waits. Repeating work uses every; self-reschedule recognized as same task. Only user changes task model / permission in app; assistant cannot elevate itself. Headless `bypassPermissions` only at launch.
 - Lark assistant uses gateway skill (copy formerly `server/internal/assistantskills/`, embedded personad, installed `.claude/skills` at assistant startup, upstream sync script; since 2026-11-04 in Lark plugin). Token formerly process env; since #1317 not even env, below. Node Bash PreToolUse `node/larkgate.go` applies only `assistant-hooks` / assistant-settings.json. Unparsed commands containing `ol POST/PUT/PATCH/DELETE` still require phone confirmation, otherwise bypass permits; credential-proxy gate now rejects them outright.
   Test hub uses own HOME / port / DB (`/tmp/jt`), never live personad. SSH pkill -f pattern can match own SSH command; use [/]tmp/…. [x] works only if literal absent elsewhere in same SSH command: 2026-11-01 `pkill -f "[d]rive.py x"` followed by `python3 drive.py x …`, and `pgrep -f persona_args` then process-group kill both killed SSH, exit 255. Safest anchor full path, `pgrep -f '^/tmp/jt/…/personad'`, get PID / kill, only that task per SSH.
+- Proving a shell variable constant needs allowlists, not denylists (#16491, 2026-11-27). The gate parses with a bash grammar, but the assistant's Bash may be zsh, which sets variables through builtins and modifiers that leave no assignment in the syntax tree (`print -v`, `zstyle -s`, `set -A`, `emulate -c`, `noglob eval`, `repeat`), and evaluates arithmetic in places bash does not (`-t` / `-v` test operands, `$name[expr]`, integer specials like `HISTSIZE=expr`, `$~name` glob qualifiers). Eight adversarial review rounds each found new bypasses until the rule became: only listed commands and test operators, ordinary names, no arithmetic, `cd /tmp` alone. Extend the gate's reading of the shell only with allowlists, and have a reviewer check each claim in real bash and zsh.
 - Keep credentials out of Agent env, not protected by read-command blacklists (#1317,2026-11-05). Env, split-variable-name printenv, `cat /proc/self/env*`, ${!prefix*}, `python3 -c 'import os…'` bypass; review also nohup env, `compgen -e`, ps eww, eval-built names, `env -u HOME printenv`—unpatchable. Worse, token-bearing scripts bypass write confirmation directly. Credentials stay in node; local proxy checks every actual request against same rules (`node/gateproxy.go`). Proxy belongs to entire persistent `assistantKeeper` process, not per-connection Node: reconnect replaces Node, surviving chat retains old proxy address, new approved calls cannot reach old proxy. One approval allows method + path + body once. Writes in unparsed loops / scripts must be refused and sent as standalone commands; never open timed allow-all windows, which permit unrelated later commands in same chat.
 - Codex assistant uses `codex app-server` (`docs/assistant/assistant.md` “Codex”). MCP approval arrives as `mcpServer/elicitation/request` with `_meta.codex_approval_kind: mcp_tool_call`, not command approval. Default tool timeout 60 seconds needs larger `tool_timeout_sec` for ask_user. Default command env strips `*KEY*` / `*TOKEN*` (ol lost token). `turn/interrupt` does not stop running commands; `thread/backgroundTerminals/clean` additionally, experimental generate-ts --experimental. Codex owns thread ID, unknown when MCP starts. Lark gate relies on approval arriving; never `approvalPolicy: never`.
 - Codex / Claude share assistant auto-memory (`docs/assistant/assistant.md`). Untrusted Codex approves even head; without separate allowance every memory read prompts phone (tested 2026-11-01). Memory outside assistant directory needs writableRoots. Do not enable machine-wide `~/.codex/memories` for assistant.
@@ -530,6 +561,17 @@ user's language in process text too.
 
 - Match Inbox PR/issue comments by full task URLs before the AI twin gate (#5578). A to-do may record its link only in `pr_url`, its title or its notes. Keep host, repository and PR/issue kind in the identity, leave ambiguous matches to the judge, and use a separate per-message signal cursor: the twin's `Of` cursor tracks handling, which does not run while it is off. Persist associations before forwarding them, and retain the existing supervision opt-in and exclusions. A URL-only Agent must still obey the age limit before its first automatic handling; creating its task association is not permission to process old backlog. On load, seed previously linked items' signal cursors from the stored snapshot so a restart is not paid-for news; count only batches observed after that snapshot.
 
+## A card marked delegating needs someone woken for it and a way up (#15360)
+
+A leader's Bash approval (a Lark doc write the node's gate asked about) showed "Supervisor handling" for 21 minutes
+with nobody told. The non-owner route had handed it to the main conversation: marked `delegating`, so the apps hid it
+from Needs you and refused the owner's answer, and parked at once, so no timeout moved it. The main conversation got
+only a quiet note (`keepRelayLater`) that starts no turn, and `ask_escalate` takes a task, which the card had none of.
+Without a background supervisor the main conversation's own card went to itself. Before a route marks a card
+delegating, check that the conversation it goes to is woken for it, can answer or hand it up, and is not the one
+waiting on it. A new route also keeps the exceptions of the existing ones: `askLadder` already left the supervising
+conversations' cards with the user, and the new route had to share that rule (`supervisorConversation`).
+
 ## One `todos` event per write, and nothing that copies every finished task on a timer (#5995)
 
 Every `{"type":"todos"}` makes every app read the whole `GET /api/v1/todos` (about 1 MB at ~500 to-dos), and one step of
@@ -749,6 +791,10 @@ routes read as typed (`writeDelivered`, `server/internal/assistant/todo_write_ou
 pitfalls from the Agent-send side at the same time, and the two changes now share `sendUnknown` and that type. The
 to-do routes read a little more as in doubt than `sendUnknown` does (a connection that ended mid-answer, any other
 network error). A refusal said "nothing typed" wrongly is the unsafe side: when in doubt, say `unknown`.
+
+After a conversation switch claims segment preparation, a failed receipt lookup can only tell us about that lookup
+(#16066). Keep checking the same operation until its preparation deadline. Starting a replacement before confirming
+the original could leave two prepared segments.
 
 ## Name the thing an event is about, and keep what was done for it (#5718)
 
@@ -991,3 +1037,32 @@ Cache keepalive revoked every role this way and never mounted a proxy, while its
 inventory with `Assistant: true`. Judge a raw row with `fleetMachine.isAssistant` (its directory), and build test
 inventories the way a node sends them. The same feature also needed Claude Code's `ENABLE_PROMPT_CACHING_1H`: without
 it the CLI declares only five-minute markers on an API key or a gateway, whatever TTL the gateway applies later.
+
+## Tool discovery can invalidate an entire warm conversation (#13719)
+
+Adding an always-loaded tool to the top-level list can invalidate a warm Claude conversation prefix. Test
+the full ordered list before and after discovery and reconnection, including a different upstream order.
+
+## A supervision hold belongs to the turn that ended (#15549)
+
+Save the hold timestamp and promotion together. Clear the active record at the end of its turn and carry that
+turn's decision to the delayed push and channel mirror. Reading the conversation's current hold at notification
+time can pick up the next round. A restart test for promotion must show the hold still exists before it checks
+that a silent finish is refused.
+
+## An inbox row can carry more than one provider event (#15517)
+
+Keep the deduplication key independent of the Inbox row and the binding that matched. Two readers can report
+the same comment, and the row can collect a later comment while the first is waiting for its digest. Commit the
+source receipt with the Inbox write. Reserve only one action owner and pin the delivery before contacting the
+Agent. Record uncertain delivery against that recipient so a restarted worker does not try another one.
+
+## Check-time `@file` content is not what an Auth-less gate sends (#8413)
+
+A command gate without `Auth` has no local proxy to inspect the HTTP body at send time, so check-time `@file` content
+cannot grant a silent body-scoped `allow` or bypass an earlier body-scoped restriction in default mode. Read `@file`
+bodies and `--url-query @file` inputs through a pinned `os.OpenRoot` with `openKnowledgeFile` (`O_NONBLOCK|O_NOFOLLOW`),
+reject final symlinks, non-regular files, files over 1 MiB, and lexical or resolved `/proc`, `/dev` and `/sys` paths.
+Output-filter whitelists also need argument checks: `sort -o` / `--output` / `--compress-program`, `date -s` / `--set` /
+positional timestamp operands, and `uniq IN OUT` write files, execute programs, or mutate system state rather than only
+formatting output.
