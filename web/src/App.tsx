@@ -67,6 +67,7 @@ import { clearDesktopIsland, DesktopIslandSignals } from "./lib/desktop-island";
 import { openStartPage } from "./lib/start-page";
 import { conversationRoute } from "./lib/conversation-page";
 import { useTrackTitle } from "./lib/tracks";
+import { healthReadOnly } from "./lib/health-archive";
 import { connectModuleHub, moduleExtensionAt, moduleTitle, useModuleStates } from "./core/module-host";
 import { ModuleExtensionPage, ModulePage } from "./core/ModulePage";
 
@@ -84,11 +85,10 @@ const AgentArchives = lazyPage(() => import("./views/agents/AgentArchives").then
 const CompareRuns = lazyPage(() => import("./views/CompareRuns").then((m) => m.CompareRuns), { routes: ["compare"] });
 const RequestPage = lazyPage(() => import("./views/RequestPage").then((m) => m.RequestPage), { routes: ["request"] });
 const WorkspaceBoard = lazyPage(() => import("./views/WorkspaceBoard").then((m) => m.WorkspaceBoard), { routes: ["workspace-board"] });
-const Machines = lazyPage(() => import("./views/Machines").then((m) => m.Machines), { routes: ["machines"] });
+const Machines = lazyPage(() => import("./views/Machines").then((m) => m.Machines), { routes: ["machines", "machine"] });
 const TerminalPage = lazyPage(() => import("./views/terminal/TerminalPage").then((m) => m.TerminalPage), { routes: ["terminal"] });
 const LarkOAuthReturn = lazyPage(() => import("./views/settings/LarkOAuthReturn").then((m) => m.LarkOAuthReturn), { routes: ["lark-oauth"] });
 const SubscriptionsPage = lazyPage(() => import("./views/subscriptions/SubscriptionsPage").then((m) => m.SubscriptionsPage), { routes: ["subscriptions"] });
-const MachineDetail = lazyPage(() => import("./views/machines/MachineDetail").then((m) => m.MachineDetail), { routes: ["machine"] });
 const SpacePage = lazyPage(() => import("./views/SpacePage").then((m) => m.SpacePage), { routes: ["space"] });
 const Settings = lazyPage(() => import("./views/Settings").then((m) => m.Settings), { routes: ["settings"] });
 const SpaceExtensionEntry = lazyPage(() => import("./views/spaces/SpaceExtensionEntry").then((m) => m.SpaceExtensionEntry), { routes: ["track", "track-new"] });
@@ -320,7 +320,7 @@ function pageTarget(s: State, route: Route): PageTarget | undefined {
     if (route.at || route.standalone) return exact();
     const parentRow = pageRows(s, route.mid).find((r) => r.session_id === sub.parent);
     const dest = parentRow?.assistant
-      ? conversationRoute(route.mid, sub.parent, s.sessions, s.assistant, parentRow.manager)
+      ? conversationRoute(route.mid, sub.parent, s.sessions, s.assistant, parentRow)
       : { ...route, sid: sub.parent };
     return { link: undefined, to: routePath(dest), mid: route.mid, sid: undefined, parent: sub.parent, subagent: { mid: route.mid, sid: route.sid } };
   }
@@ -328,7 +328,7 @@ function pageTarget(s: State, route: Route): PageTarget | undefined {
   const row = rows.find((r) => r.session_id === route.sid);
   // a Persona conversation's `/s/…` link (a push, a copied address): its own page, which draws its plan cards, questions
   // and tasks; the agent chat here shows none of them
-  if (row?.assistant && !route.at) return { link: undefined, to: routePath(conversationRoute(route.mid, route.sid, s.sessions, s.assistant, row.manager)), mid: route.mid, sid: undefined };
+  if (row?.assistant && !route.at) return { link: undefined, to: routePath(conversationRoute(route.mid, route.sid, s.sessions, s.assistant, row)), mid: route.mid, sid: undefined };
   // a lead's worker's (#5180): the lead's page, the worker in its Team panel
   const worker = workerTarget(rows, route.mid, row, inWorkView(route));
   if (worker && !route.standalone) return worker;
@@ -342,7 +342,7 @@ function pageTarget(s: State, route: Route): PageTarget | undefined {
     if (route.at || route.standalone) return exact();
     const parentRow = pageRows(s, parentMid).find((r) => r.session_id === parent);
     const dest = parentRow?.assistant
-      ? conversationRoute(parentMid, parent, s.sessions, s.assistant, parentRow.manager)
+      ? conversationRoute(parentMid, parent, s.sessions, s.assistant, parentRow)
       : withWorkView({ name: "session", mid: parentMid, sid: parent }, inWorkView(route));
     return { link: undefined, to: routePath(dest), mid: parentMid, sid: undefined, parent, subagent: { mid: route.mid, sid: route.sid } };
   }
@@ -570,9 +570,13 @@ function Shell() {
     case "module":
       main = <ModulePage key={route.module} route={route} onToggleSidebar={toggle} />;
       break;
-    case "track":
-      main = route.sid ? <Space key={`${route.slug}/${route.sid}`} slug={route.slug} sid={route.sid} onToggleSidebar={toggle} /> : <SpaceExtensionEntry slug={route.slug} />;
+    case "track": {
+      // Health's existing data stays in the default panel without its module (including a core-only build), rather
+      // than depending on the optional Space Conversations extension or opening an editable new-conversation home.
+      const archive = healthReadOnly(route.slug);
+      main = route.sid || archive ? <Space key={`${route.slug}/${route.sid ?? "home"}`} slug={route.slug} sid={route.sid} fresh={route.fresh || archive} onToggleSidebar={toggle} /> : <SpaceExtensionEntry slug={route.slug} />;
       break;
+    }
     case "track-new":
       main = <SpaceExtensionEntry fresh />;
       break;
@@ -595,7 +599,7 @@ function Shell() {
       main = <WorkspaceBoard onToggleSidebar={toggle} />;
       break;
     case "todos":
-      main = <TodosView selectedId={route.id} view={route.view} mode={route.mode} date={route.date} onToggleSidebar={toggle} />;
+      main = <TodosView selectedId={route.id} directionId={route.direction} manager={route.manager} view={route.view} mode={route.mode} date={route.date} onToggleSidebar={toggle} />;
       break;
     case "agents":
       main = <AgentsView key={route.id ?? ""} id={route.id} onToggleSidebar={toggle} />;
@@ -609,17 +613,15 @@ function Shell() {
     case "compare":
       main = <CompareRuns id={route.id} onToggleSidebar={toggle} />;
       break;
+    case "machine":
     case "machines":
       main = <Machines onToggleSidebar={toggle} />;
       break;
     case "terminal":
       main = <TerminalPage route={route} onToggleSidebar={toggle} onNewAgent={openNewAgent} />;
       break;
-    case "machine":
-      main = <MachineDetail key={route.mid} mid={route.mid} onToggleSidebar={toggle} />;
-      break;
     case "space":
-      main = <SpacePage key={`${route.mid}/${route.space}`} mid={route.mid} space={route.space} onToggleSidebar={toggle} />;
+      main = <SpacePage key={`${route.mid}/${route.workspace ?? route.space}`} workspaceId={route.workspace} mid={route.mid} space={route.space} onToggleSidebar={toggle} />;
       break;
     case "settings":
       main = <Settings onToggleSidebar={toggle} />;
@@ -645,7 +647,7 @@ function Shell() {
 
   return (
     // #root is 100dvh (index.html); with a soft keyboard up (iOS) the shell is only the part above it (lib/viewport.ts)
-    <div ref={shell} data-app-shell className="flex h-full overflow-hidden bg-page">
+    <div ref={shell} data-app-shell data-sidebar-hidden={!sidebarShown(layout) || undefined} className="flex h-full overflow-hidden bg-page">
       {/* wide: a fixed column; narrow: a drawer over the page, clear of a landscape notch and the home indicator */}
       <div
         ref={drawerBox}
@@ -664,7 +666,7 @@ function Shell() {
         )}
         style={{ transitionTimingFunction: EASE }}
       >
-        {rail ? <SidebarRail route={route} onSearch={() => openPalette("jump")} onNewAgent={openNewAgent} /> : <Sidebar route={route} onSearch={searchFromSidebar} onNewAgent={openNewAgent} onNavigate={close} workspaceActions={workspaceActions} />}
+        {rail ? <SidebarRail route={route} onSearch={() => openPalette("jump")} onNewAgent={openNewAgent} /> : <Sidebar active={narrow ? drawer : sidebarShown(layout)} route={route} onSearch={searchFromSidebar} onNewAgent={openNewAgent} onNavigate={close} workspaceActions={workspaceActions} />}
         {!narrow && !rail && <SidebarResize column={sidebarId} />}
       </div>
       {/* the scrim fades out as well as in; a drag sets its opacity as it goes (lib/drawer.ts) */}

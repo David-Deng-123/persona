@@ -19,6 +19,9 @@ import { ShellHeaderSlots } from "../ShellSwitch";
 import { interactiveSessionPane } from "./work-terminal-layout";
 import { t } from "../../i18n";
 
+import { MachineTerminalEntry } from "./MachineTerminalEntry";
+import type { MachineTerminalTarget } from "../../lib/machine-terminal";
+
 type TerminalRoute = Extract<Route, { name: "terminal" }>;
 
 export function TerminalPage({ route, onToggleSidebar, onNewAgent, detail, onWorkPane }: {
@@ -32,12 +35,16 @@ export function TerminalPage({ route, onToggleSidebar, onNewAgent, detail, onWor
   const allMachines = useStore((s) => s.machines);
   const sessions = useStore((s) => s.sessions);
   const panesOn = useStore((s) => s.features.includes("terminal_panes"));
-  const addressed = route?.mid ?? detail?.selected?.mid;
+  // New terminal on a computer with no workspace yet (#6362): a hub that checks the node can (else 409 node_outdated)
+  const newSpaceOn = useStore((s) => s.features.includes("pane_new_space"));
+  const canOpenFolder = useStore(s => s.features.includes("pane_cwd"));
+  const target: MachineTerminalTarget | undefined = route?.view === "terminals" && !route.id ? history.state?.machineTerminal : undefined;
+  const addressed = target?.mid ?? route?.mid ?? detail?.selected?.mid;
   // A bookmarked terminal or session may name another assistant's computer. Only the current one's are listed.
   const targets = addressed && !machines.some((m) => m.id === addressed) ? allMachines.filter((m) => machines.includes(m) || m.id === addressed) : machines;
   const shown: OpenTerminal | undefined = route?.mid && route.id ? { mid: route.mid, id: route.id } : undefined;
   const selected = detail?.selected;
-  const { listing, refresh } = usePanes(targets, panesOn && Boolean(shown || detail));
+  const { listing, refresh, reload } = usePanes(targets, panesOn && Boolean(shown || detail || target));
   // a stopped Agent (#4754) has its terminal too: the shell it left, or Resume when that is gone
   const stoppedSelected = useStore(() => Boolean(selected && isStoppedAgent(getSession(selected.mid, selected.sid))));
   const terminalAvailable = Boolean(panesOn && selected && targets.some((m) => m.id === selected.mid && m.online) &&
@@ -121,6 +128,10 @@ export function TerminalPage({ route, onToggleSidebar, onNewAgent, detail, onWor
       </div>
     );
   }
+
+  if (target && panesOn) return <MachineTerminalEntry key={JSON.stringify(target)} target={target}
+    machine={targets.find(m => m.id === target.mid)} listing={listing[target.mid]}
+    canCreateSpace={newSpaceOn} canOpenFolder={canOpenFolder} retry={() => void reload([target.mid])} />;
 
   return (
     <div className="flex h-full min-w-0 flex-col">
