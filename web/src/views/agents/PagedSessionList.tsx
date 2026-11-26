@@ -4,6 +4,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { t } from "../../i18n";
 import { api, errorText } from "../../lib/api";
 import { onShownHint } from "../../lib/shown-hints";
+import { onHubEvent } from "../../lib/store";
+import { isResumed } from "../../lib/reconnect";
 import { filterQuery, SessionList, type ListCounts, type ListFilters } from "../../lib/session-list";
 import { boundedCounts } from "../../lib/sessions";
 import { groupMachines, holdsPlace, JUST_FINISHED_KEY, type GroupDimension, type SessionGroup, type SessionPlace, type TodoNames } from "../../lib/session-groups";
@@ -233,16 +235,28 @@ export function PagedSessionList<T>({ root, path, identity, compare, removeIdent
     if (!facetScoped || facetsFromList) return;
     let live = true;
     let sequence = 0;
+    let failed = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
     const read = () => {
       const request = ++sequence;
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
       void api<ListCounts>(`${countsPath}${facetQuery}`, { signal: controller.signal }).then((counts) => {
-        if (live && request === sequence && counts.state && counts.group && counts.project && counts.machine) { setFacets(counts); setFacetError(""); }
-      }, (e) => { if (live && request === sequence) setFacetError(errorText(e)); });
+        if (live && request === sequence && counts.state && counts.group && counts.project && counts.machine) { failed = false; setFacets(counts); setFacetError(""); }
+      }, (e) => {
+        if (!live || request !== sequence) return;
+        failed = true;
+        setFacetError(errorText(e));
+        if (document.visibilityState === "visible") retryTimer = setTimeout(read, 5_000);
+      });
     };
     read();
     const off = onShownHint(event, read);
-    return () => { live = false; controller.abort(); off(); };
+    const offHello = onHubEvent("hello", (msg) => { if ((failed || !isResumed(msg)) && document.visibilityState === "visible") read(); });
+    const onVis = () => { if (failed && document.visibilityState === "visible") read(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { live = false; clearTimeout(retryTimer); controller.abort(); off(); offHello(); document.removeEventListener("visibilitychange", onVis); };
   }, [countsPath, event, facetScoped, facetsFromList, facetQuery, facetAttempt]);
   useEffect(() => {
     // Keep the last counts while a refresh or a new scope is loading, including a root rebaseline.
@@ -260,16 +274,28 @@ export function PagedSessionList<T>({ root, path, identity, compare, removeIdent
   useEffect(() => {
     if (scopeQuery === "counts=1" || scopeFromFacets) return;
     let sequence = 0;
+    let failed = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const abort = new AbortController();
     const read = () => {
       const request = ++sequence;
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
       void api<ListCounts>(`${countsPath}${scopeQuery}`, { signal: abort.signal }).then((counts) => {
-        if (request === sequence && counts.state) { setScopeCounts(counts); setScopeError(""); }
-      }, (e) => { if (request === sequence) setScopeError(errorText(e)); });
+        if (request === sequence && counts.state) { failed = false; setScopeCounts(counts); setScopeError(""); }
+      }, (e) => {
+        if (request !== sequence) return;
+        failed = true;
+        setScopeError(errorText(e));
+        if (document.visibilityState === "visible") retryTimer = setTimeout(read, 5_000);
+      });
     };
     read();
     const off = onShownHint(event, read);
-    return () => { sequence++; abort.abort(); off(); };
+    const offHello = onHubEvent("hello", (msg) => { if ((failed || !isResumed(msg)) && document.visibilityState === "visible") read(); });
+    const onVis = () => { if (failed && document.visibilityState === "visible") read(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { sequence++; clearTimeout(retryTimer); abort.abort(); off(); offHello(); document.removeEventListener("visibilitychange", onVis); };
   }, [scopeQuery, scopeFromFacets, countsPath, event]);
   useEffect(() => {
     // Even a grouped, filtered list needs the root counts for the unfiltered chips.

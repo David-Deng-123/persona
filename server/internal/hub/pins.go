@@ -103,6 +103,7 @@ func (h *Hub) pinRoutes(api *http.ServeMux) {
 		h.mutes = &p
 		h.mutesMu.Unlock()
 		h.mutesChanged() // the manager decides the pushes (fleet_link.go)
+		h.broadcast(map[string]any{"type": "mutes"})
 		writeJSON(w, p)
 	})
 	api.HandleFunc("GET /api/v1/pins", func(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +136,7 @@ func (h *Hub) pinRoutes(api *http.ServeMux) {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
+		h.broadcast(map[string]any{"type": "pins"})
 		writeJSON(w, p)
 	})
 }
@@ -200,6 +202,7 @@ func (h *Hub) renameSpace(w http.ResponseWriter, r *http.Request, m *Machine) {
 					h.mutesMu.Unlock()
 					h.mutesChanged()
 				}
+				h.broadcast(map[string]any{"type": key})
 			}
 		}
 	}

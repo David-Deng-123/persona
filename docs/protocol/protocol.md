@@ -3325,6 +3325,8 @@ Server → client:
 | `mail_accounts` | No payload: the assistant added or removed a mail account (`persona_settings`, confirmed on the phone); clients re-read `GET /api/v1/mail/accounts` ("Mail API" below). The HTTP account endpoints don't send it |
 | `look` | `{"id","effective"}`: the selected avatar changed (chosen on another device, or back to the default after an extension was uninstalled); every client switches to `effective` (#3200) |
 | `personas` | No payload; the avatar list changed (a tiered avatar changed tier, an extension with avatars was installed / uninstalled / disabled); clients re-fetch `GET /api/v1/personas` and switch once the new package has fully downloaded (`docs/apple/persona.md` ("Tiered avatars")) |
+| `mutes` | No payload; the muted spaces/sessions changed (`PUT /api/v1/mutes` or space rename); clients re-read `GET /api/v1/mutes` |
+| `pins` | No payload; the pinned spaces/sessions changed (`PUT /api/v1/pins` or space rename); clients re-read `GET /api/v1/pins` |
 | `error` | `machine_id`, `session_id`, `error`; e.g. a subscription replay failed, and the client checks the session against it |
 | `pong` | `id` (a string, echoing the client's application-level ping) |
 
@@ -3928,7 +3930,7 @@ The web's paged Agents list draws **By to-do** with it (`docs/web/web.md` "By to
 GET /api/v1/sessions?summary=1&limit=50&since=<URL-encoded checkpoint>
 ```
 
-The page has the same envelope. `sessions` contains the latest copies of changed/new matching rows; `remove` includes deleted rows and rows leaving the filter. The `added` array identifies only rows created after the baseline, using the same identity encoding as `remove`; an existing row that changed or entered the filter is not added. Current hubs send it on every full and delta page, including as `[]` when no row was created, so a client can distinguish that from an older hub omitting the field. Multiple changes to one identity collapse to its final state. For runtime rows, each removal is a **JSON tuple encoded as a string**, e.g. `"[\"demo\",\"session/with/slashes\"]"`; decode it as `[machine_id, session_id]`, never split on `/`. Personal-agent removals are their existing opaque `id` strings.
+The page has the same envelope. `sessions` contains the latest copies of changed/new matching rows; `remove` includes deleted rows and rows leaving the filter. The `added` array identifies rows created or newly entering the active filter after the baseline (`!before && after`), using the same identity encoding as `remove`; a row that already matched the filter at baseline and only changed is not added. Current hubs send it on every full and delta page, including as `[]` when no row entered, so a client can distinguish that from an older hub omitting the field. Multiple changes to one identity collapse to its final state. For runtime rows, each removal is a **JSON tuple encoded as a string**, e.g. `"[\"demo\",\"session/with/slashes\"]"`; decode it as `[machine_id, session_id]`, never split on `/`. Personal-agent removals are their existing opaque `id` strings.
 
 Retained deltas cover at most 128 revisions and 16,384 changed identities, evicting whole revisions. A restart or an older checkpoint returns HTTP **409**, `code: "revision_expired"`; obtain a fresh baseline, never silently treat it as a successful empty delta. Frozen delta cursors remain valid even if the underlying journal is subsequently evicted.
 
