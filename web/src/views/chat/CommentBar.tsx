@@ -307,9 +307,9 @@ export function CommentBar({
       }
     >
       {showContext && (
-        <div className="flex min-w-0 items-center gap-1.5 px-1 text-[11.5px] text-ink-3" data-comment-bar-context>
+        <div className="flex min-w-0 items-center gap-1.5 px-1 text-submeta text-ink-3" data-comment-bar-context>
           {number !== undefined && <NumberDot n={number} />}
-          <span className={cx("min-w-0 flex-1 truncate", showContextOnDesktop && !docked ? "font-mono text-[11px]" : "")} title={cleanContext}>
+          <span className={cx("min-w-0 flex-1 truncate", showContextOnDesktop && !docked && "font-mono")} title={cleanContext}>
             {cleanContext}
           </span>
           {docked && (
@@ -373,13 +373,13 @@ export function CommentBar({
               cancel();
             }
           }}
-          className="max-h-24 min-h-7 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1.5 py-[5px] text-[13px] leading-[1.4] text-ink outline-none placeholder:text-ink-3"
+          className="max-h-24 min-h-7 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1.5 py-[5px] text-meta leading-[1.4] text-ink outline-none placeholder:text-ink-3"
         />
         {!focused && shortcutHint && !docked && (
           <kbd
             data-comment-shortcut
             aria-hidden="true"
-            className="shrink-0 rounded-[5px] border border-line-strong bg-inset px-1.5 py-0.5 font-sans text-[10.5px] leading-none font-medium text-ink-3"
+            className="shrink-0 rounded-[5px] border border-line-strong bg-inset px-1.5 py-0.5 font-sans text-submeta leading-none font-medium text-ink-3"
           >
             {shortcutHint}
           </kbd>
