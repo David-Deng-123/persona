@@ -593,9 +593,9 @@ export function TerminalPanel({
           <span aria-hidden data-terminal-icon className="flex size-6 shrink-0 items-center justify-center rounded-[6px] border border-line bg-inset text-ink-2">
             <Icon name="terminal" size={13} />
           </span>
-          <div className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden text-[13px]" title={[primaryTitle, contextText].filter(Boolean).join(" · ")}>
+          <div className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden text-meta" title={[primaryTitle, contextText].filter(Boolean).join(" · ")}>
             <span className="truncate font-medium text-ink">{primaryTitle}</span>
-            {contextText && <span className="min-w-0 shrink truncate text-[12px] text-ink-3">· {contextText}</span>}
+            {contextText && <span className="min-w-0 shrink truncate text-label text-ink-3">· {contextText}</span>}
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             {supported && <ModeToggle mode={surfaces.shown} onChange={choose} />}

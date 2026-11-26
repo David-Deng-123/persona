@@ -494,8 +494,8 @@ export function ShellSpaceSection({ mid, online, sp, machineName, reg, hover, ac
       onMenu={onNodeMenu ? (at) => onNodeMenu(termSpaceNode(mid, sp, online, { fold: { folded, toggle } }), at, t("sidebar.space_named", { name: sp.label })) : undefined}
       title={
         <span className="flex items-center gap-1.5">
-          <span className="truncate normal-case tracking-normal text-[11.5px] text-ink-2">{sp.label}</span>
-          {machineName && <span className="truncate normal-case tracking-normal text-[11px] font-normal text-ink-3">{machineName}</span>}
+          <span className="truncate normal-case tracking-normal text-submeta text-ink-2">{sp.label}</span>
+          {machineName && <span className="truncate normal-case tracking-normal text-submeta font-normal text-ink-3">{machineName}</span>}
         </span>
       }
       right={<GroupCount n={count} label={t("sidebar.pane_count", { count })} />}
