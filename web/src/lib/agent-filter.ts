@@ -3,7 +3,7 @@
 // keeps its place, so the next one is still right below it.
 import { t } from "../i18n";
 import { sessionHost, sessionSource, type AgentMutes } from "./agent-groups";
-import { backgroundWaiting, stateOf } from "./format";
+import { activityOf, backgroundWaiting, stateOf } from "./format";
 import { agentKey, isSpacePinned, type AgentPins } from "./pins";
 import { isMuted } from "./session-actions";
 import { unseen } from "./seen-outbox";
@@ -43,12 +43,13 @@ export function filterState(f: AgentFilter): AgentState | undefined {
 /** A muted agent that is working or finished unread is not counted or listed under "Unread" / "Working" (it sits under "Muted");
  * one that needs you still is, the same as the list's order. */
 export function matchesFilter(s: Session, f: AgentFilter, mutes: AgentMutes): boolean {
-  if (f === "terminal") return sessionSource(s) === "terminal" && stateOf(s) !== "offline";
+  if (f === "terminal") return sessionSource(s) === "terminal" && activityOf(s) !== "offline";
   if (f === "feishu") return sessionSource(s) === "feishu";
   const state = filterState(f);
   if (!state) return true;
   if (state === "working" && backgroundWaiting(s) !== (f === "bg_waiting")) return false;
-  return stateOf(s) === state && (state === "needs_you" || !isMuted(s, mutes));
+  if (f === "needs" && s.view) return s.view.counted === true;
+  return activityOf(s) === state && (state === "needs_you" || !isMuted(s, mutes));
 }
 
 export type FilterCounts = Record<Exclude<AgentFilter, "all">, number>;
