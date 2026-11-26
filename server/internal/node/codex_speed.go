@@ -109,5 +109,6 @@ func (n *Node) setCodexTerminalSpeed(ctx context.Context, id, tier string) error
 	case "priority":
 		native = "fast"
 	}
-	return n.applyCodexTerminalSettings(ctx, id, t, "/model --speed="+native, codexTerminalSettings{tier: tier})
+	_, err := n.applyCodexTerminalSettings(ctx, id, t, "/model --speed="+native, codexTerminalSettings{tier: tier})
+	return err
 }
