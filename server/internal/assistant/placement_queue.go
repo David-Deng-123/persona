@@ -650,6 +650,10 @@ func (s *Service) assignPendingPlacement(
 		}
 		configuredMode, _ := fitParams["permission_mode"].(string)
 		if !candidate.preservePermission {
+			if candidate.CallerPermission != nil {
+				candidate.Permission = *candidate.CallerPermission
+				candidate.normalizeReadonlyPermission(readonlyModeOf(s.settings(ctx)))
+			}
 			switch {
 			case candidate.Readonly:
 				if fit.allowAll() {
@@ -733,6 +737,11 @@ func (s *Service) assignPendingPlacement(
 	}
 	candidate.Placement = pl
 
+	var blockerRefs []string
+	if s.settings(ctx).todosV2On() {
+		blockerRefs = s.activeTodoBlockerRefs(ctx, pt.TodoID)
+	}
+
 	wasRetry := false
 	casResult := "not_pending"
 	currentVersion := 0
@@ -771,7 +780,15 @@ func (s *Service) assignPendingPlacement(
 		live.Permission = candidate.Permission
 		live.Why = candidate.Why
 		live.Placement = pl
-		live.Queue = nil
+		if len(blockerRefs) > 0 {
+			q := s.blockerWaitQueue(blockerRefs)
+			q.Retry = wasRetry
+			live.Queue = q
+			live.Placement = queuedPlacement(*live, q)
+			pl = live.Placement
+		} else {
+			live.Queue = nil
+		}
 		casResult = "ok"
 	}); err != nil {
 		return nil, err
@@ -792,6 +809,16 @@ func (s *Service) assignPendingPlacement(
 	}
 
 	s.savePlacement(ctx, pl)
+	if len(blockerRefs) > 0 {
+		s.logf("task %s: placed on %s but deferred until active todo blockers clear (%d active)", pt.TodoID, m.ID, len(blockerRefs))
+		return &placementAssignResult{
+			PlanID:      planID,
+			TodoID:      pt.TodoID,
+			Machine:     m.ID,
+			Cwd:         candidate.Cwd,
+			PlacementID: pl.ID,
+		}, nil
+	}
 	candidate.Queue = nil
 	candidate.admissionRelease = release
 	candidate.admissionClaimMachine = m.ID

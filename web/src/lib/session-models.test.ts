@@ -176,7 +176,7 @@ describe("what the pill says", () => {
   it("the list's name for the model once read, a short id before; the launcher, engine, effort and speed", () => {
     expect(pillView(session(), { list: claudeList })).toEqual({ engine: "claude", provider: "gateway", model: "Opus 5.5", effort: "high", loading: false, failed: false });
     expect(pillView(session(), {}).model).toBe("opus 5.5");
-    expect(pillView(codex({ service_tier: "priority" }), {})).toMatchObject({ engine: "codex", provider: "cx", model: "5.5", speed: "fast" });
+    expect(pillView(codex({ service_tier: "priority" }), {})).toMatchObject({ engine: "codex", provider: "cx", model: "GPT-5.5", speed: "fast" });
     expect(pillView(session({ launcher: undefined, agent: undefined }), {})).toMatchObject({ engine: "claude", provider: "claude" });
   });
 
@@ -211,7 +211,7 @@ describe("what the pill says", () => {
     expect(modelLabel("claude-sonnet-5-5[1m]")).toBe("sonnet 5.5 1M");
     expect(modelLabel("claude-opus-5-5-20260101")).toBe("opus 5.5");
     expect(modelLabel("claude-haiku-5-5")).toBe("haiku 5.5");
-    expect(modelLabel("gpt-5.5-codex")).toBe("5.5 Codex");
+    expect(modelLabel("gpt-5.5-codex")).toBe("GPT-5.5 Codex");
     expect(modelLabel("vendor/model-x")).toBe("vendor/model-x");
     expect(modelLabel("route-a/gemini-4-carbon")).toBe("route-a/gemini-4-carbon");
     expect(modelLabel("acme/gpt-5-pro")).toBe("acme/gpt-5-pro");
@@ -380,13 +380,17 @@ describe("reading the lists", () => {
   });
 
   it("reads at most three lists at a time, the session's own ahead of the queue", async () => {
-    for (const name of ["a", "b", "c", "d"]) void readModels("m-queue", name);
-    void readModels("m-queue", "own", { first: true });
+    const [a, b, c, d] = ["a", "b", "c", "d"].map((name) => readModels("m-queue", name));
+    const own = readModels("m-queue", "own", { first: true });
     await flush();
     expect(waiting.map((w) => w.url.split("/launchers/")[1])).toEqual(["a/models", "b/models", "c/models"]);
     await answer("/launchers/a/", json(claudeList));
+    await a;
     expect(waiting.map((w) => w.url.split("/launchers/")[1])).toEqual(["b/models", "c/models", "own/models"]);
-    for (const name of ["b", "c", "own", "d"]) await answer(`/launchers/${name}/`, json(claudeList));
+    for (const [name, read] of [["b", b], ["c", c], ["own", own], ["d", d]] as const) {
+      await answer(`/launchers/${name}/`, json(claudeList));
+      await read;
+    }
     expect(waiting).toEqual([]);
   });
 

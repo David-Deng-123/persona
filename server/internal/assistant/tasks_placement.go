@@ -201,9 +201,31 @@ func (s *Service) taskDirectoryExists(ctx context.Context, machine, dir string) 
 // deferredTaskStart is the first input of a Companion session that answered Starting after defer_mcp. It is activated
 // through the ordinary idempotent session.send path only after the task role and supervision relationship are linked.
 type deferredTaskStart struct {
-	text        string
-	images      []proto.Image
-	clientMsgID string
+	text           string
+	images         []proto.Image
+	clientMsgID    string
+	permissionMode string
+}
+
+// deferredTaskPrompt folds separate task_instructions and task_attachments into the first prompt sent by deferred
+// Companion activation, matching node.startRuntime's immediate fallback order and keeping <attached_images> last.
+func deferredTaskPrompt(prompt string, params map[string]any) string {
+	instructions, _ := params["task_instructions"].(string)
+	attachments, _ := params["task_attachments"].(string)
+	return appendDeferredPromptSection(appendDeferredPromptSection(prompt, instructions), attachments)
+}
+
+func appendDeferredPromptSection(prompt, section string) string {
+	if strings.TrimSpace(section) == "" {
+		return prompt
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return section
+	}
+	if i := strings.LastIndex(prompt, "\n\n<attached_images>"); i >= 0 && strings.HasSuffix(strings.TrimSpace(prompt), "</attached_images>") {
+		return strings.TrimSpace(prompt[:i]) + "\n\n" + section + prompt[i:]
+	}
+	return strings.TrimSpace(prompt) + "\n\n" + section
 }
 
 // startTaskAgent starts the agent for t on its machine (another when its launcher does not work there: t says which)
@@ -428,7 +450,7 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 	if err := s.admitTaskWorkspace(ctx, t); err != nil {
 		return "", "", err
 	}
-	if t.backendWorkspace() {
+	if t.usesPreparedWorkspace() {
 		defer func() {
 			if err != nil && !startResultUnknown(err) {
 				s.releaseUnusedBackendStart(ctx, t)
@@ -450,7 +472,7 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 			prompt = handoffSummary + "\n\n" + prompt
 		}
 	}
-	if t.backendWorkspace() {
+	if t.usesPreparedWorkspace() && len(t.WorkspaceResolved.Repositories) > 0 {
 		rows, err := json.Marshal(t.WorkspaceResolved.Repositories)
 		if err != nil {
 			return "", "", err
@@ -507,7 +529,7 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 		background = s.projectHandoffContextForTodo(ctx, m.ID, t.Cwd, direction, s.todoForPlanContext(t))
 	}
 	var repoPaths []string
-	if t.backendWorkspace() {
+	if t.usesPreparedWorkspace() {
 		for _, repo := range t.WorkspaceResolved.Repositories {
 			if repo.AbsolutePath == t.Cwd {
 				continue
@@ -592,7 +614,11 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 	if modes {
 		mode := t.Permission
 		if mode == "" { // a plan saved before task_plan settled it, or a task started another way (tasks_permission.go)
-			mode = s.taskPermission(ctx, m.ID, nil)
+			if fit.allowAll() {
+				mode = "bypassPermissions"
+			} else {
+				mode = s.taskPermission(ctx, m.ID, nil)
+			}
 		}
 		params["permission_mode"] = mode
 	} // else none, plan included: a read-only task's first message carries the constraint (above)
@@ -632,9 +658,11 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 	clearStandardSpeed(params)
 	s.setPlanThen(ctx, m.ID, params)
 	deferredImages, _ := params["images"].([]proto.Image)
+	deferredText := deferredTaskPrompt(prompt, params)
+	companionTarget := t.inPane == "" && !t.backendWorkspace() && params["host"] == proto.HostAgy
 	// A role-bearing Companion start must not attach MCP before linkPlanAgent can answer its identity-scoped tools/list.
 	// The real ACP id comes back first; only a Companion that actually answers Starting is activated after the link.
-	if companion && (t.Role == roleLeader || t.Parent != "") && (prompt != "" || len(deferredImages) > 0) {
+	if companionTarget && (t.Role == roleLeader || t.Parent != "") && (deferredText != "" || len(deferredImages) > 0) {
 		params["defer_mcp"] = true
 		if id, _ := params["client_msg_id"].(string); id == "" {
 			params["client_msg_id"] = newStartSessionID() // the post-link send has the same once-only identity as an immediate start
@@ -645,7 +673,8 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 			return
 		}
 		clientMsgID, _ := params["client_msg_id"].(string)
-		t.deferredStart = &deferredTaskStart{text: prompt, images: append([]proto.Image(nil), deferredImages...), clientMsgID: clientMsgID}
+		permMode, _ := params["permission_mode"].(string)
+		t.deferredStart = &deferredTaskStart{text: deferredText, images: append([]proto.Image(nil), deferredImages...), clientMsgID: clientMsgID, permissionMode: permMode}
 	}
 	callNode := func() error {
 		if err := s.checkContinuationScope(t); err != nil {
@@ -658,7 +687,7 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 			return err
 		}
 		bindCtx := context.WithValue(ctx, placementBindKey{}, p)
-		if !t.backendWorkspace() {
+		if !t.usesPreparedWorkspace() {
 			return s.call(bindCtx, m.ID, DeviceSessionStart, params, &res)
 		}
 		return s.startBackendTask(bindCtx, t, params, &res)
@@ -711,7 +740,7 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 			return "", "", err
 		}
 		s.recordStartFailure(ctx, m.ID, s.startLauncher(ctx, picked), err)
-		if !t.backendWorkspace() && startResultUnknown(err) {
+		if !t.usesPreparedWorkspace() && startResultUnknown(err) {
 			if t.startWithoutReplay() {
 				if expectID != "" {
 					lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentStartListTimeout)
@@ -757,7 +786,7 @@ func (s *Service) startTaskAgent(ctx context.Context, t *PlanTask, retry bool) (
 		}
 		return "", "", err
 	}
-	if t.backendWorkspace() && res.Session.Cwd != t.Cwd {
+	if t.usesPreparedWorkspace() && res.Session.Cwd != t.Cwd {
 		return "", "", taskworkspace.Failure("result_mismatch", "start", t.WorkspaceResolved.OperationID, "", t.Cwd)
 	}
 	if res.Session.SessionID == "" || res.Session.MachineID != "" && res.Session.MachineID != m.ID {
