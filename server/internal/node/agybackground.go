@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 const (
 	agyTaskPrefix           = "Tool is running as a background task with task id:"
 	agyBackgroundEndedLimit = 20
+	agyTimerExpiryGrace     = time.Minute
 )
 
 var (
@@ -23,6 +25,7 @@ var (
 	agyTaskEnd       = lazyre.New(`(?i)\bTask id "([^"\n]+)" (?:was )?(finished|failed|canceled|cancelled|killed|stopped)\b`)
 	agyTaskMessage   = lazyre.New(`(?m)^[ \t]*\[Message\] timestamp=\S+ sender=(\S+) priority=\S+ content=([\s\S]*)`)
 	agyCronIteration = lazyre.New(`\(iteration [0-9]+\)$`)
+	agyTaskListRow   = lazyre.New("^- .* \\(`([^`\\s]+)`\\)$")
 )
 
 func agyBackgroundNotice(content string) string {
@@ -50,8 +53,9 @@ func agyToolString(raw json.RawMessage) string {
 }
 
 type agyBackgroundTasks struct {
-	running []proto.BackgroundTask
-	ended   []proto.BackgroundTask
+	running    []proto.BackgroundTask
+	ended      []proto.BackgroundTask
+	nextExpiry time.Time
 }
 
 func (b agyBackgroundTasks) apply(s *proto.Session) {
@@ -63,9 +67,11 @@ func (b agyBackgroundTasks) apply(s *proto.Session) {
 }
 
 type agyTaskRecord struct {
-	task     proto.BackgroundTask
-	inferred bool
-	oneShot  bool
+	task      proto.BackgroundTask
+	inferred  bool
+	oneShot   bool
+	condition string
+	deadline  time.Time
 }
 
 func (r *agyTaskRecord) finish(status string, at time.Time, inferred bool) {
@@ -75,7 +81,7 @@ func (r *agyTaskRecord) finish(status string, at time.Time, inferred bool) {
 	r.task.Status, r.task.EndedAt, r.inferred = status, &at, inferred
 }
 
-func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root) agyBackgroundTasks {
+func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, now time.Time) agyBackgroundTasks {
 	byID := make(map[string]*agyTaskRecord)
 	var ordered []*agyTaskRecord
 	var planner agyStep
@@ -96,30 +102,51 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root) ag
 		case "USER_INPUT":
 			planner = agyStep{}
 		case "SYSTEM_MESSAGE":
-			if m := agyTaskEnd.FindStringSubmatch(step.Content); m != nil {
-				at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
+			at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
+			end := agyTaskEnd.FindStringSubmatch(step.Content)
+			if end != nil {
 				status := proto.WorkflowKilled
-				switch strings.ToLower(m[2]) {
+				switch strings.ToLower(end[2]) {
 				case "finished":
 					status = proto.WorkflowCompleted
 				case "failed":
 					status = proto.WorkflowFailed
 				}
-				byID[m[1]].finish(status, at, false)
-			} else if m := agyTaskMessage.FindStringSubmatch(step.Content); m != nil {
-				record := byID[m[1]]
-				if record == nil || !record.oneShot {
-					continue
+				byID[end[1]].finish(status, at, false)
+			}
+			if m := agyTaskMessage.FindStringSubmatch(step.Content); m != nil {
+				sender := agyQualifiedTaskID(conversation, m[1])
+				if record := byID[sender]; end == nil && record != nil && record.oneShot {
+					message := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[2]), "</SYSTEM_MESSAGE>"))
+					if agyCronIteration.MatchString(message) {
+						record.oneShot = false
+					} else if !strings.Contains(strings.ToLower(message), "still running") {
+						record.finish(proto.WorkflowCompleted, at, false)
+					}
 				}
-				message := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[2]), "</SYSTEM_MESSAGE>"))
-				if agyCronIteration.MatchString(message) {
-					record.oneShot = false
-				} else if !strings.Contains(strings.ToLower(message), "still running") {
-					at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
-					record.finish(proto.WorkflowCompleted, at, false)
+				for _, record := range ordered {
+					if record.oneShot && record.task.ID != sender && record.condition != "" &&
+						(record.condition == "any" || record.condition == sender) &&
+						!at.IsZero() && !at.Before(record.task.StartedAt) &&
+						(record.deadline.IsZero() || at.Before(record.deadline)) {
+						record.finish(proto.WorkflowKilled, at, true)
+					}
 				}
 			}
 		case "GENERIC":
+			// Result steps have one slot per planner tool call, even when they are exported out of order.
+			var call *agyToolCall
+			if slot := step.seq - planner.seq - 1; slot >= 0 && slot < len(planner.ToolCalls) {
+				call = planner.ToolCalls[slot]
+			}
+			if ids, ok := agyTaskInventory(step, call, conversation); ok {
+				at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
+				for _, record := range ordered {
+					if _, listed := ids[record.task.ID]; !listed && !at.IsZero() && !at.Before(record.task.StartedAt) {
+						record.finish(proto.WorkflowCompleted, at, true)
+					}
+				}
+			}
 			notice := agyBackgroundNotice(firstNonEmpty(step.backgroundStart, step.Content))
 			id, details, _ := strings.Cut(notice, "\n")
 			id = strings.TrimSpace(id)
@@ -140,16 +167,14 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root) ag
 						task.OutputFile = agyTaskLog(strings.TrimSpace(value), dir, conversation, name, brain)
 					}
 				}
-				// Result steps have one slot per planner tool call, even when they are exported out of order.
-				slot := step.seq - planner.seq - 1
-				var call *agyToolCall
-				if slot >= 0 && slot < len(planner.ToolCalls) {
-					call = planner.ToolCalls[slot]
-					if call != nil {
-						setAgyTaskKind(&task, call.Name, call.Args)
-					}
+				if call != nil {
+					setAgyTaskKind(&task, call.Name, call.Args)
 				}
-				record = &agyTaskRecord{task: task, oneShot: agyOneShotSchedule(task.Description, call)}
+				oneShot, condition, duration := agyOneShotSchedule(task.Description, call)
+				record = &agyTaskRecord{task: task, oneShot: oneShot, condition: agyQualifiedTaskID(conversation, condition)}
+				if duration > 0 && !at.IsZero() {
+					record.deadline = at.Add(duration)
+				}
 				byID[id] = record
 				ordered = append(ordered, record)
 			}
@@ -168,6 +193,15 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root) ag
 	}
 	var result agyBackgroundTasks
 	for _, record := range ordered {
+		if record.task.EndedAt == nil && record.oneShot && !record.deadline.IsZero() {
+			// Allow time for the timer's own completion message to reach the export.
+			expiry := record.deadline.Add(agyTimerExpiryGrace)
+			if !now.Before(expiry) {
+				record.finish(proto.WorkflowCompleted, record.deadline, true)
+			} else if result.nextExpiry.IsZero() || expiry.Before(result.nextExpiry) {
+				result.nextExpiry = expiry
+			}
+		}
 		if record.task.EndedAt != nil {
 			result.ended = append(result.ended, record.task)
 		} else if len(result.running) < maxRuntimeBackground {
@@ -181,22 +215,74 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root) ag
 	return result
 }
 
-// agyOneShotSchedule recognizes timers from either the tool arguments or the task description.
-// A cron expression or description takes precedence when both forms are present.
-func agyOneShotSchedule(description string, call *agyToolCall) bool {
+func agyQualifiedTaskID(conversation, id string) string {
+	if agyTaskName.MatchString(id) {
+		return conversation + "/" + id
+	}
+	return id
+}
+
+// agyTaskInventory recognizes complete list results. Native rows end in the backticked task ID.
+func agyTaskInventory(step agyStep, call *agyToolCall, conversation string) (map[string]struct{}, bool) {
+	if call == nil || call.Name != "manage_task" || step.Error != "" ||
+		(step.Status != "" && !strings.EqualFold(step.Status, "DONE")) || slices.Contains(step.TruncatedFields, "content") {
+		return nil, false
+	}
+	var args map[string]json.RawMessage
+	if json.Unmarshal(call.Args, &args) != nil || !strings.EqualFold(agyToolString(args["Action"]), "list") {
+		return nil, false
+	}
+	output := strings.TrimSpace(agyToolOutput(step.Content))
+	if output == "No background tasks are currently running." {
+		return nil, true
+	}
+	header, rows, _ := strings.Cut(output, "\n")
+	countText, ok := strings.CutPrefix(strings.TrimSpace(header), "You have ")
+	if !ok {
+		return nil, false
+	}
+	countText, ok = strings.CutSuffix(countText, " background task(s) currently running:")
+	count, err := strconv.Atoi(countText)
+	if !ok || err != nil || count <= 0 {
+		return nil, false
+	}
+	ids := make(map[string]struct{})
+	for line := range strings.SplitSeq(rows, "\n") {
+		match := agyTaskListRow.FindStringSubmatch(strings.TrimSpace(line))
+		if match == nil {
+			return nil, false
+		}
+		ids[agyQualifiedTaskID(conversation, match[1])] = struct{}{}
+	}
+	return ids, len(ids) == count
+}
+
+// agyOneShotSchedule recognizes timers from the tool arguments or task description.
+// Cron takes precedence. Only the tool arguments supply a condition or duration.
+func agyOneShotSchedule(description string, call *agyToolCall) (oneShot bool, condition string, duration time.Duration) {
 	if strings.HasPrefix(description, "Cron:") {
-		return false
+		return false, "", 0
 	}
 	var args map[string]json.RawMessage
 	if call != nil && call.Name == "schedule" && json.Unmarshal(call.Args, &args) == nil {
 		if strings.TrimSpace(agyToolString(args["CronExpression"])) != "" {
-			return false
+			return false, "", 0
 		}
-		if duration := args["DurationSeconds"]; duration != nil && string(duration) != "null" {
-			return true
+		raw := args["DurationSeconds"]
+		oneShot = raw != nil && string(raw) != "null"
+		if oneShot || strings.HasPrefix(description, "Timer:") {
+			condition = strings.TrimSpace(agyToolString(args["TimerCondition"]))
+			if condition == "never" {
+				condition = ""
+			}
+			seconds, err := strconv.ParseFloat(firstNonEmpty(agyToolString(raw), string(raw)), 64)
+			if nanos := seconds * float64(time.Second); err == nil && nanos > 0 && nanos < 1<<63 {
+				duration = time.Duration(nanos)
+			}
+			return true, condition, duration
 		}
 	}
-	return strings.HasPrefix(description, "Timer:")
+	return strings.HasPrefix(description, "Timer:"), "", 0
 }
 
 func setAgyTaskKind(task *proto.BackgroundTask, tool string, raw json.RawMessage) {
