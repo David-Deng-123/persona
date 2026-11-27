@@ -159,6 +159,8 @@ func TestAgyBackgroundTimerCondition(t *testing.T) {
 		{"before start", `,"TimerCondition":"any"`, sender, "Ready", "2026-06-01T09:59:59Z", false},
 		{"after deadline", `,"TimerCondition":"any"`, sender, "Ready", "2026-06-01T10:01:01Z", false},
 		{"own heartbeat", `,"TimerCondition":"any"`, id, "Task is still running", received, false},
+		{"heartbeat from any sender", `,"TimerCondition":"any"`, sender, "Task is still running", received, false},
+		{"heartbeat from watched sender", `,"TimerCondition":"task-2"`, sender, "Task is STILL RUNNING", received, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			planner := `{"step_index":0,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"schedule","args":{"DurationSeconds":"60"` + tc.condition + `}}]}` + "\n"
@@ -201,10 +203,16 @@ func TestAgyBackgroundTaskListReconciliation(t *testing.T) {
 		{"failed list", `"list"`, "ERROR", empty, false, 0},
 		{"incomplete list", `"list"`, "DONE", partial, true, 0},
 		{"missing row", `"list"`, "DONE", strings.Replace(partial, "have 1", "have 2", 1), false, 0},
+		{"duplicate row", `"list"`, "DONE", partial + "\n- Check status (`task-2`)", false, 0},
+		{"foreign inventory", `"list"`, "DONE", strings.Replace(partial, "task-2", "another-conversation/task-2", 1), false, 0},
+		{"mixed inventory", `"list"`, "DONE", strings.Replace(full, "(`task-2`)", "(`another-conversation/task-2`)", 1), false, 0},
+		{"filtered inventory", `"list","TaskId":"task-2"`, "DONE", partial, false, 0},
+		{"unknown inventory selector", `"list","Scope":"current-turn"`, "DONE", empty, false, 0},
+		{"empty task selector", `"list","TaskId":""`, "DONE", empty, false, 2},
 		{"unknown output", `"list"`, "DONE", "Unable to list tasks", false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			planner := fmt.Sprintf(`{"step_index":2,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"run_command"},{"name":"manage_task","args":{"Action":%s}}]}`+"\n", tc.action)
+			planner := fmt.Sprintf(`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[{"name":"run_command"},{"name":"manage_task","args":{"Action":%s}}]}`+"\n", listed, tc.action)
 			output := fmt.Sprintf("Created At: %s\nCompleted At: %s\nOutput:\n%s", listed, listed, tc.output)
 			var fields string
 			if tc.truncated {
@@ -225,6 +233,83 @@ func TestAgyBackgroundTaskListReconciliation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAgyBackgroundTaskListOwnership(t *testing.T) {
+	const started = "2026-06-01T10:00:00Z"
+	const first = "2026-06-01T10:00:01Z"
+	const second = "2026-06-01T10:00:02Z"
+	const written = "2026-06-01T10:00:03Z"
+	const empty = "No background tasks are currently running."
+	const present = "You have 1 background task(s) currently running:\n- Wait for input (`task-1`)"
+	const listCall = `{"name":"manage_task","args":{"Action":"list"}}`
+	planner := func(index int, at, calls string) string {
+		return fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[%s]}`+"\n", index, at, calls)
+	}
+	result := func(index int, at, output string) string {
+		return fmt.Sprintf(`{"step_index":%d,"type":"GENERIC","status":"DONE","created_at":%q,"content":%q}`+"\n", index, at, output)
+	}
+	for _, tc := range []struct {
+		name, transcript, endedAt string
+	}{
+		{"late result keeps its native slot",
+			planner(1, first, listCall) + planner(3, second, listCall) + result(2, written, empty), first},
+		{"late result after user input",
+			planner(1, first, listCall) + `{"step_index":3,"type":"USER_INPUT"}` + "\n" + result(2, written, empty), first},
+		{"old result in newer planner slot",
+			planner(1, first, listCall) + planner(3, written, listCall) + result(4, second, empty), ""},
+		{"old tool timestamp in newer planner slot",
+			planner(1, first, listCall) + planner(3, second, listCall) +
+				result(4, written, "Created At: "+first+"\nCompleted At: "+written+"\nOutput:\n"+empty), ""},
+		{"overlapping planner slots",
+			planner(1, first, `{"name":"run_command"},`+listCall) + planner(2, second, listCall) + result(3, written, empty), ""},
+		{"newer snapshot wins over later export",
+			planner(1, first, listCall) + planner(3, second, listCall) + result(4, second, present) + result(2, written, empty), ""},
+		{"repeated omission preserves first completion",
+			planner(1, first, listCall) + planner(3, second, listCall) + result(4, second, empty) + result(2, written, empty), first},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transcript := agyBackgroundStep(0, "RUNNING", started, 1, "Wait for input", "") + tc.transcript
+			steps, _ := parseAgySteps([]byte(transcript), agyTestID)
+			now, _ := time.Parse(time.RFC3339Nano, written)
+			tasks := agyBackground(steps, agyTestID, "", nil, now)
+			if tc.endedAt == "" {
+				if len(tasks.running) != 1 || len(tasks.ended) != 0 {
+					t.Fatalf("expected the task to keep running: %+v", tasks)
+				}
+			} else if len(tasks.running) != 0 || len(tasks.ended) != 1 ||
+				tasks.ended[0].Status != proto.WorkflowCompleted || tasks.ended[0].EndedAt.Format(time.RFC3339Nano) != tc.endedAt {
+				t.Fatalf("expected the task to end at its own list call (%s): %+v", tc.endedAt, tasks)
+			}
+		})
+	}
+}
+
+func TestAgyBackgroundTaskListUsesCallTimeAndLatestTaskUpdate(t *testing.T) {
+	const started = "2026-06-01T10:00:00Z"
+	const called = "2026-06-01T10:00:01Z"
+	const changed = "2026-06-01T10:00:02Z"
+	const written = "2026-06-01T10:00:03Z"
+	planner := fmt.Sprintf(`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[{"name":"run_command"},{"name":"manage_task","args":{"Action":"list"}}]}`+"\n", called)
+	result := fmt.Sprintf(`{"step_index":5,"type":"GENERIC","status":"DONE","created_at":%q,"content":"No background tasks are currently running."}`+"\n", written)
+	older := agyBackgroundStep(1, "RUNNING", started, 2, "Task with later update", "")
+	update := strings.TrimSuffix(older, "}\n") + fmt.Sprintf(`,"updated_at":%q}`+"\n", changed)
+	heartbeat := fmt.Sprintf("[Message] timestamp=%s sender=%s/task-3 priority=MESSAGE_PRIORITY_HIGH content=Task is still running", changed, agyTestID)
+	message := fmt.Sprintf(`{"step_index":6,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", changed, heartbeat)
+	transcript := agyBackgroundStep(0, "RUNNING", started, 1, "Omitted older task", "") + older +
+		agyBackgroundStep(2, "RUNNING", started, 3, "Task with later heartbeat", "") + planner +
+		agyBackgroundStep(4, "RUNNING", changed, 4, "Started after the list call", "") + result + message + update
+	steps, _ := parseAgySteps([]byte(transcript), agyTestID)
+	now, _ := time.Parse(time.RFC3339Nano, written)
+	tasks := agyBackground(steps, agyTestID, "", nil, now)
+	if len(tasks.ended) != 1 || tasks.ended[0].ID != agyTestID+"/task-1" || tasks.ended[0].Status != proto.WorkflowCompleted ||
+		tasks.ended[0].EndedAt.Format(time.RFC3339Nano) != called {
+		t.Fatalf("expected only the older, unchanged task to end at the list call: %+v", tasks)
+	}
+	if len(tasks.running) != 3 || tasks.running[0].ID != agyTestID+"/task-2" ||
+		tasks.running[1].ID != agyTestID+"/task-3" || tasks.running[2].ID != agyTestID+"/task-4" {
+		t.Fatalf("expected all tasks seen after the list call to stay running: %+v", tasks.running)
 	}
 }
 

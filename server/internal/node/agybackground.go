@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -68,6 +69,7 @@ func (b agyBackgroundTasks) apply(s *proto.Session) {
 
 type agyTaskRecord struct {
 	task      proto.BackgroundTask
+	lastSeen  time.Time
 	inferred  bool
 	oneShot   bool
 	condition string
@@ -81,28 +83,41 @@ func (r *agyTaskRecord) finish(status string, at time.Time, inferred bool) {
 	r.task.Status, r.task.EndedAt, r.inferred = status, &at, inferred
 }
 
+type agyBackgroundCall struct {
+	planner *agyStep
+	tool    *agyToolCall
+}
+
 func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, now time.Time) agyBackgroundTasks {
 	byID := make(map[string]*agyTaskRecord)
 	var ordered []*agyTaskRecord
-	var planner agyStep
-	for _, step := range steps {
+	pending := make(map[int]agyBackgroundCall)
+	var inventoryTimes []time.Time
+	inventorySeen := make(map[string]time.Time)
+	for i := range steps {
+		step := &steps[i]
+		at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
+		slot := pending[step.seq]
+		delete(pending, step.seq)
 		switch step.Type {
 		case "PLANNER_RESPONSE":
-			planner = step
-			for _, call := range step.ToolCalls {
+			for offset, call := range step.ToolCalls {
+				// Late results retain their native step index. An overlapping claim makes the slot ambiguous.
+				seq := step.seq + 1 + offset
+				if _, claimed := pending[seq]; claimed {
+					pending[seq] = agyBackgroundCall{}
+				} else {
+					pending[seq] = agyBackgroundCall{planner: step, tool: call}
+				}
 				if call == nil || call.Name != "manage_task" {
 					continue
 				}
 				var args map[string]json.RawMessage
 				if json.Unmarshal(call.Args, &args) == nil && strings.EqualFold(agyToolString(args["Action"]), "kill") {
-					at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
 					byID[agyToolString(args["TaskId"])].finish(proto.WorkflowKilled, at, false)
 				}
 			}
-		case "USER_INPUT":
-			planner = agyStep{}
 		case "SYSTEM_MESSAGE":
-			at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
 			end := agyTaskEnd.FindStringSubmatch(step.Content)
 			if end != nil {
 				status := proto.WorkflowKilled
@@ -116,13 +131,22 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 			}
 			if m := agyTaskMessage.FindStringSubmatch(step.Content); m != nil {
 				sender := agyQualifiedTaskID(conversation, m[1])
-				if record := byID[sender]; end == nil && record != nil && record.oneShot {
-					message := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[2]), "</SYSTEM_MESSAGE>"))
-					if agyCronIteration.MatchString(message) {
-						record.oneShot = false
-					} else if !strings.Contains(strings.ToLower(message), "still running") {
-						record.finish(proto.WorkflowCompleted, at, false)
+				message := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[2]), "</SYSTEM_MESSAGE>"))
+				heartbeat := strings.Contains(strings.ToLower(message), "still running")
+				if record := byID[sender]; record != nil {
+					if at.After(record.lastSeen) {
+						record.lastSeen = at
 					}
+					if end == nil && record.oneShot {
+						if agyCronIteration.MatchString(message) {
+							record.oneShot = false
+						} else if !heartbeat {
+							record.finish(proto.WorkflowCompleted, at, false)
+						}
+					}
+				}
+				if heartbeat {
+					continue
 				}
 				for _, record := range ordered {
 					if record.oneShot && record.task.ID != sender && record.condition != "" &&
@@ -134,16 +158,18 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 				}
 			}
 		case "GENERIC":
-			// Result steps have one slot per planner tool call, even when they are exported out of order.
 			var call *agyToolCall
-			if slot := step.seq - planner.seq - 1; slot >= 0 && slot < len(planner.ToolCalls) {
-				call = planner.ToolCalls[slot]
-			}
-			if ids, ok := agyTaskInventory(step, call, conversation); ok {
-				at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
-				for _, record := range ordered {
-					if _, listed := ids[record.task.ID]; !listed && !at.IsZero() && !at.Before(record.task.StartedAt) {
-						record.finish(proto.WorkflowCompleted, at, true)
+			if slot.planner != nil && slot.planner.branch == step.branch {
+				calledAt, _ := time.Parse(time.RFC3339Nano, slot.planner.CreatedAt)
+				if at.IsZero() || calledAt.IsZero() || !at.Before(calledAt) {
+					call = slot.tool
+				}
+				if ids, ok := agyTaskInventory(step, slot, calledAt, at, conversation); ok {
+					inventoryTimes = append(inventoryTimes, calledAt)
+					for id := range ids {
+						if calledAt.After(inventorySeen[id]) {
+							inventorySeen[id] = calledAt
+						}
 					}
 				}
 			}
@@ -154,7 +180,6 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 			if !ours || !agyTaskName.MatchString(name) {
 				continue
 			}
-			at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
 			record := byID[id]
 			if record == nil {
 				task := proto.BackgroundTask{ID: id, Kind: "shell", StartedAt: at}
@@ -178,8 +203,14 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 				byID[id] = record
 				ordered = append(ordered, record)
 			}
+			if at.After(record.lastSeen) {
+				record.lastSeen = at
+			}
 			if updated, err := time.Parse(time.RFC3339Nano, step.UpdatedAt); err == nil {
 				at = updated
+				if updated.After(record.lastSeen) {
+					record.lastSeen = updated
+				}
 			}
 			switch strings.ToUpper(step.Status) {
 			case "DONE":
@@ -191,8 +222,20 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 			}
 		}
 	}
+	slices.SortFunc(inventoryTimes, time.Time.Compare)
 	var result agyBackgroundTasks
 	for _, record := range ordered {
+		if record.task.Status == "" && !record.task.StartedAt.IsZero() && len(inventoryTimes) > 0 {
+			// Any snapshot strictly after the last evidence of this task omitted it. Wait until
+			// the whole transcript is read because newer activity can arrive out of order.
+			lastSeen := record.lastSeen
+			if listedAt := inventorySeen[record.task.ID]; listedAt.After(lastSeen) {
+				lastSeen = listedAt
+			}
+			if i := sort.Search(len(inventoryTimes), func(i int) bool { return inventoryTimes[i].After(lastSeen) }); i < len(inventoryTimes) {
+				record.finish(proto.WorkflowCompleted, inventoryTimes[i], true)
+			}
+		}
 		if record.task.EndedAt == nil && record.oneShot && !record.deadline.IsZero() {
 			// Allow time for the timer's own completion message to reach the export.
 			expiry := record.deadline.Add(agyTimerExpiryGrace)
@@ -222,15 +265,34 @@ func agyQualifiedTaskID(conversation, id string) string {
 	return id
 }
 
-// agyTaskInventory recognizes complete list results. Native rows end in the backticked task ID.
-func agyTaskInventory(step agyStep, call *agyToolCall, conversation string) (map[string]struct{}, bool) {
-	if call == nil || call.Name != "manage_task" || step.Error != "" ||
-		(step.Status != "" && !strings.EqualFold(step.Status, "DONE")) || slices.Contains(step.TruncatedFields, "content") {
+// agyTaskInventory accepts complete, unfiltered list results from the current conversation.
+func agyTaskInventory(step *agyStep, slot agyBackgroundCall, calledAt, at time.Time, conversation string) (map[string]struct{}, bool) {
+	call := slot.tool
+	if call == nil || call.Name != "manage_task" || step.Error != "" || !strings.EqualFold(step.Status, "DONE") ||
+		step.Index == nil || *step.Index < 0 || slot.planner.Index == nil || *slot.planner.Index < 0 ||
+		calledAt.IsZero() || at.IsZero() || at.Before(calledAt) ||
+		slices.Contains(step.TruncatedFields, "content") || slices.Contains(slot.planner.TruncatedFields, "tool_calls") {
 		return nil, false
 	}
 	var args map[string]json.RawMessage
 	if json.Unmarshal(call.Args, &args) != nil || !strings.EqualFold(agyToolString(args["Action"]), "list") {
 		return nil, false
+	}
+	// A nonempty selector or an unknown option may make the inventory a subset.
+	delete(args, "Action")
+	if id := string(args["TaskId"]); id == `""` || id == "null" {
+		delete(args, "TaskId")
+	}
+	if len(args) != 0 {
+		return nil, false
+	}
+	// The tool's timestamp can predate the result step when an old result is exported late.
+	if header, ok := strings.CutPrefix(step.Content, "Created At: "); ok {
+		created, _, _ := strings.Cut(header, "\n")
+		started, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(created))
+		if err != nil || started.Before(calledAt) {
+			return nil, false
+		}
 	}
 	output := strings.TrimSpace(agyToolOutput(step.Content))
 	if output == "No background tasks are currently running." {
@@ -252,7 +314,14 @@ func agyTaskInventory(step agyStep, call *agyToolCall, conversation string) (map
 		if match == nil {
 			return nil, false
 		}
-		ids[agyQualifiedTaskID(conversation, match[1])] = struct{}{}
+		id := agyQualifiedTaskID(conversation, match[1])
+		if name, ok := strings.CutPrefix(id, conversation+"/"); !ok || !agyTaskName.MatchString(name) {
+			return nil, false
+		}
+		if _, duplicate := ids[id]; duplicate {
+			return nil, false
+		}
+		ids[id] = struct{}{}
 	}
 	return ids, len(ids) == count
 }
