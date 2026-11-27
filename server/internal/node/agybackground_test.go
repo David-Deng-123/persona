@@ -184,6 +184,100 @@ func TestAgyBackgroundTimerCondition(t *testing.T) {
 	}
 }
 
+func TestAgyBackgroundServerRestartNotice(t *testing.T) {
+	const started = "2026-06-01T10:00:00Z"
+	const completed = "2026-06-01T10:01:00Z"
+	const restarted = "2026-06-01T10:05:00Z"
+	const resumed = "2026-06-01T10:06:00Z"
+	const secondRestart = "2026-06-01T10:10:00Z"
+	const afterSecond = "2026-06-01T10:11:00Z"
+
+	t.Run("stops prior tasks and preserves already ended and later tasks", func(t *testing.T) {
+		plannerBefore := fmt.Sprintf(`{"step_index":0,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[{"name":"run_command","args":{"CommandLine":"npm test"}},{"name":"schedule","args":{"CronExpression":"*/5 * * * *"}},{"name":"run_workflow"}]}`+"\n", started)
+		doneStep := strings.TrimSuffix(agyBackgroundStep(3, "DONE", started, 3, "Already completed", ""), "}\n") + fmt.Sprintf(`,"updated_at":%q}`+"\n", completed)
+		noticeContent := fmt.Sprintf("The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=%s sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>", restarted)
+		restartStep := fmt.Sprintf(`{"step_index":4,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", restarted, noticeContent)
+		plannerAfter := fmt.Sprintf(`{"step_index":5,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[{"name":"run_command","args":{"CommandLine":"npm run build"}}]}`+"\n", resumed)
+		transcript := plannerBefore +
+			agyBackgroundStep(1, "RUNNING", started, 1, "Run tests", "") +
+			agyBackgroundStep(2, "RUNNING", started, 2, "Cron: */5 * * * * Poll", "") +
+			doneStep + restartStep + plannerAfter +
+			agyBackgroundStep(6, "RUNNING", resumed, 4, "Build after restart", "")
+		steps, _ := parseAgySteps([]byte(transcript), agyTestID)
+		tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
+		if len(tasks.running) != 1 || tasks.running[0].ID != agyTestID+"/task-4" {
+			t.Fatalf("expected only post-restart task running: %+v", tasks.running)
+		}
+		if len(tasks.ended) != 3 {
+			t.Fatalf("expected 3 ended tasks: %+v", tasks.ended)
+		}
+		want := []struct{ id, status, at string }{
+			{agyTestID + "/task-3", proto.WorkflowCompleted, completed},
+			{agyTestID + "/task-1", proto.WorkflowKilled, restarted},
+			{agyTestID + "/task-2", proto.WorkflowKilled, restarted},
+		}
+		for i, w := range want {
+			got := tasks.ended[i]
+			if got.ID != w.id || got.Status != w.status || got.EndedAt.Format(time.RFC3339) != w.at {
+				t.Fatalf("ended[%d] = %+v, want %+v", i, got, w)
+			}
+		}
+	})
+
+	t.Run("handles bare notice and message timestamp fallback", func(t *testing.T) {
+		bare := "The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>"
+		steps, _ := parseAgySteps([]byte(agyBackgroundStep(0, "RUNNING", started, 1, "Prior task", "")+
+			fmt.Sprintf(`{"step_index":1,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", restarted, bare)), agyTestID)
+		tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
+		if len(tasks.running) != 0 || len(tasks.ended) != 1 || tasks.ended[0].Status != proto.WorkflowKilled || tasks.ended[0].EndedAt.Format(time.RFC3339) != restarted {
+			t.Fatalf("unexpected bare restart outcome: %+v", tasks)
+		}
+
+		wrapped := fmt.Sprintf("<SYSTEM_MESSAGE>\n[Message] timestamp=%s sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>", restarted)
+		steps, _ = parseAgySteps([]byte(agyBackgroundStep(0, "RUNNING", started, 1, "Prior task", "")+
+			fmt.Sprintf(`{"step_index":1,"type":"SYSTEM_MESSAGE","content":%q}`+"\n", wrapped)), agyTestID)
+		tasks = agyBackground(steps, agyTestID, "", nil, time.Time{})
+		if len(tasks.running) != 0 || len(tasks.ended) != 1 || tasks.ended[0].Status != proto.WorkflowKilled || tasks.ended[0].EndedAt.Format(time.RFC3339) != restarted {
+			t.Fatalf("unexpected fallback timestamp outcome: %+v", tasks)
+		}
+	})
+
+	t.Run("same timestamp order and multiple restarts", func(t *testing.T) {
+		msg := func(ts string) string {
+			return fmt.Sprintf("<SYSTEM_MESSAGE>\n[Message] timestamp=%s sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>", ts)
+		}
+		transcript := agyBackgroundStep(0, "RUNNING", restarted, 1, "Before first restart", "") +
+			fmt.Sprintf(`{"step_index":1,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", restarted, msg(restarted)) +
+			agyBackgroundStep(2, "RUNNING", restarted, 2, "After first restart", "") +
+			fmt.Sprintf(`{"step_index":3,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", secondRestart, msg(secondRestart)) +
+			agyBackgroundStep(4, "RUNNING", afterSecond, 3, "After second restart", "")
+		steps, _ := parseAgySteps([]byte(transcript), agyTestID)
+		tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
+		if len(tasks.running) != 1 || tasks.running[0].ID != agyTestID+"/task-3" {
+			t.Fatalf("expected only task-3 running: %+v", tasks.running)
+		}
+		if len(tasks.ended) != 2 ||
+			tasks.ended[0].ID != agyTestID+"/task-1" || tasks.ended[0].Status != proto.WorkflowKilled || tasks.ended[0].EndedAt.Format(time.RFC3339) != restarted ||
+			tasks.ended[1].ID != agyTestID+"/task-2" || tasks.ended[1].Status != proto.WorkflowKilled || tasks.ended[1].EndedAt.Format(time.RFC3339) != secondRestart {
+			t.Fatalf("unexpected multi-restart outcomes: %+v", tasks.ended)
+		}
+	})
+
+	t.Run("ignores non-system sender and quoted subagent idle report", func(t *testing.T) {
+		fromTask := fmt.Sprintf("<SYSTEM_MESSAGE>\n[Message] timestamp=%s sender=%s/task-1 priority=MESSAGE_PRIORITY_HIGH content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>", restarted, agyTestID)
+		fromSubagent := fmt.Sprintf("<SYSTEM_MESSAGE>\n[Message] timestamp=%s sender=system priority=MESSAGE_PRIORITY_HIGH content=Subagent 00000000-0000-4000-8000-000000000002 has gone idle. This was the subagent's most recent response: All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>", restarted)
+		transcript := agyBackgroundStep(0, "RUNNING", started, 1, "Echo test output", "") +
+			agyBackgroundStep(1, "RUNNING", started, 2, "Still alive", "") +
+			fmt.Sprintf(`{"step_index":2,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", restarted, fromTask) +
+			fmt.Sprintf(`{"step_index":3,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", restarted, fromSubagent)
+		steps, _ := parseAgySteps([]byte(transcript), agyTestID)
+		tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
+		if len(tasks.running) != 2 || len(tasks.ended) != 0 {
+			t.Fatalf("false-positive restart notice killed running tasks: %+v", tasks)
+		}
+	})
+}
+
 func TestAgyBackgroundTaskListReconciliation(t *testing.T) {
 	const started = "2026-06-01T10:00:00Z"
 	const listed = "2026-06-01T10:00:02Z"
@@ -192,38 +286,47 @@ func TestAgyBackgroundTaskListReconciliation(t *testing.T) {
 	const partial = "You have 1 background task(s) currently running:\n- Check status (`task-2`)"
 	const full = "You have 2 background task(s) currently running:\n- Wait for input (`" + agyTestID + "/task-1`)\n- Check status (`task-2`)"
 	for _, tc := range []struct {
-		name, action, status, output string
-		truncated                    bool
-		wantEnded                    int
+		name, action, status, content, errField string
+		truncated, plannerTruncated             bool
+		wantEnded                               int
 	}{
-		{"empty inventory", `"list"`, "DONE", empty, false, 2},
-		{"listed task stays running", `"\"list\""`, "DONE", partial, false, 1},
-		{"all tasks listed", `"list"`, "DONE", full, false, 0},
-		{"status is not a list", `"status"`, "DONE", empty, false, 0},
-		{"failed list", `"list"`, "ERROR", empty, false, 0},
-		{"incomplete list", `"list"`, "DONE", partial, true, 0},
-		{"missing row", `"list"`, "DONE", strings.Replace(partial, "have 1", "have 2", 1), false, 0},
-		{"duplicate row", `"list"`, "DONE", partial + "\n- Check status (`task-2`)", false, 0},
-		{"foreign inventory", `"list"`, "DONE", strings.Replace(partial, "task-2", "another-conversation/task-2", 1), false, 0},
-		{"mixed inventory", `"list"`, "DONE", strings.Replace(full, "(`task-2`)", "(`another-conversation/task-2`)", 1), false, 0},
-		{"filtered inventory", `"list","TaskId":"task-2"`, "DONE", partial, false, 0},
-		{"unknown inventory selector", `"list","Scope":"current-turn"`, "DONE", empty, false, 0},
-		{"empty task selector", `"list","TaskId":""`, "DONE", empty, false, 2},
-		{"unknown output", `"list"`, "DONE", "Unable to list tasks", false, 0},
+		{"empty inventory with Output header", `"list"`, "DONE", "Created At: " + listed + "\nCompleted At: " + listed + "\nOutput:\n" + empty, "", false, false, 2},
+		{"empty inventory without Output header", `"list"`, "DONE", "Created At: " + listed + "\nCompleted At: " + listed + "\n" + empty, "", false, false, 2},
+		{"listed task stays running", `"\"list\""`, "DONE", "Created At: " + listed + "\nCompleted At: " + listed + "\nOutput:\n" + partial, "", false, false, 1},
+		{"all tasks listed", `"list"`, "DONE", "Created At: " + listed + "\nCompleted At: " + listed + "\nOutput:\n" + full, "", false, false, 0},
+		{"status is not a list", `"status"`, "DONE", empty, "", false, false, 0},
+		{"failed list status", `"list"`, "ERROR", empty, "", false, false, 0},
+		{"failed list error field", `"list"`, "DONE", empty, "tool failed", false, false, 0},
+		{"incomplete list content", `"list"`, "DONE", partial, "", true, false, 0},
+		{"truncated planner tool_calls", `"list"`, "DONE", empty, "", false, true, 0},
+		{"missing row", `"list"`, "DONE", strings.Replace(partial, "have 1", "have 2", 1), "", false, false, 0},
+		{"duplicate row", `"list"`, "DONE", partial + "\n- Check status (`task-2`)", "", false, false, 0},
+		{"foreign inventory", `"list"`, "DONE", strings.Replace(partial, "task-2", "another-conversation/task-2", 1), "", false, false, 0},
+		{"mixed inventory", `"list"`, "DONE", strings.Replace(full, "(`task-2`)", "(`another-conversation/task-2`)", 1), "", false, false, 0},
+		{"filtered inventory", `"list","TaskId":"task-2"`, "DONE", partial, "", false, false, 0},
+		{"unknown inventory selector", `"list","Scope":"current-turn"`, "DONE", empty, "", false, false, 0},
+		{"empty task selector", `"list","TaskId":""`, "DONE", empty, "", false, false, 2},
+		{"null task selector", `"list","TaskId":null`, "DONE", empty, "", false, false, 2},
+		{"unknown output", `"list"`, "DONE", "Unable to list tasks", "", false, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			planner := fmt.Sprintf(`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[{"name":"run_command"},{"name":"manage_task","args":{"Action":%s}}]}`+"\n", listed, tc.action)
-			output := fmt.Sprintf("Created At: %s\nCompleted At: %s\nOutput:\n%s", listed, listed, tc.output)
+			var plannerFields string
+			if tc.plannerTruncated {
+				plannerFields = `,"truncated_fields":["tool_calls"]`
+			}
+			planner := fmt.Sprintf(`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[{"name":"run_command"},{"name":"manage_task","args":{"Action":%s}}]%s}`+"\n", listed, tc.action, plannerFields)
 			var fields string
 			if tc.truncated {
-				fields = `,"truncated_fields":["content"]`
+				fields += `,"truncated_fields":["content"]`
 			}
-			result := fmt.Sprintf(`{"step_index":4,"type":"GENERIC","status":%q,"created_at":%q,"content":%q%s}`+"\n", tc.status, listed, output, fields)
+			if tc.errField != "" {
+				fields += fmt.Sprintf(`,"error":%q`, tc.errField)
+			}
+			result := fmt.Sprintf(`{"step_index":4,"type":"GENERIC","status":%q,"created_at":%q,"content":%q%s}`+"\n", tc.status, listed, tc.content, fields)
 			steps, _ := parseAgySteps([]byte(agyBackgroundStep(0, "RUNNING", started, 1, "Wait for input", "")+
 				agyBackgroundStep(1, "RUNNING", started, 2, "Check status", "")+planner+result+
 				agyBackgroundStep(3, "RUNNING", later, 3, "Started after list", "")), agyTestID)
-			now, _ := time.Parse(time.RFC3339, later)
-			tasks := agyBackground(steps, agyTestID, "", nil, now)
+			tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
 			if len(tasks.ended) != tc.wantEnded || len(tasks.running) != 3-tc.wantEnded || tasks.running[len(tasks.running)-1].ID != agyTestID+"/task-3" {
 				t.Fatalf("unexpected inventory reconciliation: %+v", tasks)
 			}
@@ -272,8 +375,7 @@ func TestAgyBackgroundTaskListOwnership(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			transcript := agyBackgroundStep(0, "RUNNING", started, 1, "Wait for input", "") + tc.transcript
 			steps, _ := parseAgySteps([]byte(transcript), agyTestID)
-			now, _ := time.Parse(time.RFC3339Nano, written)
-			tasks := agyBackground(steps, agyTestID, "", nil, now)
+			tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
 			if tc.endedAt == "" {
 				if len(tasks.running) != 1 || len(tasks.ended) != 0 {
 					t.Fatalf("expected the task to keep running: %+v", tasks)
@@ -301,8 +403,7 @@ func TestAgyBackgroundTaskListUsesCallTimeAndLatestTaskUpdate(t *testing.T) {
 		agyBackgroundStep(2, "RUNNING", started, 3, "Task with later heartbeat", "") + planner +
 		agyBackgroundStep(4, "RUNNING", changed, 4, "Started after the list call", "") + result + message + update
 	steps, _ := parseAgySteps([]byte(transcript), agyTestID)
-	now, _ := time.Parse(time.RFC3339Nano, written)
-	tasks := agyBackground(steps, agyTestID, "", nil, now)
+	tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
 	if len(tasks.ended) != 1 || tasks.ended[0].ID != agyTestID+"/task-1" || tasks.ended[0].Status != proto.WorkflowCompleted ||
 		tasks.ended[0].EndedAt.Format(time.RFC3339Nano) != called {
 		t.Fatalf("expected only the older, unchanged task to end at the list call: %+v", tasks)
@@ -310,6 +411,73 @@ func TestAgyBackgroundTaskListUsesCallTimeAndLatestTaskUpdate(t *testing.T) {
 	if len(tasks.running) != 3 || tasks.running[0].ID != agyTestID+"/task-2" ||
 		tasks.running[1].ID != agyTestID+"/task-3" || tasks.running[2].ID != agyTestID+"/task-4" {
 		t.Fatalf("expected all tasks seen after the list call to stay running: %+v", tasks.running)
+	}
+}
+
+func TestAgyBackgroundRestartAndTaskListOrdering(t *testing.T) {
+	const started = "2026-06-01T10:00:00Z"
+	const listTime = "2026-06-01T10:02:00Z"
+	const afterList = "2026-06-01T10:03:00Z"
+	const restartTime = "2026-06-01T10:05:00Z"
+	const laterListTime = "2026-06-01T10:06:00Z"
+	const listCall = `{"name":"manage_task","args":{"Action":"list"}}`
+	restartMsg := fmt.Sprintf("<SYSTEM_MESSAGE>\n[Message] timestamp=%s sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>", restartTime)
+
+	t.Run("list omission before restart keeps completed status for earlier task", func(t *testing.T) {
+		transcript := agyBackgroundStep(0, "RUNNING", started, 1, "Gone before list", "") +
+			fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[%s]}`+"\n", listTime, listCall) +
+			fmt.Sprintf(`{"step_index":2,"type":"GENERIC","status":"DONE","created_at":%q,"content":"No background tasks are currently running."}`+"\n", listTime) +
+			agyBackgroundStep(3, "RUNNING", afterList, 2, "Running at restart", "") +
+			fmt.Sprintf(`{"step_index":4,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", restartTime, restartMsg)
+		steps, _ := parseAgySteps([]byte(transcript), agyTestID)
+		tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
+		if len(tasks.running) != 0 || len(tasks.ended) != 2 {
+			t.Fatalf("unexpected tasks: %+v", tasks)
+		}
+		if tasks.ended[0].ID != agyTestID+"/task-1" || tasks.ended[0].Status != proto.WorkflowCompleted || tasks.ended[0].EndedAt.Format(time.RFC3339) != listTime ||
+			tasks.ended[1].ID != agyTestID+"/task-2" || tasks.ended[1].Status != proto.WorkflowKilled || tasks.ended[1].EndedAt.Format(time.RFC3339) != restartTime {
+			t.Fatalf("unexpected outcomes: %+v", tasks.ended)
+		}
+	})
+
+	t.Run("restart before empty list preserves killed status at restart time", func(t *testing.T) {
+		transcript := agyBackgroundStep(0, "RUNNING", started, 1, "Killed by restart", "") +
+			fmt.Sprintf(`{"step_index":1,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", restartTime, restartMsg) +
+			fmt.Sprintf(`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":%q,"tool_calls":[%s]}`+"\n", laterListTime, listCall) +
+			fmt.Sprintf(`{"step_index":3,"type":"GENERIC","status":"DONE","created_at":%q,"content":"No background tasks are currently running."}`+"\n", laterListTime)
+		steps, _ := parseAgySteps([]byte(transcript), agyTestID)
+		tasks := agyBackground(steps, agyTestID, "", nil, time.Time{})
+		if len(tasks.running) != 0 || len(tasks.ended) != 1 {
+			t.Fatalf("unexpected tasks: %+v", tasks)
+		}
+		if tasks.ended[0].ID != agyTestID+"/task-1" || tasks.ended[0].Status != proto.WorkflowKilled || tasks.ended[0].EndedAt.Format(time.RFC3339) != restartTime {
+			t.Fatalf("unexpected outcome: %+v", tasks.ended[0])
+		}
+	})
+}
+
+func TestAgyBackgroundRestartAndTimerConditionOrdering(t *testing.T) {
+	const started = "2026-06-01T10:00:00Z"
+	const beforeRestart = "2026-06-01T10:01:00Z"
+	const restartTime = "2026-06-01T10:02:00Z"
+	const afterRestart = "2026-06-01T10:03:00Z"
+	planner := `{"step_index":0,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"schedule","args":{"DurationSeconds":600,"TimerCondition":"early"}},{"name":"schedule","args":{"DurationSeconds":600,"TimerCondition":"late"}}]}` + "\n"
+	message := func(index int, at, sender, content string) string {
+		body := fmt.Sprintf("<SYSTEM_MESSAGE>\n[Message] timestamp=%s sender=%s priority=MESSAGE_PRIORITY_HIGH content=%s\n</SYSTEM_MESSAGE>", at, sender, content)
+		return fmt.Sprintf(`{"step_index":%d,"type":"SYSTEM_MESSAGE","created_at":%q,"content":%q}`+"\n", index, at, body)
+	}
+	transcript := planner + agyBackgroundStep(1, "RUNNING", started, 1, "Timer: 600s", "") +
+		agyBackgroundStep(2, "RUNNING", started, 2, "Timer: 600s", "") +
+		message(3, beforeRestart, "early", "Ready") +
+		message(4, restartTime, "system", "[Notice] All your subagents and background tasks have been stopped due to server restart.") +
+		message(5, afterRestart, "late", "Ready")
+	steps, _ := parseAgySteps([]byte(transcript), agyTestID)
+	now, _ := time.Parse(time.RFC3339, afterRestart)
+	tasks := agyBackground(steps, agyTestID, "", nil, now)
+	if len(tasks.running) != 0 || len(tasks.ended) != 2 ||
+		tasks.ended[0].ID != agyTestID+"/task-1" || tasks.ended[0].Status != proto.WorkflowKilled || tasks.ended[0].EndedAt.Format(time.RFC3339) != beforeRestart ||
+		tasks.ended[1].ID != agyTestID+"/task-2" || tasks.ended[1].Status != proto.WorkflowKilled || tasks.ended[1].EndedAt.Format(time.RFC3339) != restartTime {
+		t.Fatalf("unexpected timer outcomes: %+v", tasks)
 	}
 }
 

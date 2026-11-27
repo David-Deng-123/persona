@@ -18,14 +18,16 @@ import (
 const (
 	agyTaskPrefix           = "Tool is running as a background task with task id:"
 	agyBackgroundEndedLimit = 20
+	agyEmptyTaskList        = "No background tasks are currently running."
 	agyTimerExpiryGrace     = time.Minute
 )
 
 var (
 	agyTaskName      = lazyre.New(`^task-[0-9]+$`)
 	agyTaskEnd       = lazyre.New(`(?i)\bTask id "([^"\n]+)" (?:was )?(finished|failed|canceled|cancelled|killed|stopped)\b`)
-	agyTaskMessage   = lazyre.New(`(?m)^[ \t]*\[Message\] timestamp=\S+ sender=(\S+) priority=\S+ content=([\s\S]*)`)
+	agyTaskMessage   = lazyre.New(`(?m)^[ \t]*\[Message\] timestamp=(\S+) sender=(\S+) priority=\S+ content=([\s\S]*)`)
 	agyCronIteration = lazyre.New(`\(iteration [0-9]+\)$`)
+	agyServerRestart = lazyre.New(`(?i)^(?:\[Notice\]\s+)?All your subagents and background tasks have been stopped due to server restart\b`)
 	agyTaskListRow   = lazyre.New("^- .* \\(`([^`\\s]+)`\\)$")
 )
 
@@ -68,12 +70,29 @@ func (b agyBackgroundTasks) apply(s *proto.Session) {
 }
 
 type agyTaskRecord struct {
-	task      proto.BackgroundTask
-	lastSeen  time.Time
-	inferred  bool
-	oneShot   bool
-	condition string
-	deadline  time.Time
+	task          proto.BackgroundTask
+	lastSeen      time.Time
+	lastSeenOrder int
+	inferred      bool
+	oneShot       bool
+	condition     string
+	conditionEnd  agyReconcileEvent
+	deadline      time.Time
+}
+
+func (r *agyTaskRecord) recordSeen(at time.Time, order int) {
+	if !at.IsZero() {
+		if r.lastSeen.IsZero() || at.After(r.lastSeen) {
+			r.lastSeen = at
+			r.lastSeenOrder = order
+		} else if at.Equal(r.lastSeen) && order > r.lastSeenOrder {
+			r.lastSeenOrder = order
+		}
+		return
+	}
+	if r.lastSeen.IsZero() && order > r.lastSeenOrder {
+		r.lastSeenOrder = order
+	}
 }
 
 func (r *agyTaskRecord) finish(status string, at time.Time, inferred bool) {
@@ -84,16 +103,39 @@ func (r *agyTaskRecord) finish(status string, at time.Time, inferred bool) {
 }
 
 type agyBackgroundCall struct {
-	planner *agyStep
-	tool    *agyToolCall
+	planner      *agyStep
+	plannerOrder int
+	tool         *agyToolCall
+}
+
+type agyReconcileEvent struct {
+	at    time.Time
+	order int
+}
+
+func compareAgyReconcileEvents(a, b agyReconcileEvent) int {
+	if !a.at.IsZero() && !b.at.IsZero() {
+		if cmp := a.at.Compare(b.at); cmp != 0 {
+			return cmp
+		}
+	}
+	return a.order - b.order
+}
+
+func agyRestartAfterTask(restart agyReconcileEvent, lastSeen time.Time, lastSeenOrder int) bool {
+	if !restart.at.IsZero() && !lastSeen.IsZero() {
+		return restart.at.After(lastSeen) || (restart.at.Equal(lastSeen) && restart.order > lastSeenOrder)
+	}
+	return restart.order > lastSeenOrder
 }
 
 func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, now time.Time) agyBackgroundTasks {
 	byID := make(map[string]*agyTaskRecord)
 	var ordered []*agyTaskRecord
 	pending := make(map[int]agyBackgroundCall)
-	var inventoryTimes []time.Time
-	inventorySeen := make(map[string]time.Time)
+	var restarts []agyReconcileEvent
+	var inventories []agyReconcileEvent
+	inventorySeen := make(map[string]agyReconcileEvent)
 	for i := range steps {
 		step := &steps[i]
 		at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
@@ -107,14 +149,14 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 				if _, claimed := pending[seq]; claimed {
 					pending[seq] = agyBackgroundCall{}
 				} else {
-					pending[seq] = agyBackgroundCall{planner: step, tool: call}
+					pending[seq] = agyBackgroundCall{planner: step, plannerOrder: i, tool: call}
 				}
 				if call == nil || call.Name != "manage_task" {
 					continue
 				}
 				var args map[string]json.RawMessage
 				if json.Unmarshal(call.Args, &args) == nil && strings.EqualFold(agyToolString(args["Action"]), "kill") {
-					byID[agyToolString(args["TaskId"])].finish(proto.WorkflowKilled, at, false)
+					byID[agyQualifiedTaskID(conversation, agyToolString(args["TaskId"]))].finish(proto.WorkflowKilled, at, false)
 				}
 			}
 		case "SYSTEM_MESSAGE":
@@ -127,16 +169,19 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 				case "failed":
 					status = proto.WorkflowFailed
 				}
-				byID[end[1]].finish(status, at, false)
+				byID[agyQualifiedTaskID(conversation, end[1])].finish(status, at, false)
 			}
-			if m := agyTaskMessage.FindStringSubmatch(step.Content); m != nil {
-				sender := agyQualifiedTaskID(conversation, m[1])
-				message := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[2]), "</SYSTEM_MESSAGE>"))
+			m := agyTaskMessage.FindStringSubmatch(step.Content)
+			if restartAt, ok := agyServerRestartTime(step.Content, m, at); ok {
+				restarts = append(restarts, agyReconcileEvent{at: restartAt, order: i})
+				continue
+			}
+			if m != nil {
+				sender := agyQualifiedTaskID(conversation, m[2])
+				message := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[3]), "</SYSTEM_MESSAGE>"))
 				heartbeat := strings.Contains(strings.ToLower(message), "still running")
 				if record := byID[sender]; record != nil {
-					if at.After(record.lastSeen) {
-						record.lastSeen = at
-					}
+					record.recordSeen(at, i)
 					if end == nil && record.oneShot {
 						if agyCronIteration.MatchString(message) {
 							record.oneShot = false
@@ -145,15 +190,15 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 						}
 					}
 				}
-				if heartbeat {
+				if heartbeat || at.IsZero() {
 					continue
 				}
 				for _, record := range ordered {
 					if record.oneShot && record.task.ID != sender && record.condition != "" &&
-						(record.condition == "any" || record.condition == sender) &&
-						!at.IsZero() && !at.Before(record.task.StartedAt) &&
-						(record.deadline.IsZero() || at.Before(record.deadline)) {
-						record.finish(proto.WorkflowKilled, at, true)
+						(record.condition == "any" || record.condition == sender) && !at.Before(record.task.StartedAt) &&
+						(record.deadline.IsZero() || at.Before(record.deadline)) &&
+						(record.conditionEnd.at.IsZero() || at.Before(record.conditionEnd.at)) {
+						record.conditionEnd = agyReconcileEvent{at: at, order: i}
 					}
 				}
 			}
@@ -165,10 +210,11 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 					call = slot.tool
 				}
 				if ids, ok := agyTaskInventory(step, slot, calledAt, at, conversation); ok {
-					inventoryTimes = append(inventoryTimes, calledAt)
+					ev := agyReconcileEvent{at: calledAt, order: slot.plannerOrder}
+					inventories = append(inventories, ev)
 					for id := range ids {
-						if calledAt.After(inventorySeen[id]) {
-							inventorySeen[id] = calledAt
+						if prev, exists := inventorySeen[id]; !exists || compareAgyReconcileEvents(ev, prev) > 0 {
+							inventorySeen[id] = ev
 						}
 					}
 				}
@@ -196,21 +242,17 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 					setAgyTaskKind(&task, call.Name, call.Args)
 				}
 				oneShot, condition, duration := agyOneShotSchedule(task.Description, call)
-				record = &agyTaskRecord{task: task, oneShot: oneShot, condition: agyQualifiedTaskID(conversation, condition)}
+				record = &agyTaskRecord{task: task, lastSeenOrder: i, oneShot: oneShot, condition: agyQualifiedTaskID(conversation, condition)}
 				if duration > 0 && !at.IsZero() {
 					record.deadline = at.Add(duration)
 				}
 				byID[id] = record
 				ordered = append(ordered, record)
 			}
-			if at.After(record.lastSeen) {
-				record.lastSeen = at
-			}
+			record.recordSeen(at, i)
 			if updated, err := time.Parse(time.RFC3339Nano, step.UpdatedAt); err == nil {
 				at = updated
-				if updated.After(record.lastSeen) {
-					record.lastSeen = updated
-				}
+				record.recordSeen(updated, i)
 			}
 			switch strings.ToUpper(step.Status) {
 			case "DONE":
@@ -222,18 +264,43 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 			}
 		}
 	}
-	slices.SortFunc(inventoryTimes, time.Time.Compare)
+	slices.SortFunc(inventories, compareAgyReconcileEvents)
 	var result agyBackgroundTasks
 	for _, record := range ordered {
-		if record.task.Status == "" && !record.task.StartedAt.IsZero() && len(inventoryTimes) > 0 {
-			// Any snapshot strictly after the last evidence of this task omitted it. Wait until
-			// the whole transcript is read because newer activity can arrive out of order.
-			lastSeen := record.lastSeen
-			if listedAt := inventorySeen[record.task.ID]; listedAt.After(lastSeen) {
-				lastSeen = listedAt
+		if record.task.Status == "" {
+			lastSeen, lastSeenOrder := record.lastSeen, record.lastSeenOrder
+			if listed, ok := inventorySeen[record.task.ID]; ok {
+				if lastSeen.IsZero() || listed.at.After(lastSeen) || (listed.at.Equal(lastSeen) && listed.order > lastSeenOrder) {
+					lastSeen, lastSeenOrder = listed.at, listed.order
+				}
 			}
-			if i := sort.Search(len(inventoryTimes), func(i int) bool { return inventoryTimes[i].After(lastSeen) }); i < len(inventoryTimes) {
-				record.finish(proto.WorkflowCompleted, inventoryTimes[i], true)
+			var stop *agyReconcileEvent
+			for j := range restarts {
+				if !agyRestartAfterTask(restarts[j], lastSeen, lastSeenOrder) {
+					continue
+				}
+				if stop == nil || compareAgyReconcileEvents(restarts[j], *stop) < 0 {
+					stop = &restarts[j]
+				}
+			}
+			var inventory *agyReconcileEvent
+			if !record.task.StartedAt.IsZero() && !lastSeen.IsZero() && len(inventories) > 0 {
+				// Any snapshot strictly after the last evidence of this task omitted it. Wait until
+				// the whole transcript is read because newer activity can arrive out of order.
+				if j := sort.Search(len(inventories), func(j int) bool { return inventories[j].at.After(lastSeen) }); j < len(inventories) {
+					inventory = &inventories[j]
+				}
+			}
+			// Both a restart and a matching timer condition stop work. Use the earlier event.
+			if conditionEnd := &record.conditionEnd; !conditionEnd.at.IsZero() &&
+				(stop == nil || compareAgyReconcileEvents(*conditionEnd, *stop) < 0) {
+				stop = conditionEnd
+			}
+			switch {
+			case inventory != nil && (stop == nil || compareAgyReconcileEvents(*inventory, *stop) < 0):
+				record.finish(proto.WorkflowCompleted, inventory.at, true)
+			case stop != nil:
+				record.finish(proto.WorkflowKilled, stop.at, true)
 			}
 		}
 		if record.task.EndedAt == nil && record.oneShot && !record.deadline.IsZero() {
@@ -265,7 +332,39 @@ func agyQualifiedTaskID(conversation, id string) string {
 	return id
 }
 
-// agyTaskInventory accepts complete, unfiltered list results from the current conversation.
+func agySystemMessageBody(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if i := strings.LastIndex(trimmed, "<SYSTEM_MESSAGE>"); i >= 0 {
+		trimmed = trimmed[i+len("<SYSTEM_MESSAGE>"):]
+	}
+	trimmed = strings.TrimSpace(trimmed)
+	trimmed = strings.TrimSuffix(trimmed, "</SYSTEM_MESSAGE>")
+	return strings.TrimSpace(trimmed)
+}
+
+// agyServerRestartTime recognizes the global stop notice Antigravity writes when its server restarts.
+func agyServerRestartTime(content string, message []string, createdAt time.Time) (time.Time, bool) {
+	if message != nil {
+		if message[2] != "system" {
+			return time.Time{}, false
+		}
+		body := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(message[3]), "</SYSTEM_MESSAGE>"))
+		if !agyServerRestart.MatchString(body) {
+			return time.Time{}, false
+		}
+		if !createdAt.IsZero() {
+			return createdAt, true
+		}
+		ts, _ := time.Parse(time.RFC3339Nano, message[1])
+		return ts, true
+	}
+	if !agyServerRestart.MatchString(agySystemMessageBody(content)) {
+		return time.Time{}, false
+	}
+	return createdAt, true
+}
+
+// agyTaskInventory accepts complete, unfiltered manage_task(Action="list") results from the current conversation.
 func agyTaskInventory(step *agyStep, slot agyBackgroundCall, calledAt, at time.Time, conversation string) (map[string]struct{}, bool) {
 	call := slot.tool
 	if call == nil || call.Name != "manage_task" || step.Error != "" || !strings.EqualFold(step.Status, "DONE") ||
@@ -280,8 +379,11 @@ func agyTaskInventory(step *agyStep, slot agyBackgroundCall, calledAt, at time.T
 	}
 	// A nonempty selector or an unknown option may make the inventory a subset.
 	delete(args, "Action")
-	if id := string(args["TaskId"]); id == `""` || id == "null" {
-		delete(args, "TaskId")
+	if raw, ok := args["TaskId"]; ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed == "null" || (strings.HasPrefix(trimmed, `"`) && agyToolString(raw) == "") {
+			delete(args, "TaskId")
+		}
 	}
 	if len(args) != 0 {
 		return nil, false
@@ -295,10 +397,13 @@ func agyTaskInventory(step *agyStep, slot agyBackgroundCall, calledAt, at time.T
 		}
 	}
 	output := strings.TrimSpace(agyToolOutput(step.Content))
-	if output == "No background tasks are currently running." {
+	if output == agyEmptyTaskList {
 		return nil, true
 	}
-	header, rows, _ := strings.Cut(output, "\n")
+	header, rows, found := strings.Cut(output, "\n")
+	if !found {
+		return nil, false
+	}
 	countText, ok := strings.CutPrefix(strings.TrimSpace(header), "You have ")
 	if !ok {
 		return nil, false
