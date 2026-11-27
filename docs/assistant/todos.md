@@ -673,7 +673,7 @@ verification keep their tabs. Pass answers at once and the close attempt follows
 checks; a tab that is busy or watched at that moment is skipped, and the Agent is left to the completed-task stop
 below (which also closes the terminal when `assistant.close_ended_terminals` is on). The manager checks current viewers and recent
 owner activity again when authorizing the close. The original Claude Code or Codex tab must have been created
-for this start on Herdr, with the same agent process still in its only pane. The node checks focus,
+for this start on Herdr or Orca, with the same agent process still in its only pane. The node checks focus,
 terminal viewers, drafts, queued input, interactions and work again. If there is no other tab in that workspace,
 cleanup skips the close so the workspace remains open. Eligible cleanup uses the dispatch consent with no extra
 phone card. The transcript, files and worktree remain available.
