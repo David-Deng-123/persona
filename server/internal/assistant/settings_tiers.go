@@ -51,6 +51,9 @@ type tierChange struct {
 // editTiers applies e to ps (fresh from the store; changed in place) and says what changed in which profile. Only the
 // tiers are checked: something else in a profile that no longer holds (a deleted provider) does not stop a tier edit.
 func editTiers(ps *modelProfiles, e tierEdit, now time.Time) ([]tierChange, error) {
+	if len(ps.Profiles) == 0 {
+		return nil, errModelProfileEmpty
+	}
 	targets := e.Profiles
 	if len(targets) == 0 {
 		for _, p := range ps.Profiles {
@@ -232,14 +235,8 @@ func (s *Service) setModelTiers(ctx context.Context, v json.RawMessage) (*ownCha
 	if e.Launcher != nil {
 		launchers = append(launchers, strings.TrimSpace(*e.Launcher))
 	}
-	for _, l := range slices.Compact(slices.Sorted(slices.Values(launchers))) {
-		// before the card, and outside models.mu: a computer may be asked for its launchers
-		if err := s.tierLauncherCheck(ctx, l); err != nil {
-			return nil, err
-		}
-	}
 	s.models.mu.Lock()
-	ps, _, err := s.modelProfilesLocked(ctx)
+	ps, err := s.modelProfilesLocked(ctx)
 	var changes []tierChange
 	if err == nil {
 		changes, err = editTiers(&ps, e, time.Now().UTC())
@@ -247,6 +244,12 @@ func (s *Service) setModelTiers(ctx context.Context, v json.RawMessage) (*ownCha
 	s.models.mu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	for _, l := range slices.Compact(slices.Sorted(slices.Values(launchers))) {
+		// Before the card, and outside models.mu: a computer may be asked for its launchers.
+		if err := s.tierLauncherCheck(ctx, l); err != nil {
+			return nil, err
+		}
 	}
 	for _, c := range changes {
 		if c.After == nil {
@@ -296,7 +299,7 @@ func tierCardText(l i18n.Lang, t *ModelTier) string {
 }
 
 // saveTierEdit makes the edit the user approved, at the revision its card was made from, and only when it still changes
-// what the card said: templates never saved are made again from the configuration, at the same revision.
+// what the card said.
 func (s *Service) saveTierEdit(ctx context.Context, revision int64, e tierEdit, card []tierChange) (string, error) {
 	s.models.mu.Lock()
 	text, active, err := s.saveTierEditLocked(ctx, revision, e, card)
@@ -308,7 +311,7 @@ func (s *Service) saveTierEdit(ctx context.Context, revision int64, e tierEdit, 
 }
 
 func (s *Service) saveTierEditLocked(ctx context.Context, revision int64, e tierEdit, card []tierChange) (string, string, error) {
-	ps, seeded, err := s.modelProfilesLocked(ctx)
+	ps, err := s.modelProfilesLocked(ctx)
 	if err != nil {
 		return "", "", err
 	}
@@ -327,9 +330,6 @@ func (s *Service) saveTierEditLocked(ctx context.Context, revision int64, e tier
 	state, err := s.readModelProfileState(ctx)
 	if err != nil {
 		return "", "", err
-	}
-	if seeded {
-		state.seed()
 	}
 	// one event for the edit, however many profiles it changed: <profile>.tiers.<name> each
 	event := ModelProfileEvent{At: now, Action: "save", By: ProfileActor{Kind: "assistant"}}
@@ -370,6 +370,9 @@ func (s *Service) getModelTiers(ctx context.Context) (string, error) {
 	v, err := s.modelProfilesView(ctx)
 	if err != nil {
 		return "", err
+	}
+	if len(v.Profiles) == 0 {
+		return "", errModelProfileEmpty
 	}
 	var b strings.Builder
 	for _, p := range v.Profiles {
