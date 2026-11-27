@@ -1,6 +1,7 @@
 package assistantwire
 
 import (
+	"github.com/nwverse/persona/server/internal/buswire"
 	"github.com/nwverse/persona/server/internal/proto"
 )
 
@@ -73,6 +74,11 @@ const MethodFleetApprovalApply = "fleet.approval_apply"
 // MethodFleetApprovalDiscard releases a handle without applying it.
 const MethodFleetApprovalDiscard = "fleet.approval_discard"
 
+var (
+	FleetApprovalApplyMethod   = buswire.Method[FleetApprovalApply, FleetApprovalApplyResult]{Name: MethodFleetApprovalApply}
+	FleetApprovalDiscardMethod = buswire.Method[FleetApprovalDiscard, FleetApprovalDiscardResult]{Name: MethodFleetApprovalDiscard}
+)
+
 type FleetApprovalApply struct {
 	InteractionID string           `json:"interaction_id"`
 	Resolution    proto.Resolution `json:"resolution"`
@@ -86,6 +92,9 @@ type FleetApprovalApplyResult struct {
 type FleetApprovalDiscard struct {
 	InteractionID string `json:"interaction_id"`
 	Status        string `json:"status"`
+}
+type FleetApprovalDiscardResult struct {
+	OK bool `json:"ok"`
 }
 
 // ElicitationHeader marks an app's request the hub relays to the manager as coming from an app that takes MCP
@@ -132,6 +141,9 @@ type FleetLive struct {
 
 // Clients is EventClients' params.
 type Clients struct {
+	// Viewing is the deduplicated set of chat and terminal views from apps with full credentials.
+	// An open page remains a view during a quiet turn.
+	Viewing []SessionRef `json:"viewing,omitempty"`
 	// Elicitation: an app that takes MCP elicitations is connected (without one, or ElicitationPush, an elicitation is
 	// handed back to the terminal at once).
 	Elicitation bool `json:"elicitation"`

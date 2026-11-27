@@ -257,6 +257,9 @@ type Permissions struct {
 	// Its program is an agent runtime that connects to this machine's node; in a sandbox it gets a socket in its run
 	// directory (PERSONA_RUNTIME_SOCKET) that leads to the node's runtime.sock only. Needs runtime.
 	AgentRuntimes bool `json:"agent_runtimes,omitempty"`
+	// The routine sends its local date and language to this extension and may include its facts and report sections in
+	// the briefing.
+	RoutineFacts bool `json:"routine_facts,omitempty"`
 	// It receives the error and crash reports of the hub and the user's devices, scrubbed (no message text, tokens, user
 	// names, machine names or IP addresses). Needed by contributes.error_reports.
 	ErrorReports bool               `json:"error_reports,omitempty"`
@@ -306,6 +309,7 @@ type Contributes struct {
 	TriageTemplates     []TriageTemplateItem     `json:"triage_templates,omitempty"`
 	AgentFilters        []AgentFilterItem        `json:"agent_filters,omitempty"`
 	Tunnels             []TunnelItem             `json:"tunnels,omitempty"`
+	RoutineFacts        []RoutineFactsItem       `json:"routine_facts,omitempty"`
 	ErrorReports        []ErrorReportsItem       `json:"error_reports,omitempty"`
 	AuthRelay           []AuthRelayItem          `json:"auth_relay,omitempty"`
 	SecretProviders     []SecretProviderItem     `json:"secret_providers,omitempty"`
@@ -323,7 +327,7 @@ func (v *Contributes) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	declared := map[string]json.RawMessage{}
-	for _, key := range []string{"connectors", "voice", "transcription", "speech", "computer", "browser", "iphone", "quota", "usage", "providers", "api", "assistant", "mcp_servers", "ui", "track_kinds", "agent_sources", "channel", "events", "shortcuts", "skills", "prompts", "themes", "looks", "triage_templates", "agent_filters", "tunnels", "error_reports", "auth_relay", "secret_providers", "repository_providers", "memory_sources", "disk_offload", "messaging"} {
+	for _, key := range []string{"connectors", "voice", "transcription", "speech", "computer", "browser", "iphone", "quota", "usage", "providers", "api", "assistant", "mcp_servers", "ui", "track_kinds", "agent_sources", "channel", "events", "shortcuts", "skills", "prompts", "themes", "looks", "triage_templates", "agent_filters", "tunnels", "routine_facts", "error_reports", "auth_relay", "secret_providers", "repository_providers", "memory_sources", "disk_offload", "messaging"} {
 		if value, ok := extra[key]; ok {
 			declared[key] = value
 			delete(extra, key)
@@ -355,7 +359,7 @@ func (v Contributes) MarshalJSON() ([]byte, error) {
 	}
 	for key, value := range v.AdditionalProperties {
 		switch key {
-		case "connectors", "voice", "transcription", "speech", "computer", "browser", "iphone", "quota", "usage", "providers", "api", "assistant", "mcp_servers", "ui", "track_kinds", "agent_sources", "channel", "events", "shortcuts", "skills", "prompts", "themes", "looks", "triage_templates", "agent_filters", "tunnels", "error_reports", "auth_relay", "secret_providers", "repository_providers", "memory_sources", "disk_offload", "messaging":
+		case "connectors", "voice", "transcription", "speech", "computer", "browser", "iphone", "quota", "usage", "providers", "api", "assistant", "mcp_servers", "ui", "track_kinds", "agent_sources", "channel", "events", "shortcuts", "skills", "prompts", "themes", "looks", "triage_templates", "agent_filters", "tunnels", "routine_facts", "error_reports", "auth_relay", "secret_providers", "repository_providers", "memory_sources", "disk_offload", "messaging":
 			continue
 		}
 		fields[key] = value
@@ -369,6 +373,8 @@ func (v Contributes) MarshalJSON() ([]byte, error) {
 // 256 KB and 32 skills per extension).
 type SkillItem struct {
 	ID string `json:"id"`
+	// What the extension's contributions list calls it; the id when absent.
+	Title string `json:"title,omitempty"`
 	// The directory, relative to the package (or to the data directory with source data).
 	Dir    string `json:"dir"`
 	Source string `json:"source,omitempty"`
@@ -673,6 +679,19 @@ const (
 // RepositoryLinkKinds are the values of RepositoryLinkKind, in order.
 var RepositoryLinkKinds = []string{"issue", "pull_request"}
 
+// RoutineContributionID: identifies one routine facts source within its extension.
+type RoutineContributionID string
+
+// String returns the ID as it is on the wire.
+func (v RoutineContributionID) String() string { return string(v) }
+
+// RoutineFactsItem: A source of facts and report sections for a scheduled briefing. Requires an RPC runtime and
+// permissions.routine_facts.
+type RoutineFactsItem struct {
+	ID    RoutineContributionID `json:"id"`
+	Title string                `json:"title"`
+}
+
 // ErrorReportsItem: it is given the error and crash reports of the hub and the user's devices
 // (error_reports.deliver): needs the program to speak the protocol, on_startup and permissions.error_reports.
 type ErrorReportsItem struct {
@@ -818,7 +837,9 @@ type APIReceipt struct {
 }
 
 type AssistantItem struct {
-	ID           string   `json:"id"`
+	ID string `json:"id"`
+	// What the extension's contributions list calls it; the id when absent.
+	Title        string   `json:"title,omitempty"`
 	Skills       []string `json:"skills,omitempty"`
 	Instructions string   `json:"instructions,omitempty"`
 	Gate         string   `json:"gate,omitempty"`
@@ -830,6 +851,8 @@ type AssistantItem struct {
 type MCPServerItem struct {
 	// The server's name for the assistant; not persona or persona.
 	ID string `json:"id"`
+	// What the extension's contributions list calls it; the id when absent.
+	Title string `json:"title,omitempty"`
 	// Looked up on PATH, then in ~/bin.
 	Command string `json:"command"`
 	// A PERSONA_ variable (PERSONA_ read too) that, when set, replaces the lookup: a path, or "" / 0 / off / false to
@@ -1557,10 +1580,12 @@ type SecretsResolveResult struct {
 	Value string `json:"value"`
 }
 
-// SecretStoreField: A public field name/type; never a value or source path.
+// SecretStoreField: A public field name/type or edit action (delete, keep_value); never a value or source path.
 type SecretStoreField struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name      string `json:"name"`
+	Type      string `json:"type,omitempty"`
+	Delete    bool   `json:"delete,omitempty"`
+	KeepValue bool   `json:"keep_value,omitempty"`
 }
 
 // SecretStoreTarget: the canonical public target approved on the secret storage card.
@@ -1963,7 +1988,12 @@ type Component struct {
 	Load      *Action       `json:"load,omitempty"`
 	// An https link to lines of this file on its site, {start} and {end} standing for the lines
 	// (…/blob/<sha>/a.go#L{start}-L{end}).
-	LineURL   string   `json:"line_url,omitempty"`
+	LineURL string `json:"line_url,omitempty"`
+	// Go to definition (UI version 13): a name in the code chosen to follow it (⌘/Ctrl-click or ⌘/Ctrl+B on it; Alt+F7
+	// for its usages) calls ui.action with action and values {path, line, column (1-based, in characters), word, intent:
+	// definition or references}; ⌘[ (Ctrl+Alt+← elsewhere) calls it with {path, intent: back}. An older app leaves it
+	// out.
+	Navigate  *Action  `json:"navigate,omitempty"`
 	OldPath   string   `json:"old_path,omitempty"`
 	Status    string   `json:"status,omitempty"`
 	Additions int      `json:"additions,omitempty"`
@@ -2709,8 +2739,8 @@ type Action struct {
 	// Assistant only: send this text back to the same conversation. The hub reads it from the saved view, not from the
 	// client.
 	Reply string `json:"reply,omitempty"`
-	// Assistant only: an https URL or a validated persona/persona session, task, kb or file target, opened inside the
-	// app.
+	// Assistant only, except that a full extension page may open persona://session/<machine>/<session> or
+	// persona://task/<id>: an https URL or a validated persona session, task, kb or file target, opened inside the app.
 	Open string `json:"open,omitempty"`
 	// Assistant only: return one page within the card.
 	Pop bool `json:"pop,omitempty"`
@@ -3829,6 +3859,26 @@ const (
 // ConnectorGroupTools are the values of ConnectorGroupTool, in order.
 var ConnectorGroupTools = []string{"messages_before", "messages_around", "search"}
 
+// ConnectorApprovalMode: how the hub's write gate authorized actions.do besides an ordinary phone card or
+// connector_gate allow rule: auto_confirm means the hub accepted the short-lived credential actions.describe returned
+// under an explicit hub-side guarded auto-confirm policy.
+const (
+	ConnectorApprovalModeAutoConfirm = "auto_confirm"
+)
+
+// ConnectorApprovalModes are the values of ConnectorApprovalMode, in order.
+var ConnectorApprovalModes = []string{"auto_confirm"}
+
+// ConnectorAutoConfirm: short-lived, single-use credential returned from actions.describe when the hub negotiated
+// approval_protocol and the extension's own guard checks passed. Bound by the extension to the exact action and raw
+// args JSON; ignored unless the hub also authorizes guarded auto-confirm for the call.
+type ConnectorAutoConfirm struct {
+	// Opaque single-use approval token generated by the extension; never logged or persisted by the hub.
+	Token string `json:"token"`
+	// RFC 3339 timestamp after which the token is no longer valid.
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 // Empty: an answer with nothing in it: {}.
 type Empty struct {
 }
@@ -3913,6 +3963,10 @@ type ConnectorCallParams struct {
 	Contribution string          `json:"contribution"`
 	Name         string          `json:"name"`
 	Args         json.RawMessage `json:"args,omitempty"`
+	// actions.describe only (tools.call never sets and ignores it): the guarded auto-confirm protocol the hub is willing
+	// to accept for this call when a hub-side policy matches (for example guarded-auto-confirm-v1). Absent when no
+	// policy applies or on older hubs.
+	ApprovalProtocol string `json:"approval_protocol,omitempty"`
 	// The calling conversation's track (#13246): its slug, main for the main track; absent when the hub cannot tell.
 	Track string `json:"track,omitempty"`
 	// The track's kind; absent when not known (the main track).
@@ -3964,6 +4018,9 @@ type ConnectorAction struct {
 type ConnectorDescribeResult struct {
 	Action  ConnectorAction `json:"action"`
 	Summary string          `json:"summary"`
+	// Optional short-lived single-use credential returned only when approval_protocol was negotiated and the extension's
+	// own guard checks passed. Ignored unless the hub also authorizes guarded auto-confirm for this call.
+	AutoConfirm *ConnectorAutoConfirm `json:"auto_confirm,omitempty"`
 }
 
 // ConnectorDoParams: actions.do, only once the hub's gate let the write through: the very args of the card, and the
@@ -3973,6 +4030,12 @@ type ConnectorDoParams struct {
 	Name         string          `json:"name"`
 	Args         json.RawMessage `json:"args,omitempty"`
 	RequestID    string          `json:"request_id"`
+	// Present together with approval_token only when the hub gate let the write through via guarded auto-confirm; absent
+	// for phone-card approvals, connector_gate allow rules and user-initiated writes.
+	ApprovalMode string `json:"approval_mode,omitempty"`
+	// The exact opaque token returned by actions.describe in auto_confirm.token, sent together with approval_mode only
+	// when the hub gate approved guarded auto-confirm.
+	ApprovalToken string `json:"approval_token,omitempty"`
 	// The calling conversation's track (#13246): its slug, main for the main track; absent when the hub cannot tell.
 	Track string `json:"track,omitempty"`
 	// The track's kind; absent when not known (the main track).
@@ -4275,8 +4338,8 @@ type ConnectorThingGroup struct {
 	New   []string `json:"new"`
 }
 
-// ConnectorThingParent: what the thing grew out of: kind inbox (an item's id), todo (a todo's id) or session
-// (<machine>/<session>).
+// ConnectorThingParent: what the thing grew out of: kind inbox (an item's id), todo (a todo's id), session (a coding
+// Agent's <machine>/<session>) or agent (a personal Agent's <source>:<sessionKey>).
 type ConnectorThingParent struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
@@ -5028,6 +5091,59 @@ type ChannelEditParams struct {
 	Contribution string `json:"contribution"`
 	MessageID    string `json:"message_id"`
 	Text         string `json:"text"`
+}
+
+// KBImportCheckpointParams: the host selects the provider, source, account and chat for this import.
+type KBImportCheckpointParams struct {
+}
+
+// KBImportState: the host importer’s committed state for the selected chat.
+// A value this side does not know keeps its raw string and is not Valid.
+type KBImportState string
+
+const (
+	KBImportStatePending    KBImportState = "pending"
+	KBImportStateRunning    KBImportState = "running"
+	KBImportStateDone       KBImportState = "done"
+	KBImportStatePaused     KBImportState = "paused"
+	KBImportStateError      KBImportState = "error"
+	KBImportStateUnreadable KBImportState = "unreadable"
+)
+
+// KBImportStates are the values of KBImportState, in order.
+var KBImportStates = []KBImportState{KBImportStatePending, KBImportStateRunning, KBImportStateDone, KBImportStatePaused, KBImportStateError, KBImportStateUnreadable}
+
+// Valid reports whether v is one of KBImportStates.
+func (v KBImportState) Valid() bool {
+	switch v {
+	case KBImportStatePending, KBImportStateRunning, KBImportStateDone, KBImportStatePaused, KBImportStateError, KBImportStateUnreadable:
+		return true
+	}
+	return false
+}
+
+type KBImportCheckpointResult struct {
+	State    KBImportState `json:"state"`
+	Approval string        `json:"approval"`
+	Read     int           `json:"read"`
+	Written  int           `json:"written"`
+}
+
+type KBSentMarkersParams struct {
+	Day      string `json:"day"`
+	Approval string `json:"approval"`
+	After    int    `json:"after,omitempty"`
+}
+
+type KBSentMarker struct {
+	N          int       `json:"n"`
+	SentBy     string    `json:"sent_by"`
+	RecalledAt time.Time `json:"recalled_at,omitzero"`
+}
+
+type KBSentMarkersResult struct {
+	Markers   []KBSentMarker `json:"markers"`
+	NextAfter int            `json:"next_after,omitempty"`
 }
 
 // Values of KBKind.
@@ -7475,6 +7591,25 @@ type OffloadError struct {
 	Items  []OffloadRunItem `json:"items,omitempty"`
 }
 
+type RoutineFactsParams struct {
+	Contribution RoutineContributionID `json:"contribution"`
+	// Calendar date in the routine's time zone.
+	Date     string `json:"date"`
+	Language string `json:"language"`
+}
+
+type RoutineReportSection struct {
+	Title string `json:"title"`
+	// Plain text. The host owns report layout.
+	Body string `json:"body"`
+}
+
+// RoutineFactsResult: A read-only snapshot. Return an empty object when the contribution has nothing for this date.
+type RoutineFactsResult struct {
+	Facts    []string               `json:"facts,omitempty"`
+	Sections []RoutineReportSection `json:"sections,omitempty"`
+}
+
 // requiredJSONComponent preserves required fields only inside stream payloads.
 type requiredJSONComponent Component
 
@@ -8099,6 +8234,7 @@ var newDef = map[string]func() any{
 	"DiskOffloadItem":               func() any { return new(DiskOffloadItem) },
 	"MemorySourceItem":              func() any { return new(MemorySourceItem) },
 	"RepositoryLinkLabel":           func() any { return new(RepositoryLinkLabel) },
+	"RoutineFactsItem":              func() any { return new(RoutineFactsItem) },
 	"ErrorReportsItem":              func() any { return new(ErrorReportsItem) },
 	"TunnelItem":                    func() any { return new(TunnelItem) },
 	"AgentFilterItem":               func() any { return new(AgentFilterItem) },
@@ -8310,6 +8446,7 @@ var newDef = map[string]func() any{
 	"ConnectorCatalogCallParams":    func() any { return new(ConnectorCatalogCallParams) },
 	"ConnectorSubscriptionFields":   func() any { return new(ConnectorSubscriptionFields) },
 	"ConnectorSubscriptionRecipe":   func() any { return new(ConnectorSubscriptionRecipe) },
+	"ConnectorAutoConfirm":          func() any { return new(ConnectorAutoConfirm) },
 	"Empty":                         func() any { return new(Empty) },
 	"ConnectorInitParams":           func() any { return new(ConnectorInitParams) },
 	"ConnectorManifest":             func() any { return new(ConnectorManifest) },
@@ -8420,6 +8557,11 @@ var newDef = map[string]func() any{
 	"ChannelSendResult":             func() any { return new(ChannelSendResult) },
 	"ChannelTypingParams":           func() any { return new(ChannelTypingParams) },
 	"ChannelEditParams":             func() any { return new(ChannelEditParams) },
+	"KBImportCheckpointParams":      func() any { return new(KBImportCheckpointParams) },
+	"KBImportCheckpointResult":      func() any { return new(KBImportCheckpointResult) },
+	"KBSentMarkersParams":           func() any { return new(KBSentMarkersParams) },
+	"KBSentMarker":                  func() any { return new(KBSentMarker) },
+	"KBSentMarkersResult":           func() any { return new(KBSentMarkersResult) },
 	"KBConflict":                    func() any { return new(KBConflict) },
 	"KBEvidence":                    func() any { return new(KBEvidence) },
 	"KBProvenance":                  func() any { return new(KBProvenance) },
@@ -8592,6 +8734,9 @@ var newDef = map[string]func() any{
 	"OffloadRunRequest":             func() any { return new(OffloadRunRequest) },
 	"OffloadStarted":                func() any { return new(OffloadStarted) },
 	"OffloadError":                  func() any { return new(OffloadError) },
+	"RoutineFactsParams":            func() any { return new(RoutineFactsParams) },
+	"RoutineReportSection":          func() any { return new(RoutineReportSection) },
+	"RoutineFactsResult":            func() any { return new(RoutineFactsResult) },
 }
 
 // Call is one call or event of an extension point's protocol (the schemas' x-methods and x-events): who
@@ -8661,6 +8806,8 @@ var Calls = map[string]Call{
 	"kb.update":                       {Name: "kb.update", From: "program", Params: "KBUpdateParams", Result: "KBUpdateResult"},
 	"kb.owner":                        {Name: "kb.owner", From: "program", Params: "KBOwnerParams", Result: "KBOwner"},
 	"kb.recent":                       {Name: "kb.recent", From: "program", Params: "KBRecentParams", Result: "KBRecentResult"},
+	"kb.import_checkpoint":            {Name: "kb.import_checkpoint", From: "program", Params: "KBImportCheckpointParams", Result: "KBImportCheckpointResult"},
+	"kb.sent_markers":                 {Name: "kb.sent_markers", From: "program", Params: "KBSentMarkersParams", Result: "KBSentMarkersResult"},
 	"kb.put_recording":                {Name: "kb.put_recording", From: "program", Params: "KBPutRecordingParams", Result: "KBPutRecordingResult"},
 	"event.kb.changed":                {Name: "event.kb.changed", From: "hub", Params: "KBChangedEvent", Result: "", Event: true},
 	"event.kb.forgotten":              {Name: "event.kb.forgotten", From: "hub", Params: "KBForgottenEvent", Result: "", Event: true},
@@ -8710,4 +8857,5 @@ var Calls = map[string]Call{
 	"offload.run":                     {Name: "offload.run", From: "hub", Params: "OffloadRunParams", Result: "OffloadRunResult"},
 	"offload.job":                     {Name: "offload.job", From: "hub", Params: "OffloadJobParams", Result: "OffloadJob"},
 	"offload.cancel":                  {Name: "offload.cancel", From: "hub", Params: "OffloadJobParams", Result: "Empty"},
+	"routine_facts.collect":           {Name: "routine_facts.collect", From: "hub", Params: "RoutineFactsParams", Result: "RoutineFactsResult"},
 }
