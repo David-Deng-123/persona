@@ -23,6 +23,7 @@ func namedDirection(t *testing.T, e *routeEnv) {
 }
 
 func TestLarkSupervisedTerminalDialog(t *testing.T) {
+	needsLarkLayer(t) // the chat is the lark module's
 	const terminal = "  Which edition should we use?\n\n› 1. Pocket\n  2. Standard\n\n  Press enter to confirm or esc to go back\n"
 	dialog := screen.ParseDialog(terminal)
 	if dialog == nil || len(dialog.Options) != 2 {
@@ -100,8 +101,10 @@ func TestLarkSupervisedTerminalDialog(t *testing.T) {
 			t.Errorf("title lacks %q: %s", want, card.Header.Title.Content)
 		}
 	}
-	preview, _ := card.Config["summary"].(map[string]any)
-	summary, _ := preview["content"].(string)
+	if card.Config == nil || card.Config.Summary == nil {
+		t.Fatal("missing chat preview")
+	}
+	summary := card.Config.Summary.Content
 	if !strings.Contains(summary, dialog.Question) {
 		t.Errorf("chat preview lacks question: %q", summary)
 	}
@@ -118,6 +121,7 @@ func TestLarkSupervisedTerminalDialog(t *testing.T) {
 // are no named directions. An ordinary session and the owner's protected input
 // keep their existing paths.
 func TestLarkTerminalRoutingWithoutLeaders(t *testing.T) {
+	needsLarkLayer(t) // the chat is the lark module's
 	e := newRouteEnv(t, nil, false)
 	screenAsk := func(id, session string) proto.Interaction {
 		ix := askQuestion(id, session)
@@ -127,9 +131,16 @@ func TestLarkTerminalRoutingWithoutLeaders(t *testing.T) {
 	}
 	plain := screenAsk("ordinary", "unrelated-session")
 	e.raise(plain)
-	waitFor(t, "ordinary terminal sent to owner", func() bool { return e.pushesOf(plain.ID) == 1 })
-	if e.lastShown(plain.ID).Delegating {
-		t.Fatal("ordinary terminal sent to a supervisor")
+	waitFor(t, "ordinary terminal routed to main", func() bool {
+		for _, m := range laterFor(e.s, "conv1") {
+			if m.From == cardAgentQuestion && strings.Contains(m.Text, "interaction_id="+plain.ID) {
+				return true
+			}
+		}
+		return false
+	})
+	if !e.lastShown(plain.ID).Delegating || e.pushesOf(plain.ID) != 0 {
+		t.Fatal("ordinary non-owner terminal pushed to the owner instead of routing to main")
 	}
 	supervised := screenAsk("supervised", "worker-1")
 	e.raise(supervised)
@@ -162,6 +173,7 @@ func TestLarkTerminalRoutingWithoutLeaders(t *testing.T) {
 }
 
 func TestLarkTerminalProtectedInput(t *testing.T) {
+	needsLarkLayer(t) // the chat is the lark module's
 	const privateText = "SYNTHETIC-PRIVATE-VALUE"
 	ix := proto.Interaction{Kind: proto.IxScreen, Screen: privateText, Dialog: &screen.Dialog{
 		Question: "Which edition?", Detail: privateText,
@@ -211,6 +223,7 @@ func TestLarkTerminalProtectedInput(t *testing.T) {
 }
 
 func TestLarkSupervisionCardTitles(t *testing.T) {
+	needsLarkLayer(t) // the chat is the lark module's
 	e := newRouteEnv(t, nil, true)
 	namedDirection(t, e)
 	ctx := context.Background()

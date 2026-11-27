@@ -245,7 +245,7 @@ var agyBridgeCommand = func(ctx context.Context, rh *RuntimeHost, agyBin, instan
 	if pkg == nil {
 		return nil, errors.New("this personad carries no Antigravity runtime package (built without go generate ./internal/runtimepkg)")
 	}
-	dir, err := writePackage(filepath.Join(filepath.Dir(rh.path), "runtime-packages", agyPackage), pkg)
+	dir, err := writePackageWithReservation(filepath.Join(filepath.Dir(rh.path), "runtime-packages", agyPackage+"-builtin"), pkg, true)
 	if err != nil {
 		return nil, fmt.Errorf("write Antigravity runtime: %w", err)
 	}
@@ -254,9 +254,14 @@ var agyBridgeCommand = func(ctx context.Context, rh *RuntimeHost, agyBin, instan
 		return nil, err
 	}
 	args := []string{filepath.Join(dir, "antigravity", "companion.mjs"),
-		"--socket", rh.path, "--agy-bin", agyBin, "--no-update", "--parent-stdin"}
+		"--socket", rh.dialPath(), "--agy-bin", agyBin, "--no-update", "--parent-stdin"}
 	if instance != "" {
 		args = append(args, "--instance", instance)
+	}
+	// The companion attaches `<this program> mcp` to its chats for Persona's tools, and is told which program that is:
+	// a Persona Link install calls it persona-node, which a lookup for personad does not find (#14582).
+	if bin := ownProgram(); bin != "" {
+		args = append(args, "--personad-bin", bin)
 	}
 	cmd := exec.Command(js.Path, args...)
 	cmd.Env = js.env(agyBridgeEnv(ctx, rh, os.Environ()))
@@ -265,19 +270,21 @@ var agyBridgeCommand = func(ctx context.Context, rh *RuntimeHost, agyBin, instan
 }
 
 // agyBridgeEnv constructs the companion environment from base, applying the runtime socket and any managed agy
-// provider environment, and falling back to OS system proxy settings (macOS `scutil --proxy`) when neither base nor
-// the provider explicitly names any proxy variable (including an explicit empty value such as `HTTPS_PROXY=`).
+// provider environment, and falling back to OS system proxy settings (macOS `scutil --proxy`) and then login-shell
+// proxy variables when neither base nor the provider explicitly names any proxy variable (including an explicit empty
+// value such as `HTTPS_PROXY=`).
 func agyBridgeEnv(ctx context.Context, rh *RuntimeHost, base []string) []string {
 	env := slices.Clone(base)
 	if rh != nil {
-		env = setEnvVar(env, "PERSONA_RUNTIME_SOCKET", rh.path)
+		env = setEnvVar(env, "PERSONA_RUNTIME_SOCKET", rh.dialPath())
 		for _, kv := range rh.agyProviderEnv() {
 			if k, v, ok := strings.Cut(kv, "="); ok {
 				env = setEnvVar(env, k, v)
 			}
 		}
 	}
-	return withSystemProxyEnv(ctx, env)
+	env = withSystemProxyEnv(ctx, env)
+	return withShellProxyEnv(ctx, env)
 }
 
 func (rh *RuntimeHost) agyConnected() bool {

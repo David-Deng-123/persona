@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { startFakeNode, until } from '../../runtime-sdk/testing/fake-node.js'
-import { nativeErrorStep } from '../lib/errors.js'
+import { nativeErrorStep, streamedErrorInfo } from '../lib/errors.js'
 import { stepsToItems, transcriptState } from '../lib/map.js'
 import { createAgyRuntime } from '../lib/runtime.js'
 
@@ -314,7 +314,8 @@ test('a blank cancelled turn is recorded before its queued successor and does no
   const interrupted = page.items.findIndex((item) => item.kind === 'notice' && item.text === '已中断')
   assert.ok(interrupted > page.items.findIndex((item) => item.text === 'Interrupted request.'))
   assert.ok(interrupted < page.items.findIndex((item) => item.text === 'New request.'))
-  assert.equal(page.items.at(-1).text, 'New answer.')
+  assert.equal(page.items.filter((item) => item.kind !== 'turn_duration').at(-1).text, 'New answer.')
+  assert.equal(page.items.at(-1).kind, 'turn_duration')
 })
 
 test('a blank ACP cancelled result never starts a retry', async (t) => {
@@ -356,8 +357,10 @@ test('a plan-mode 401 retries despite a previous reply flushing and whole-second
   await until('plan retry settles', () => row()?.last_text === 'Finished.' && idle())
   assert.equal(calls().filter((call) => call.method === 'session/prompt').length, 3)
   const page = await items()
-  assert.deepEqual(page.items.map((item) => item.text), [input.content, prior.prompt, prior.reply, '/plan Continue.', 'Finished.'])
-  assert.equal(page.items[3].client_msg_id, 'plan-retry')
+  const visible = page.items.filter((item) => item.kind !== 'turn_duration')
+  assert.deepEqual(visible.map((item) => item.text), [input.content, prior.prompt, prior.reply, '/plan Continue.', 'Finished.'])
+  assert.equal(visible[3].client_msg_id, 'plan-retry')
+  assert.equal(page.items.at(-1).kind, 'turn_duration')
 })
 
 for (const [reason, plan, attempts, retryDelay] of [
@@ -533,6 +536,45 @@ test('a rejected ACP prompt publishes its failure through the normal session row
   assert.equal(row().turn_error, undefined)
 })
 
+const STREAMED = 'FAILED_PRECONDITION (code 400): The request is not supported here.'
+
+test('only agy\'s one-line streamed error shape reads as an error', () => {
+  assert.deepEqual(streamedErrorInfo(`\n⚠ ${STREAMED}\n`), { turn_error: STREAMED, turn_error_kind: 'user' })
+  assert.deepEqual(streamedErrorInfo('⚠ RESOURCE_EXHAUSTED (code 429): Slow down.'),
+    { turn_error: 'RESOURCE_EXHAUSTED (code 429): Slow down.', turn_error_code: 'rate_limited' })
+  for (const text of [`Done.\n⚠ ${STREAMED}`, `⚠ ${STREAMED}\nMore text.`, '⚠ Careful: this deletes files.', STREAMED, '⚠ failed (code 400): x'])
+    assert.equal(streamedErrorInfo(text), null, text)
+})
+
+test('an API error agy streams as text is the turn error, settles idle and stays in history', async (t) => {
+  // agy exports the input but not the error, and leaves its summary behind the export (#14628).
+  const { node, row, items, idle } = await fixture(t, { initialCount: 1, promptPlan: [
+    { export: true, streamOnly: true, reply: `\n⚠ ${STREAMED}\n` },
+    { export: true, reply: 'Next answer.' },
+  ] })
+  await node.peer.call('session.send', { session_id: SESSION, text: 'Please answer.' })
+  await until('streamed error published', () => idle() && row()?.turn_error)
+  assert.equal(row().turn_error, STREAMED)
+  assert.equal(row().turn_error_kind, 'user')
+  assert.equal(row().status, 'idle')
+  const page = (await items()).items
+  assert.equal(page.some((item) => item.role === 'assistant' && item.text?.includes('⚠')), false)
+  const notice = page.find((item) => item.kind === 'notice' && item.text === `API Error: ${STREAMED}`)
+  assert.ok(notice)
+
+  await node.peer.call('session.send', { session_id: SESSION, text: 'Next request.' })
+  await until('successor settled', () => idle() && row()?.last_text === 'Next answer.')
+  assert.equal(row().turn_error, undefined)
+  assert.ok((await items()).items.some((item) => item.id === notice.id && item.text === notice.text))
+})
+
+test('a reply that only mentions an error after other words stays a reply', async (t) => {
+  const reply = `The last run said: ⚠ ${STREAMED}`
+  const { node, row, idle } = await fixture(t, { initialCount: 1, promptPlan: [{ export: true, reply }] })
+  await node.peer.call('session.send', { session_id: SESSION, text: 'What happened?' })
+  await until('reply published', () => idle() && row()?.last_text === reply)
+  assert.equal(row().turn_error, undefined)
+})
 
 test('an attached picture that is cut short is not sent; the words and complete pictures are', async (t) => {
   const { node, calls } = await fixture(t)

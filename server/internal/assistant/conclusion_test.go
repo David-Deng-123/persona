@@ -349,20 +349,22 @@ func TestBriefingSaysTheSameVerdictAsTheCard(t *testing.T) {
 	if len(cardsWith(posts(), botcard.EscapeMarkdown(verdict))) != 1 {
 		t.Fatalf("the card does not say %q", verdict)
 	}
-	facts := s.briefFactsAt(ctx, time.Now(), "")
-	body := facts.body(s, "早报")
-	var row *briefBodyRow
-	for i := range body.Accept {
-		if body.Accept[i].ID == todo.ID {
-			row = &body.Accept[i]
+	if s.briefingOn() {
+		facts := s.briefFactsAt(ctx, time.Now(), "")
+		body := s.briefBodyOf(facts, "早报")
+		var row *briefBodyRow
+		for i := range body.Accept {
+			if body.Accept[i].ID == todo.ID {
+				row = &body.Accept[i]
+			}
 		}
-	}
-	if row == nil || row.Verdict != verdict || row.Outcome != outcomeCannot {
-		t.Fatalf("the brief's row %+v", row)
-	}
-	card, _, _ := s.briefCard(facts, "早报", "")
-	if js := card.JSON(); !strings.Contains(js, botcard.EscapeMarkdown(verdict)) || !strings.Contains(js, "知道了") {
-		t.Fatalf("the briefing card does not say it:\n%s", js)
+		if row == nil || row.Verdict != verdict || row.Outcome != outcomeCannot {
+			t.Fatalf("the brief's row %+v", row)
+		}
+		card, _, _ := s.briefCard(facts, "早报", "")
+		if js := card.JSON(); !strings.Contains(js, botcard.EscapeMarkdown(verdict)) || !strings.Contains(js, "知道了") {
+			t.Fatalf("the briefing card does not say it:\n%s", js)
+		}
 	}
 	var onBoard bool
 	for _, r := range s.boardRows(ctx, s.botLang(ctx), s.webBase(ctx), time.Now()) {
@@ -385,7 +387,7 @@ func TestRecommendationThatCannotReachTheAgentIsNotTaken(t *testing.T) {
 	f.mu.Lock()
 	f.failSend = errors.New("node down")
 	f.mu.Unlock()
-	if ok, err := s.acceptTryFromBrief(ctx, todo.ID, a.AskedAt.UTC().Format(timeKeyLayout)); ok.taken || err == nil {
+	if ok, err := s.acceptReviewRound(ctx, todo.ID, a.AskedAt.UTC().Format(timeKeyLayout)); ok.taken || err == nil {
 		t.Fatalf("taken while the agent cannot be reached: %v %v", ok, err)
 	}
 	// The web button: 502 with the reason, not 409 "already handled" (the web app toasts it and the button works again).
@@ -399,7 +401,7 @@ func TestRecommendationThatCannotReachTheAgentIsNotTaken(t *testing.T) {
 	notTaken := i18n.T(s.botLang(ctx), "assistant-reports.accept_not_taken", i18n.Args{"error": "node down"})
 	press := &botcard.CardAction{}
 	press.Action.Value = map[string]any{"a": "accept", "id": todo.ID}
-	if r := s.botCardAction(ctx, press, ""); r == nil || r.Toast == nil ||
+	if r := s.larkModule().Action(ctx, press, ""); r == nil || r.Toast == nil ||
 		r.Toast.Type != "error" || r.Toast.Content != notTaken {
 		t.Fatalf("the Lark button: %+v", r)
 	}
@@ -689,19 +691,14 @@ func TestDecisionAnsweredInWordsStaysDecidedWhenTheSendFails(t *testing.T) {
 func TestFeishuConclusionQuestionGoesToSupervisorWithoutAnswering(t *testing.T) {
 	needsLarkLayer(t)
 	s, f, todo, _, _ := conclusionService(t, false)
-	ctx := t.Context()
 	waitsForReview(t, s, f, todo.ID, "Two options: start with ten percent or defer the rollout.")
 	reviewTask(t, s, todo.ID, map[string]any{"verdict": "needs_user", "reason": "Which rollout do you want?", "recommend": "Start with ten percent"})
 	a := askOf(s, todo.ID)
-	status, err := s.feishuStatus(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
 	before := len(sentToAgent(f))
 	var ev botcard.MessageEvent
 	ev.Message.ChatType, ev.Message.ParentID, ev.Message.MessageType = "p2p", a.MessageID, "text"
 	ev.Message.MessageID, ev.Message.Content = "om_background", `{"text":"能补充一下这个决定的背景吗"}`
-	s.feishuMessage(ev, status, "")
+	feishuSay(t, s, f, nil, ev, "")
 	task := todoNow(s, todo.ID)
 	if got := askOf(s, todo.ID); got == nil || !got.AcceptedAt.IsZero() || task.Supervision.State != reviewNeedsUser ||
 		task.DoneAt != nil || len(sentToAgent(f)) != before {
@@ -713,7 +710,7 @@ func TestFeishuConclusionQuestionGoesToSupervisorWithoutAnswering(t *testing.T) 
 	}
 	// The existing option still answers this exact card after the clarification.
 	ev.Message.MessageID, ev.Message.Content = "om_choice", `{"text":"B"}`
-	s.feishuMessage(ev, status, "")
+	feishuSay(t, s, f, nil, ev, "")
 	if got := askOf(s, todo.ID); got == nil || got.AcceptedAt.IsZero() {
 		t.Fatalf("explicit option did not answer: %+v", got)
 	}
@@ -799,21 +796,24 @@ func TestConclusionVerificationCopyFollowsDeliveryState(t *testing.T) {
 	}
 
 	// 3. Briefing feed and briefing card
-	facts := s.briefFactsAt(ctx, time.Now(), "")
-	body := facts.body(s, "早报")
-	var row *briefBodyRow
-	for i := range body.Accept {
-		if body.Accept[i].ID == todo.ID {
-			row = &body.Accept[i]
+	t.Run("briefing", func(t *testing.T) {
+		needsBriefingModule(t)
+		facts := s.briefFactsAt(ctx, time.Now(), "")
+		body := s.briefBodyOf(facts, "早报")
+		var row *briefBodyRow
+		for i := range body.Accept {
+			if body.Accept[i].ID == todo.ID {
+				row = &body.Accept[i]
+			}
 		}
-	}
-	if row == nil || row.Verdict != wantVerdict || row.Outcome != "" {
-		t.Fatalf("brief body row = %+v, want verdict=%q outcome=\"\"", row, wantVerdict)
-	}
-	briefCard, _, _ := s.briefCard(facts, "早报", "")
-	if js := briefCard.JSON(); !strings.Contains(js, botcard.EscapeMarkdown(wantVerdict)) || strings.Contains(js, forbidden) {
-		t.Fatalf("brief card verdict mismatch:\n%s", js)
-	}
+		if row == nil || row.Verdict != wantVerdict || row.Outcome != "" {
+			t.Fatalf("brief body row = %+v, want verdict=%q outcome=\"\"", row, wantVerdict)
+		}
+		briefCard, _, _ := s.briefCard(facts, "早报", "")
+		if js := briefCard.JSON(); !strings.Contains(js, botcard.EscapeMarkdown(wantVerdict)) || strings.Contains(js, forbidden) {
+			t.Fatalf("brief card verdict mismatch:\n%s", js)
+		}
+	})
 
 	// 4. Snapshot
 	snap, total := s.snapshotUnaccepted(ctx, s.location(ctx))
