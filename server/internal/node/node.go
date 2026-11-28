@@ -61,6 +61,7 @@ type Node struct {
 	memoryMergeRetry map[string]time.Time
 
 	memoryMu     sync.Mutex
+	scratchMu    sync.Mutex
 	Version      string
 	skillImports assistantskills.Importer
 	updater      *nodeupdate.Manager // resident-owned, shared across attach connections
@@ -621,6 +622,25 @@ func (n *Node) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	}
 	n.fsw.start(ctx, func(c fsChanged) { _ = n.peer.Notify(methodFsChanged, c) })
 	defer n.fsw.close()
+	// Bind n.runtimes and n.runtimeHost before starting any background goroutine or adopting
+	// assistants so unlocked reads of n.runtimes / n.runtimeHost never race with attach(), and
+	// listen before exposing a standalone RuntimeHost so Listen failure leaves n.runtimeHost nil.
+	var ownRuntimeHost *RuntimeHost
+	if n.runtimeHost != nil {
+		n.runtimes = n.runtimeHost.reg
+	} else {
+		if n.runtimes == nil {
+			n.runtimes = newRuntimeRegistry()
+		}
+		rh := n.newRuntimeHost()
+		if err := rh.Listen(ctx); err != nil { // runtimes (runtimes.go): beside the engine, whichever it is
+			n.logger.Printf("runtime socket: %v", err)
+		} else {
+			ownRuntimeHost = rh
+			n.runtimeHost = rh
+			defer rh.setAgyBridge(false)
+		}
+	}
 	n.cdirs.report = func(dirs []string) { _ = n.peer.Notify("claude.dirs", map[string]any{"dirs": dirs}) }
 	go n.watchClaudePlugin(ctx) // claudeplugin.go
 	n.codices.report = func(cfg proto.CodexConfig) { _ = n.peer.Notify("codex.inventory", cfg) }
@@ -630,17 +650,14 @@ func (n *Node) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		adopted = n.keeper.adopt(n)
 	}
 	n.startState(ctx, adopted)
-	// The runtimes before the hook socket: its MCP requests read n.runtimes, which attach sets (clicall.go mcpAssistantOf).
-	if rh := n.runtimeHost; rh != nil { // a resident node's: runtimes stay connected across hub connections
+	// The runtimes before the hook socket: its MCP requests read n.runtimes, which attach uses (clicall.go mcpAssistantOf).
+	if ownRuntimeHost != nil {
+		ownRuntimeHost.attach(n)
+		defer ownRuntimeHost.detach(n)
+	} else if n.runtimeHost != nil { // a resident node's: runtimes stay connected across hub connections
+		rh := n.runtimeHost
 		rh.attach(n)
 		defer rh.detach(n)
-	} else if rh, err := n.listenRuntimeSocket(ctx); err != nil { // runtimes (runtimes.go): beside the engine, whichever it is
-		n.logger.Printf("runtime socket: %v", err)
-	} else {
-		defer func() {
-			rh.setAgyBridge(false)
-			rh.detach(n)
-		}()
 	}
 	ln, err := n.listenHookSocket(ctx)
 	if err != nil {
@@ -2136,7 +2153,7 @@ func (n *Node) handleMethod(ctx context.Context, method string, params json.RawM
 			if err == nil && id != "" {
 				n.expectFirstLine(id, opts.ClientMsgID, p.Text, len(p.Images), at)
 			}
-			return map[string]any{"session_id": id}, err
+			return n.assistantSendResult(id), err
 		}
 		var once struct {
 			OnceID string `json:"once_id"`
@@ -2170,11 +2187,11 @@ func (n *Node) handleMethod(ctx context.Context, method string, params json.RawM
 					n.recordSegmentInput(id, opts.ClientMsgID)
 				}
 			}
-			return round.answer(map[string]any{"session_id": id}), err
+			return round.answer(n.assistantSendResult(id)), err
 		}
 		if p.NewSessionID == "" || opts.ClientMsgID == "" {
 			id, err := send()
-			return round.answer(map[string]any{"session_id": id}), err
+			return round.answer(n.assistantSendResult(id)), err
 		}
 		// A start under a given id with its first message's client_msg_id (a meeting's room, its follow-up, Just me's
 		// new main chat): sent once, and its transcript item carries the id, as a session.send's (echo.go).
@@ -2188,7 +2205,7 @@ func (n *Node) handleMethod(ctx context.Context, method string, params json.RawM
 		if err == nil && id == "" {
 			id = p.NewSessionID // the same start asked again while it went: that conversation
 		}
-		return map[string]any{"session_id": id}, err
+		return n.assistantSendResult(id), err
 	case "assistant.guest_prepare": // a guest conversation's directory (assistant_guest.go)
 		return n.assistantGuestPrepare(params)
 	case "assistant.guest_delete": // a meeting's room, at its transcript's cut (assistant_guest.go)
@@ -2431,11 +2448,24 @@ func (n *Node) handleMethod(ctx context.Context, method string, params json.RawM
 			}
 		}
 		over := n.turnOver(p.SessionID) // before the key: the Escape itself may end a turn
+		var qPath string
+		var qStat os.FileInfo
+		if !over {
+			if qPath = n.transcriptPath(p.SessionID); qPath != "" {
+				qStat, _ = os.Stat(qPath)
+			}
+		}
 		err := n.keys(ctx, p.SessionID, []string{"esc"}, "")
 		if err == nil && over && n.backgroundRuns(p.SessionID) {
 			// The Escape went to an idle prompt and the background work goes on: said, not claimed as an interruption
 			// (#10828). The key is pressed whatever this finds, so a turn that does run is never left running.
 			err = refusal(proto.CodeTurnOverBackground, i18n.T(i18n.From(ctx), "rpc-errors."+proto.CodeTurnOverBackground), nil)
+		} else if err == nil && !over && qPath != "" {
+			n.forgetMeta(qPath)
+			n.notifySessionsSoon()
+			if qStat != nil {
+				n.watchQueueSettle(qPath, qStat.Size(), qStat.ModTime())
+			}
 		}
 		return ok(err)
 	case "session.screen.before":
@@ -2723,11 +2753,11 @@ func (n *Node) handleMethod(ctx context.Context, method string, params json.RawM
 			limit = 80
 		}
 		if p.ThroughSeq > 0 { // a fold being opened: the lines it stands for
-			page, more := f.Range(p.FromSeq, p.ThroughSeq, 1000)
+			page, more, span := f.RangeSpan(p.FromSeq, p.ThroughSeq, 1000)
 			page = n.applyBotmuxTurns(ctx, p.SessionID, f, page, false)
 			n.toolViews.attach(p.SessionID, page, false, f)
 			n.ttft.annotate(p.SessionID, page, false)
-			return map[string]any{"items": items(page), "more": more}, nil
+			return withSpan(map[string]any{"items": items(page), "more": more}, span, true), nil
 		}
 		// Pages counted back from the end fold the agent's work for callers that ask (transcript.FoldWork).
 		fold := func(page []proto.Item) []proto.Item {
@@ -3176,6 +3206,9 @@ func (n *Node) handleMethod(ctx context.Context, method string, params json.RawM
 		}
 		return map[string]any{"sent": true}, nil
 	case "workspace.close":
+		if p.Host == host.Orca {
+			return n.closeOrcaTaskSpace(ctx, p.TaskID, p.WorkspaceID)
+		}
 		return n.closeTaskSpace(ctx, p.TaskID, p.WorkspaceID)
 	case "assistant.cache_clear":
 		n.forgetCacheWarm(p.SessionID)

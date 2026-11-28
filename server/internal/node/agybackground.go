@@ -27,6 +27,7 @@ var (
 	agyTaskEnd       = lazyre.New(`(?i)\bTask id "([^"\n]+)" (?:was )?(finished|failed|canceled|cancelled|killed|stopped)\b`)
 	agyTaskMessage   = lazyre.New(`(?m)^[ \t]*\[Message\] timestamp=(\S+) sender=(\S+) priority=\S+ content=([\s\S]*)`)
 	agyCronIteration = lazyre.New(`\(iteration [0-9]+\)$`)
+	agyTaskHeartbeat = lazyre.New(`(?i)^(?:\[Notice\]\s+)?Task(?:\s+id\s+"[^"\n]+")?\s+is\s+still\s+running\b`)
 	agyServerRestart = lazyre.New(`(?i)^(?:\[Notice\]\s+)?All your subagents and background tasks have been stopped due to server restart\b`)
 	agyTaskListRow   = lazyre.New("^- .* \\(`([^`\\s]+)`\\)$")
 )
@@ -179,7 +180,7 @@ func agyBackground(steps []agyStep, conversation, dir string, brain *os.Root, no
 			if m != nil {
 				sender := agyQualifiedTaskID(conversation, m[2])
 				message := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[3]), "</SYSTEM_MESSAGE>"))
-				heartbeat := strings.Contains(strings.ToLower(message), "still running")
+				heartbeat := agyTaskHeartbeat.MatchString(message)
 				if record := byID[sender]; record != nil {
 					record.recordSeen(at, i)
 					if end == nil && record.oneShot {
