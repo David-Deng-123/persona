@@ -1,5 +1,9 @@
 # Lessons: Claude Code, Codex, and herdr
 
+## A missing queue receipt leaves delivery unknown (#17444)
+
+Fall back to steering after an explicit queue rejection. A lost or incomplete receipt may follow a persisted submission, so steering then can deliver a duplicate.
+
 ## A held Codex rollout needs its engine's pane identity (#17406)
 
 - A no-daemon Codex in herdr-core, Tern or Orca holds its own rollout. Resolve the process's engine-specific pane
