@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nwverse/persona/server/internal/buswire"
 	"github.com/nwverse/persona/server/internal/extwire"
 )
 
@@ -41,7 +42,7 @@ func (h *Manager) pageDispose(s *pageSession) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_ = s.process.Call(ctx, "ui.page.dispose", map[string]any{"session": s.id}, nil)
+		_, _ = buswire.Call(ctx, s.process, extwire.UIPageDisposeMethod, extwire.UIPageSessionParams{Session: s.id})
 	})
 }
 func (h *Manager) pageDropExtension(ext string) {
@@ -118,7 +119,7 @@ func (h *Manager) pageDisconnect(who extwire.UIPrincipal) {
 func (h *Manager) pagePause(s *pageSession, done chan struct{}) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	err := s.process.Call(ctx, "ui.page.suspend", map[string]any{"session": s.id}, nil)
+	_, err := buswire.Call(ctx, s.process, extwire.UIPageSuspendMethod, extwire.UIPageSessionParams{Session: s.id})
 	ps := &h.uiPages
 	ps.mu.Lock()
 	if done != nil && s.pauseDone == done {

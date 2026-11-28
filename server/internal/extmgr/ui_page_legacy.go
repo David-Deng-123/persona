@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nwverse/persona/sdk/go/wire"
+	"github.com/nwverse/persona/server/internal/buswire"
 	"github.com/nwverse/persona/server/internal/extension"
 	"github.com/nwverse/persona/server/internal/extwire"
 )
@@ -26,11 +27,8 @@ func (h *Manager) pageLegacy(ctx context.Context, p *extension.Extension, hp *hu
 	hasToken := strings.HasPrefix(in.State, legacyPagePrefix)
 	// State is opaque for ordinary legacy pages, even when it resembles our
 	// checkpoint format. Only component pages opt into interpreting that state.
-	var supported struct {
-		Contributions []string `json:"contributions"`
-	}
 	cctx, cancel := context.WithTimeout(ctx, time.Second)
-	err := hp.proc.Call(cctx, "ui.page.supported", map[string]any{}, &supported)
+	supported, err := buswire.Call(cctx, hp.proc, extwire.UIPageSupportedMethod, buswire.None{})
 	cancel()
 	if err != nil || !slices.Contains(supported.Contributions, item.ID) {
 		return extension.ActionResult{}, false, nil

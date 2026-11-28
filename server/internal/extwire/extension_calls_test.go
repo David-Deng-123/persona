@@ -1,6 +1,7 @@
 package extwire_test
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -41,6 +42,48 @@ func TestExtensionCallsWire(t *testing.T) {
 		`{}`, `{"state":"signed_in","account":"me@example.com","message":"Signed in","expires_at":"2030-01-02T03:04:05Z"}`)
 	checkMethodWire[buswire.None, wire.AuthStatus](t, extwire.AuthLogoutMethod, "auth.logout",
 		`{}`, `{"state":"signed_out"}`)
+	checkMethodWire[extwire.UIPageSessionParams, buswire.None](t, extwire.UIPageDisposeMethod, "ui.page.dispose",
+		`{"session":"page-1"}`, `{}`)
+	checkMethodWire[extwire.UIPageSessionParams, buswire.None](t, extwire.UIPageSuspendMethod, "ui.page.suspend",
+		`{"session":"page-1"}`, `{}`)
+	checkMethodWire[buswire.None, extwire.UIPageSupportedResult](t, extwire.UIPageSupportedMethod, "ui.page.supported",
+		`{}`, `{"contributions":["overview","detail"]}`)
+	checkMethodWire[extwire.AssistantCredentialsParams, extwire.AssistantCredentialsResult](t, extwire.AssistantCredentialsMethod, "assistant.credentials",
+		`{"contribution":"provider"}`, `{"env":{"EXAMPLE_REGION":"example","EXAMPLE_USER":"me@example.com"}}`)
+	checkMethodWire[extwire.AssistantSummaryParams, extwire.AssistantSummaryResult](t, extwire.AssistantSummaryMethod, "assistant.summary",
+		`{"contribution":"provider","summary":"Title \u0026 details\nNext line"}`, `{"summary":"Rewritten title"}`)
+}
+
+func TestAssistantCallsOmitEmptyContribution(t *testing.T) {
+	checkMethodWire[extwire.AssistantCredentialsParams, extwire.AssistantCredentialsResult](t, extwire.AssistantCredentialsMethod, "assistant.credentials",
+		`{}`, `{"env":{}}`)
+	checkMethodWire[extwire.AssistantSummaryParams, extwire.AssistantSummaryResult](t, extwire.AssistantSummaryMethod, "assistant.summary",
+		`{"summary":""}`, `{"summary":""}`)
+}
+
+func TestUIPageCallsIgnoreAcknowledgmentBody(t *testing.T) {
+	for _, method := range []buswire.Method[extwire.UIPageSessionParams, buswire.None]{
+		extwire.UIPageDisposeMethod,
+		extwire.UIPageSuspendMethod,
+	} {
+		t.Run(method.Name, func(t *testing.T) {
+			caller := extensionCallFunc(func(_ context.Context, _ string, _ any, out any) error {
+				if out != nil {
+					t.Fatalf("acknowledgment decode destination = %T, want nil", out)
+				}
+				return context.Canceled
+			})
+			if _, err := buswire.Call(t.Context(), caller, method, extwire.UIPageSessionParams{Session: "page-1"}); err != context.Canceled {
+				t.Fatalf("call error = %v, want %v", err, context.Canceled)
+			}
+		})
+	}
+}
+
+type extensionCallFunc func(context.Context, string, any, any) error
+
+func (f extensionCallFunc) Call(ctx context.Context, method string, params, out any) error {
+	return f(ctx, method, params, out)
 }
 
 func checkMethodWire[P, R any](t *testing.T, method buswire.Method[P, R], name, request, reply string) {

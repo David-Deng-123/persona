@@ -20,6 +20,12 @@ const (
 	MethodMemoryEntries     = "memory.entries"
 	MethodAuthStatus        = "auth.status"
 	MethodAuthLogout        = "auth.logout"
+
+	MethodUIPageDispose        = "ui.page.dispose"
+	MethodUIPageSuspend        = "ui.page.suspend"
+	MethodUIPageSupported      = "ui.page.supported"
+	MethodAssistantCredentials = "assistant.credentials"
+	MethodAssistantSummary     = "assistant.summary"
 )
 
 var (
@@ -36,4 +42,42 @@ var (
 
 	AuthStatusMethod = buswire.Method[buswire.None, wire.AuthStatus]{Name: MethodAuthStatus}
 	AuthLogoutMethod = buswire.Method[buswire.None, wire.AuthStatus]{Name: MethodAuthLogout}
+
+	UIPageDisposeMethod   = buswire.Method[UIPageSessionParams, buswire.None]{Name: MethodUIPageDispose}
+	UIPageSuspendMethod   = buswire.Method[UIPageSessionParams, buswire.None]{Name: MethodUIPageSuspend}
+	UIPageSupportedMethod = buswire.Method[buswire.None, UIPageSupportedResult]{Name: MethodUIPageSupported}
+
+	AssistantCredentialsMethod = buswire.Method[AssistantCredentialsParams, AssistantCredentialsResult]{Name: MethodAssistantCredentials}
+	AssistantSummaryMethod     = buswire.Method[AssistantSummaryParams, AssistantSummaryResult]{Name: MethodAssistantSummary}
 )
+
+// UIPageSessionParams identifies the mounted page to suspend or dispose.
+type UIPageSessionParams struct {
+	Session string `json:"session"`
+}
+
+// UIPageSupportedResult lists the contributions that support component pages.
+type UIPageSupportedResult struct {
+	Contributions []string `json:"contributions"`
+}
+
+// AssistantCredentialsParams optionally targets the provider for a command gate.
+type AssistantCredentialsParams struct {
+	Contribution string `json:"contribution,omitempty"`
+}
+
+// AssistantCredentialsResult carries the gate's environment variables.
+type AssistantCredentialsResult struct {
+	Env map[string]string `json:"env"`
+}
+
+// AssistantSummaryParams carries the text to rewrite and the optional target.
+type AssistantSummaryParams struct {
+	Contribution string `json:"contribution,omitempty"`
+	Summary      string `json:"summary"`
+}
+
+// AssistantSummaryResult carries the rewritten text.
+type AssistantSummaryResult struct {
+	Summary string `json:"summary"`
+}

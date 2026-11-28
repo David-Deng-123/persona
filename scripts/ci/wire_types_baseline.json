@@ -1581,8 +1581,6 @@
    "{usage}": 4
   },
   "literal-call": {
-   "assistant.credentials": 1,
-   "assistant.summary": 1,
    "auth.step": 1,
    "engine.use": 1,
    "hello": 1,
@@ -1596,12 +1594,9 @@
    "sessions.list": 1,
    "stream.open": 1,
    "terminal.unwatch": 1,
-   "ui.page.dispose": 1,
    "ui.page.event": 1,
    "ui.page.mount": 1,
    "ui.page.resume": 1,
-   "ui.page.supported": 1,
-   "ui.page.suspend": 1,
    "ui.render": 1,
    "unpair": 1,
    "upgrade.health": 1,
