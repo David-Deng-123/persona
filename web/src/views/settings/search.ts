@@ -243,6 +243,7 @@ export function searchSettings(query: string, integrationsV2 = false, hasInboxSo
   const tabMatches = (k: Tab) => {
     const info = tabInfo(k);
     if (has(info.label, info.hint)) return true;
+    if (k === "advanced" && has(t("settings-nav.search_advanced_appearance"))) return true;
     // When integrations_v2 is enabled, searching legacy tab names ("Channels", "Connectors", "Extensions", "Inbox Sources") still finds Integrations.
     if (unifiedVisible && k === INTEGRATIONS_SETTINGS_REGISTRATION.id) {
       return has(...INTEGRATIONS_SETTINGS_REGISTRATION.searchKeywords());
