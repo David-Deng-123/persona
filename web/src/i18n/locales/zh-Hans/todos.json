@@ -374,9 +374,8 @@
   "reorganize_select_item": "选择「{title}」",
   "reorganize_success": "已更新 {count} 项",
   "reorganize_success_transferred": "已更新 {count} 项（已移交 {transferred} 项督办权）",
-  "detail_template_work_goal": "工作目标",
-  "detail_ownership_region": "工作目标归属",
-  "detail_parent_label": "主任务：{title}",
+  "detail_ownership_region": "层级与归属",
+  "detail_parent_label": "父目标：{title}",
   "detail_subtasks_section": "子任务 · {done}/{total}",
   "detail_open_active_agent": "打开活跃 Agent",
   "detail_open_pr": "打开 PR",
@@ -532,5 +531,7 @@
   "detail_focus_region": "当前焦点",
   "detail_focus_more": "展开其余 {count} 项状态",
   "detail_focus_less": "收起其余状态",
-  "detail_audit_group": "记录与回溯"
+  "detail_audit_group": "记录与回溯",
+  "header_directions": "方向",
+  "active_blocker_linked_todo": "关联前置任务"
 }

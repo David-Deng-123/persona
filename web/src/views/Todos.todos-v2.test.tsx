@@ -1061,34 +1061,42 @@ describe("TodoDetail dual template, default-expanded sections & status summary u
       conversations: [{ machine_id: "m1", session_id: "dir-platform", title: "Platform Direction" }],
     });
 
-    // Single consolidated top overview strip holds status, work-goal badge, agent count, direction, parent link, subtle priority, and primary CTA
+    // Single streamlined hierarchy/ownership strip holds Direction › Parent Goal breadcrumbs and quick CTA,
+    // without duplicate status dot, work-goal label, or priority badge (#17938)
     const ownership = host.querySelector<HTMLElement>("[data-testid=todo-detail-ownership]")!;
     expect(ownership).toBeTruthy();
     expect(host.querySelector("[data-testid=todo-detail-status-summary]")).toBeNull();
     expect(ownership.className).toContain("bg-inset");
     expect(ownership.className).toContain("border-line");
     expect(ownership.className).toContain("rounded-control");
-    expect(ownership.querySelector("[data-testid=todo-detail-summary-status]")?.textContent).toBeTruthy();
-    expect(ownership.querySelector("[data-testid=todo-detail-template-badge]")?.textContent).toBe(t("todos.detail_template_work_goal"));
+    expect(ownership.querySelector("[data-testid=todo-detail-summary-status]")).toBeNull();
+    expect(ownership.querySelector("[data-testid=todo-detail-template-badge]")).toBeNull();
+    expect(ownership.querySelector("[data-testid=todo-detail-priority-subtle]")).toBeNull();
     expect(ownership.querySelector("[data-testid=todo-detail-direction]")?.textContent).toContain("Platform Direction");
     const parentLink = ownership.querySelector<HTMLButtonElement>("[data-testid=todo-detail-parent-link]")!;
     expect(parentLink.textContent).toContain("Ship Todos V2");
-    const subtlePriority = ownership.querySelector<HTMLElement>("[data-testid=todo-detail-priority-subtle]")!;
-    expect(subtlePriority).toBeTruthy();
-    expect(subtlePriority.textContent).toContain(t("todos.priority_high"));
-    expect(subtlePriority.className).toContain("text-ink-3");
     const summaryOpenAgentBtn = ownership.querySelector<HTMLButtonElement>("[data-testid=todo-summary-open-active-agent]")!;
     expect(summaryOpenAgentBtn.textContent).toBe(t("todos.detail_open_active_agent"));
 
-    // Meta row beneath title does not repeat status badge or agent count for work goals
+    // Meta row beneath title is the single home for status badge & active agent count
     const metaRow = host.querySelector<HTMLElement>("[data-testid=todo-detail-meta]")!;
     expect(metaRow).toBeTruthy();
-    expect(metaRow.querySelector("[data-testid=todo-detail-status]")).toBeNull();
-    expect(metaRow.textContent).not.toContain(t("todos.agent_count", { count: 1 }));
+    expect(metaRow.querySelector("[data-testid=todo-detail-status]")?.textContent).toBeTruthy();
+    expect(metaRow.textContent).toContain(t("todos.agent_count", { count: 1 }));
+
+    // Right detail pane relaxes max-w to 880px and elevates Notes directly before plan metadata (#17938)
+    const detailPane = host.querySelector<HTMLElement>("[data-testid=todo-detail]")!;
+    expect(detailPane.className).toContain("max-w-[880px]");
+    const notesEl = host.querySelector<HTMLElement>("[data-testid=todo-detail-notes]")!;
+    const planEl = host.querySelector<HTMLElement>("[data-testid=todo-plan]")!;
+    expect(notesEl).toBeTruthy();
+    expect(planEl).toBeTruthy();
+    expect(notesEl.compareDocumentPosition(planEl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(host.querySelector("[data-testid=todo-plan-project]")?.className).toContain("max-w-md");
+    expect(host.querySelector("[data-testid=todo-plan-project]")?.className).not.toContain("max-w-56");
 
     // Primary workspace (plan fields with muted priority, notes, active agents) stays expanded by default
     expect(host.querySelector("[data-testid=todo-detail-personal-fields-toggle]")).toBeNull();
-    expect(host.querySelector("[data-testid=todo-plan]")).toBeTruthy();
     expect(host.querySelector("[data-testid=todo-plan-priority]")?.className).toContain("text-ink-3");
     expect(host.querySelector("[data-testid=todo-detail-notes-collapsed]")).toBeNull();
     expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe(longNotes);
@@ -2002,7 +2010,7 @@ describe("TodosView detail parent picker, item_type filter & toggle, and undo au
     );
     expect(api).toHaveBeenCalledWith("/todos", expect.anything());
     expect(host.querySelector('[data-testid=todo-detail-item-type] [data-item-type="task"]')?.getAttribute("aria-checked")).toBe("true");
-    expect(host.querySelector("[data-testid=todo-detail-template-badge]")?.textContent).toBe(t("todos.detail_template_work_goal"));
+    expect(host.querySelector("[data-testid=todo-detail-template-badge]")).toBeNull();
   });
 
   it("exposes Mark unread button on seen/auto-seen todos under todos_v2 and calls DELETE /todos/{id}/seen", async () => {
@@ -2136,11 +2144,14 @@ describe("TodosView detail active_blockers strip under todos_v2 (#16138)", () =>
       t("todos.active_blocker_attempts", { count: 2 }),
     );
 
-    // 3. todo_done -> plain target without retry badge
+    // 3. todo_done with unknown ID -> clickable button with safe localized label (never exposes raw todo_... ID)
     expect(items[2].querySelector("[data-testid=todo-active-blocker-kind]")?.textContent).toBe(
       t("todos.active_blocker_kind_todo_done"),
     );
-    expect(items[2].querySelector("[data-testid=todo-active-blocker-target]")?.textContent).toBe("todo_prereq_1");
+    const todoLink = items[2].querySelector<HTMLButtonElement>("[data-testid=todo-active-blocker-todo-link]")!;
+    expect(todoLink).toBeTruthy();
+    expect(todoLink.textContent).toBe(t("todos.active_blocker_linked_todo"));
+    expect(items[2].textContent).not.toContain("todo_prereq_1");
     expect(items[2].querySelector("[data-testid=todo-active-blocker-attempts]")).toBeNull();
 
     // Turning todos_v2 off hides the strip immediately
@@ -2292,6 +2303,161 @@ describe("TodosView detail active_blockers strip under todos_v2 (#16138)", () =>
     await flush();
     expect(host.querySelector("[data-testid=todo-active-blockers]")).toBeNull();
     expect(host.querySelector("[data-testid=todo-add-pr-blocker-btn]")).toBeNull();
+  });
+});
+
+describe("TodosView right-pane hierarchy reorder, compact chrome, blocker title resolution & deduplication (#17938)", () => {
+  it("resolves readable clickable todo titles for todo_done/todo_stage blockers, deduplicates matching wait state, and relaxes secondary chip width", async () => {
+    const prereqLocal: Todo = {
+      id: "todo_prereq_local",
+      title: "Govern Steam extension pipeline",
+      origin: "conv-main",
+      created_at: iso(6 * HOUR),
+      updated_at: iso(2 * HOUR),
+      view: view("working", "agent_running", "working", 0),
+    };
+    const prereqServerTitled: Todo = {
+      id: "todo_prereq_stage",
+      title: "Local fallback stage title",
+      origin: "conv-main",
+      created_at: iso(5 * HOUR),
+      updated_at: iso(2 * HOUR),
+      view: view("working", "agent_running", "working", 1),
+    };
+    const blockedByPrereq: Todo = {
+      id: "todo_blocked_dedup",
+      title: "Roll out Steam extension updates",
+      origin: "conv-main",
+      notes: "Tracking issue #1282: wait for prerequisite pipeline governance.",
+      supervision: { supervisor: "main", state: "parked", done_when: [] },
+      wait: { kind: "external_event", waiting_on: "Govern Steam extension pipeline" },
+      active_blockers: [
+        { id: "blk_local", kind: "todo_done", target_ref: "todo_prereq_local", state: "active" },
+        {
+          id: "blk_stage",
+          kind: "todo_stage",
+          target_ref: "todo_prereq_stage",
+          target_title: "Authoritative server stage title",
+          state: "active",
+        },
+      ],
+      created_at: iso(4 * HOUR),
+      updated_at: iso(1 * HOUR),
+      view: view("parked", "external_wait", "parked", 0),
+    };
+
+    await render({
+      todos: [blockedByPrereq, prereqLocal, prereqServerTitled],
+      todosV2: true,
+      selectedId: "todo_blocked_dedup",
+    });
+
+    // Duplicate prerequisite wait is merged into active blockers: single entry, no folded wait chip or toggle
+    const focus = host.querySelector<HTMLElement>("[data-testid=todo-detail-focus-banner]")!;
+    expect(focus).toBeTruthy();
+    expect(focus.getAttribute("data-focus-count")).toBe("1");
+    expect(focus.querySelector("[data-testid=todo-detail-focus-chip-wait]")).toBeNull();
+    expect(focus.querySelector("[data-testid=todo-detail-focus-more]")).toBeNull();
+
+    // Zero raw todo_... IDs exposed; server target_title preferred, local allTodosById fallback used
+    expect(focus.textContent).not.toContain("todo_prereq_local");
+    expect(focus.textContent).not.toContain("todo_prereq_stage");
+    const links = [...focus.querySelectorAll<HTMLButtonElement>("[data-testid=todo-active-blocker-todo-link]")];
+    expect(links).toHaveLength(2);
+    expect(links[0].textContent).toBe("Govern Steam extension pipeline");
+    expect(links[1].textContent).toBe("Authoritative server stage title");
+
+    // Unstarted task with no linked agents omits TaskCompletionCheck and collapses empty ReviewChecklist inline
+    expect(host.querySelector("[data-testid=task-completion-check]")).toBeNull();
+    const review = host.querySelector<HTMLElement>("[data-testid=review-checklist]")!;
+    expect(review).toBeTruthy();
+    expect(review.getAttribute("data-compact-empty")).toBe("true");
+    expect(review.className).not.toContain("bg-inset");
+
+    // Notes sits directly below focus banner and before plan metadata & review checklist
+    const notesEl = host.querySelector<HTMLElement>("[data-testid=todo-detail-notes]")!;
+    const planEl = host.querySelector<HTMLElement>("[data-testid=todo-plan]")!;
+    expect(focus.compareDocumentPosition(notesEl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(notesEl.compareDocumentPosition(planEl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(planEl.compareDocumentPosition(review) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // Clicking prerequisite blocker button navigates to that prerequisite todo
+    await act(async () => links[0].click());
+    await flush();
+    expect(host.querySelector<HTMLInputElement>("[data-testid=todos-detail-column] input[type=text]")?.value).toBe(
+      "Govern Steam extension pipeline",
+    );
+  });
+
+  it("keeps distinct wait unmerged with relaxed chip width, keeps criteria-populated ReviewChecklist expanded, and renders compact TaskCompletionCheck when agents exist", async () => {
+    const startedWithCriteria: Todo = {
+      id: "todo_started_criteria",
+      title: "Verify release checklist",
+      origin: "conv-main",
+      notes: "Important verification context",
+      agents: [{ machine_id: "m1", session_id: "s-past", linked_at: iso(3 * HOUR), released_at: iso(1 * HOUR), title: "Past worker" }],
+      supervision: { supervisor: "main", state: "", done_when: ["All integration tests green"] },
+      wait: { kind: "person_reply", waiting_on: "Release owner approval on staging rollout", wake_condition: "Owner replies" },
+      active_blockers: [{ id: "blk_pr", kind: "external_pr", target_ref: "https://github.com/nwverse/persona/pull/17938", state: "active" }],
+      created_at: iso(4 * HOUR),
+      updated_at: iso(1 * HOUR),
+      view: view("parked", "external_wait", "parked", 0),
+    };
+
+    await render({ todos: [startedWithCriteria], todosV2: true, selectedId: "todo_started_criteria" });
+
+    // Distinct person_reply wait stays as secondary chip with relaxed max-w-md (not max-w-52)
+    const waitChip = host.querySelector<HTMLElement>("[data-testid=todo-detail-focus-chip-wait]")!;
+    expect(waitChip).toBeTruthy();
+    expect(waitChip.className).toContain("max-w-md");
+    expect(waitChip.className).not.toContain("max-w-52");
+
+    // ReviewChecklist stays expanded when acceptance criteria exist
+    const review = host.querySelector<HTMLElement>("[data-testid=review-checklist]")!;
+    expect(review.getAttribute("data-compact-empty")).toBeNull();
+    expect(review.textContent).toContain("All integration tests green");
+
+    // TaskCompletionCheck renders in compact single-row mode with explanation tucked behind InfoTip
+    const check = host.querySelector<HTMLElement>("[data-testid=task-completion-check]")!;
+    expect(check).toBeTruthy();
+    expect(check.getAttribute("data-compact")).toBe("true");
+    expect(check.textContent).not.toContain(t("todos.check_explanation"));
+    const infoBtn = check.querySelector<HTMLButtonElement>(`button[aria-label="${t("ui-atoms.about", { name: t("todos.check_section") })}"]`)!;
+    expect(infoBtn).toBeTruthy();
+    await act(async () => infoBtn.click());
+    for (let i = 0; i < 40 && !document.querySelector('[role="tooltip"]'); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    }
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain(t("todos.check_explanation"));
+
+    // Turning todos_v2 off restores legacy expanded completion check, legacy max-w-[760px] detail width, and max-w-56 project select
+    await act(async () => patchAssistant({ todos_v2: false }));
+    await flush();
+    expect(host.querySelector<HTMLElement>("[data-testid=task-completion-check]")?.getAttribute("data-compact")).toBeNull();
+    expect(host.querySelector<HTMLElement>("[data-testid=task-completion-check]")?.textContent).toContain(t("todos.check_explanation"));
+    expect(host.querySelector<HTMLElement>("[data-testid=todo-detail]")?.className).toContain("max-w-[760px]");
+    expect(host.querySelector<HTMLElement>("[data-testid=todo-plan-project]")?.className).toContain("max-w-56");
+  });
+
+  it("uses wait.waiting_on as readable title fallback when a single internal todo blocker is not loaded locally", async () => {
+    const blockedUnloaded: Todo = {
+      id: "todo_blocked_unloaded",
+      title: "Downstream task",
+      wait: { kind: "external_event", waiting_on: "Archived prerequisite title" },
+      active_blockers: [{ id: "blk_archived", kind: "todo_done", target_ref: "todo_archived_999", state: "active" }],
+      created_at: iso(3 * HOUR),
+      updated_at: iso(1 * HOUR),
+      view: view("parked", "external_wait", "parked", 0),
+    };
+
+    await render({ todos: [blockedUnloaded], todosV2: true, selectedId: "todo_blocked_unloaded" });
+
+    const focus = host.querySelector<HTMLElement>("[data-testid=todo-detail-focus-banner]")!;
+    expect(focus.getAttribute("data-focus-count")).toBe("1");
+    expect(focus.textContent).toContain("Archived prerequisite title");
+    expect(focus.textContent).not.toContain("todo_archived_999");
   });
 });
 
