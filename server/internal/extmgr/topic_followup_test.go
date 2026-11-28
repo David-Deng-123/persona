@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/nwverse/persona/server/internal/assistantwire"
-	larkconnector "github.com/nwverse/persona/server/internal/modules/lark/connector/larkcli"
-	adapter "github.com/nwverse/persona/server/internal/modules/lark/larkcli"
+	"github.com/nwverse/persona/server/internal/cliport"
+	"github.com/nwverse/persona/server/internal/cliwire"
 )
 
 func TestLarkLinkedTopicReadUsesVerifiedHumanActivity(t *testing.T) {
+	needsLarkCLI(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	for _, tc := range []struct {
 		name     string
@@ -64,11 +65,11 @@ func TestLarkLinkedTopicReadUsesVerifiedHumanActivity(t *testing.T) {
 			bin := makeReplyFixtureCLI(t, page, tc.drift, "feishu")
 			h := newTestManager(t)
 			h.connectors = h.newConnectors(nil)
-			if err := h.connectors.Add(larkconnector.New(adapter.Config{Bin: bin})); err != nil {
+			if err := h.connectors.Add(cliport.NewConnector(cliwire.Config{Bin: bin})); err != nil {
 				t.Fatal(err)
 			}
 			if tc.disabled {
-				if err := h.connectors.SetEnabled(larkconnector.ID, false); err != nil {
+				if err := h.connectors.SetEnabled(cliwire.ConnectorID, false); err != nil {
 					t.Fatal(err)
 				}
 			}
