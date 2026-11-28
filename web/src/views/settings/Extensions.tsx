@@ -26,6 +26,7 @@ import { loadLaunchers } from "../../lib/launcher-list";
 import { hubHasExt } from "../../lib/extension-api";
 import { ExtensionOwnerScope } from "../../lib/extension-owner";
 import { Button, cx, Dialog, EASE, IconButton, Loading, Spinner, toast } from "../../ui/atoms";
+import { SEARCHABLE_SELECT_THRESHOLD, SearchableSelect } from "../../ui/SearchableSelect";
 import { TriageRuleField } from "../../ui/TriageRuleField";
 import { ExtensionLogo } from "../../ui/ExtensionLogo";
 import { ExtensionDownloads, packageDownloads } from "../../ui/ExtensionDownloads";
@@ -862,6 +863,25 @@ function Control({ field: f, path, draft, typed, errors, problems, onEdit, onTyp
   }
 
   if (f.enum?.length) {
+    if (f.enum.length > SEARCHABLE_SELECT_THRESHOLD) {
+      return (
+        <SearchableSelect
+          id={id}
+          title={fieldLabel(f)}
+          value={v}
+          options={f.enum.map((c) => ({
+            value: c.value,
+            label: choiceLabel(c),
+            rawValue: c.value === null || c.value === undefined ? "" : typeof c.value === "string" ? c.value : typeof c.value === "object" ? JSON.stringify(c.value) : String(c.value),
+          }))}
+          placeholder={placeholder(f)}
+          invalid={invalid}
+          equals={same}
+          onChange={(next) => onEdit(path, next)}
+          className="max-w-[320px]"
+        />
+      );
+    }
     const at = f.enum.findIndex((c) => v !== undefined && same(c.value, v));
     return (
       <select id={id} value={at < 0 ? "" : String(at)} onChange={(e) => onEdit(path, e.target.value === "" ? undefined : f.enum![Number(e.target.value)].value)} className={cx(inputClass, ring, "max-w-[320px]")}>

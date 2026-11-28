@@ -5031,3 +5031,26 @@ and Back placement without losing drafts. Capability sections mount in one canon
 Account & connection, Chat & delivery, Inbox & sync, External sources, Extension settings,
 Information access, and Extension management. Single-pane standalone source details provide a
 same-assistant **Data flow** row when the split-pane view switcher is not visible.
+
+## Searchable single-select for long extension enums (web, #17982)
+
+In Web Settings (`web/src/views/settings/Extensions.tsx`, shared by classic Extensions and unified
+`IntegrationDetail`), extension configuration fields with `enum` / `oneOf` keep the lightweight native `<select>`
+when there are **8 or fewer** options so short choices add zero friction. When a field has **more than 8** options,
+it automatically upgrades to the reusable `SearchableSelect` (`web/src/ui/SearchableSelect.tsx`):
+
+- **Trigger**: matches the existing settings field geometry (`h-8`, `rounded-control`, `bg-field`, `max-w-[320px]`,
+  `shadow-inset-field` or red validation ring), displays the selected label or muted placeholder (`text-ink-3`), and
+  exposes `id`, `aria-haspopup="listbox"`, `aria-expanded`, and `aria-invalid`.
+- **Adaptive surface**: desktop opens a viewport-safe portal popover (`bg-surface`, `shadow-overlay`, positioned with
+  `placeMenu`) that is never clipped by scrollable settings panels; phone widths (`max-sm`) open in the shared `Dialog`
+  bottom sheet. Rows keep a bounded scrolling listbox (`max-h-[50vh]`) and touch-friendly heights (`min-h-9`,
+  `pointer-coarse:min-h-11`).
+- **Search, ranking & clearable default**: reuses `SearchField`'s focus token (`SEARCH_FOCUS`) and clear affordance
+  (auto-focused on desktop open, with a one-click clear button) to match both display labels and raw option values
+  case-insensitively with whitespace-separated AND tokens, ranked predictably (exact value > exact label > prefix >
+  substring, preserving declaration order on ties). When the query is empty, the placeholder/default option stays
+  selectable at the top to clear back to `undefined`.
+- **Keyboard & feedback**: supports `ArrowDown` / `ArrowUp` navigation, `Enter` to select and restore focus to the
+  trigger, `Escape` or outside pointer interaction to dismiss without mutating the value, `bg-accent-tint` /
+  `text-accent-ink` + check mark on the active selection, and a localized empty state when nothing matches.
