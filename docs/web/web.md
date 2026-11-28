@@ -2423,8 +2423,8 @@ experience the default for at least one release with rollback kept) or removal i
 
 **Unified Integrations & Extensions** (#14802, #14805, #14868, #14874, #15423, #15424, `web/src/lib/labs-integrations-v2.ts`,
 `web/src/views/settings/Integrations.tsx`, `web/src/views/settings/IntegrationDetail.tsx`). This single assistant-scoped
-switch applies to the selected Assistant across devices and defaults to off (`integrations_v2` on `GET`/`PUT /api/v1/assistant`,
-guarded by `expected_integrations_v2` optimistic locking and explicit manager targeting). When enabled, Settings collapses the
+switch applies to the selected Assistant across devices and defaults to on (`integrations_v2` on `GET`/`PUT /api/v1/assistant`,
+guarded by `expected_integrations_v2` optimistic locking and explicit manager targeting). When enabled, Settings combines the
 four legacy tabs (`Channels`, `Connectors`, `Inbox Sources`, and `Extensions`) into one lazy-loaded **Integrations & Extensions**
 entry that deduplicates built-in services, standalone push sources, and multi-capability extensions, surfaces subscription health
 alerts, provides capability filter chips (`All`, `Chat channels`, `Data sources`, `Tools & appearance`), preserves Extension Market
@@ -2432,9 +2432,10 @@ access, offers a lazy-loaded Data Flow view (`SourcesGraph` + `InboxForwardSetti
 split-pane or mobile drill-down layouts. Legacy deep links (`/settings/connectors/...`, `/settings/channels/...`,
 `/settings/sources/...`, `/settings/extensions/...`, `/settings?tab=sources`, including `@manager` and `state` targets) and
 Settings search entries for Inbox Sources redirect cleanly into the unified view (`-sources` / `-sources@<manager>/<state>`)
-when enabled, and `/settings/integrations/...` links (including `-sources...`) fall back cleanly to the corresponding legacy tab
-(restoring the standalone `Inbox Sources` menu, routes, `manager`, and `state`) when disabled, with zero data migration or data
-loss. Older hubs that do not expose boolean `integrations_v2` degrade gracefully to a read-only row with an update hint.
+when enabled. Turning the switch off restores the four separate Settings pages and legacy channel routing immediately. Links
+under `/settings/integrations/...` (including `-sources...`) return to the corresponding page, preserving the `manager` and
+`state` targets. The assistant keeps all saved data and channel preferences. An explicit opt-out survives partial assistant
+updates. Older hubs that omit `integrations_v2` show the separate pages and a read-only Labs row with an update hint.
 Integration addresses accept an independent `manager` parameter. An address without one or a legacy owner follows the
 sidebar's current assistant. The linked assistant's Labs setting selects the unified or legacy page, keeping the object,
 filter, push-source state, and proposed `set` values. Shareable object URLs carry the legacy owner suffix during the trial.
@@ -2469,7 +2470,8 @@ edited fields, and keep the entry-preserving mode for immediate machine switches
 `settings_moved` refusal keep the draft for review. If the save response is lost, the editor reads the same resource and
 compares the submitted fields with the confirmed values before showing a receipt. Pairing again clears these drafts.
 
-Graduation (making the new experience the default for at least one release with rollback kept) or removal is tracked in #14802.
+The default changes as part of graduation. The Labs opt-out stays available for at least one release, with feedback and
+eventual removal tracked in #14802.
 
 **Terminal renderer** (`web/src/lib/labs-terminal.ts` over `web/src/lib/labs.ts`). Single pane terminals
 (`views/session/terminal/feed.ts`) draw with xterm's DOM renderer (Standard, the default) or WebGL (`@xterm/addon-webgl`,

@@ -4994,8 +4994,10 @@ VoiceOver drop hint on Apple).
 
 ## Integrations & Extensions in web Settings
 
-People connecting a service can find its account, delivery and sync settings under one name. With
-the selected assistant’s Integrations experiment on, each service appears once. The capability chips
+People connecting a service can find its account, delivery and sync settings under one name. The selected
+assistant shows each service once by default. Turning off **Unified Integrations & Extensions** in
+**Settings › Labs** brings back the separate Connectors, Channels, Inbox Sources and Extensions pages
+and the previous channel routing. Saved data and preferences carry over. The capability chips
 (All, Chat channels, Data sources, Tools & appearance) filter those rows. A service can match more
 than one chip. Each chip exposes its selection with `aria-pressed` and shows its matching count.
 When the assistant supplies the Integrations projection, the chips show its counts. A failed

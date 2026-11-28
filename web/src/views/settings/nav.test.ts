@@ -95,7 +95,7 @@ describe("settings sidebar groups", () => {
     ]);
     expect(ADVANCED_HUB_TABS).toEqual(["managers", "devices"]);
     expect([...ASSISTANT_TABS]).toEqual(NAV_GROUPS[0].tabs);
-    // When integrations_v2 is off (default), legacy tabs stay 100% identical and integrations is hidden.
+    // An explicit opt-out restores the legacy tabs and hides Integrations.
     expect(navGroups(false)[0]!.tabs).toEqual([
       "models", "persona", "prompts", "channels", "connectors", "sources", "extensions", "knowledge", "agents",
     ]);

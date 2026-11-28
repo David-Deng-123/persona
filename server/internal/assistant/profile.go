@@ -152,7 +152,8 @@ type Settings struct {
 	// TodosV2DigestWindowMinutes is an optional burst-coalescing window in minutes under todos_v2=true (#16433):
 	// 0 (default, disabled), 30, 60, or 120.
 	TodosV2DigestWindowMinutes *int `json:"todos_v2_digest_window_minutes,omitempty"`
-	// IntegrationsV2 enables the unified experimental Integrations & Extensions experience (#14802, #14805). nil is off (the default).
+	// IntegrationsV2 enables unified Integrations & Extensions (#14802). An unset preference defaults to on.
+	// An explicit false opts out.
 	IntegrationsV2 *bool `json:"integrations_v2,omitempty"`
 	// MemoryExtensionStandingBytes is how many bytes of the memory extension's standing (always-in-context) entries a
 	// standing channel carries when the extension states no budget, and the most it may state above 8192
@@ -463,7 +464,7 @@ func (s *Service) memoryExtensionStandingBytes(ctx context.Context) int {
 
 func (v Settings) workGuideOn() bool      { return v.WorkGuide != nil && *v.WorkGuide }
 func (v Settings) todosV2On() bool        { return v.TodosV2 != nil && *v.TodosV2 }
-func (v Settings) integrationsV2On() bool { return v.IntegrationsV2 != nil && *v.IntegrationsV2 }
+func (v Settings) integrationsV2On() bool { return v.IntegrationsV2 == nil || *v.IntegrationsV2 }
 
 func (v Settings) todosV2AutoSeenMode() string {
 	if slices.Contains(todosV2AutoSeenModes, v.TodosV2AutoSeen) {
@@ -508,7 +509,7 @@ func (v Settings) todosV2DigestWindowMinutes() int {
 	return todosV2DefaultDigestWindowMinutes
 }
 
-// integrationsV2On reports whether assistant.integrations_v2 is enabled (off by default).
+// integrationsV2On reports whether assistant.integrations_v2 is enabled (on by default).
 // Uses settingsLastGood so hot receive/routing paths never trigger a hub hello RPC.
 func (s *Service) integrationsV2On(ctx context.Context) bool {
 	v, _ := s.settingsLastGood(ctx)
