@@ -477,7 +477,7 @@ func (n *Node) agyTranscriptMetaAt(conversation string, now time.Time) (agySessi
 	usage.turn = summarizeAgyTurn(steps)
 	usage.modTime = info.ModTime().UTC()
 	usage.size = info.Size()
-	meta := agySessionMeta{agyTranscriptUsage: usage, background: agyBackground(steps, conversation, dir, root, now)}
+	meta := agySessionMeta{agyTranscriptUsage: usage, background: agyBackgroundAt(steps, conversation, dir, root, now)}
 
 	n.mu.Lock()
 	if n.agyMetas == nil {
