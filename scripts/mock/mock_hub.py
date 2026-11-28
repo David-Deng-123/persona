@@ -3677,9 +3677,22 @@ def rule_suggestion(card):
 
 
 def suggested_plan(plan):
-    """A plan as the apps read it: an open one with the rule suggested for it, never kept with the plan."""
-    sg = rule_suggestion(plan["id"]) if plan.get("state") == "open" else None
-    return dict(plan, suggestion=sg) if sg else plan
+    """A plan as the apps read it: its start presentation and rule suggestion, never kept with the plan."""
+    p = dict(plan)
+    if p.get("state") == "open":
+        # MOCK_PLAN_START_REASON=<reason>|legacy: a gate (or a future raw reason), or an older hub without the field.
+        reason = os.environ.get("MOCK_PLAN_START_REASON", "start_authorization")
+        if reason != "legacy":
+            start = {"reason": reason}
+            if reason == "start_authorization":
+                remember = [i for i, task in enumerate(p["tasks"]) if not task.get("readonly")]
+                if remember:
+                    start["remember"] = remember
+            p["start"] = start
+    sg = rule_suggestion(p["id"]) if p.get("state") == "open" else None
+    if sg:
+        p["suggestion"] = sg
+    return p
 
 
 def rule_suggestions_area(h, method, p):
@@ -8806,6 +8819,7 @@ START_REMEDY_LOG = []
 START_QUESTION_SESSION = "a1f3c2d4-0000-4000-8000-000000000104"
 TASK_PLANS = {}
 TASK_FEED = {}
+PLAN_START_LOG = []
 if MOCK_TASKS:
     def _task_todo(tid, title, notes, mid, sid, cwd, minutes, plan):
         return {"id": tid, "title": title, "notes": notes, "done_at": None, "created_at": ago(minutes=minutes),
@@ -9943,6 +9957,9 @@ def tasks_area(h, method, p, raw):
     if START_REMEDIES and method == "GET" and p == "/mock/start-remedies":
         h.send_json({"requests": START_REMEDY_LOG})
         return True
+    if method == "GET" and p == "/mock/plan-starts":
+        h.send_json({"requests": PLAN_START_LOG})
+        return True
     if START_REMEDIES and method == "POST":
         m = re.fullmatch(r"/api/v1/todos/([^/]+)/start/answer", p)
         if m:
@@ -9984,6 +10001,8 @@ def tasks_area(h, method, p, raw):
         if plan["state"] != "open":
             h.send_json({"error": "this plan was already started or dismissed"}, 409)
             return True
+        if p.endswith("/start"):
+            PLAN_START_LOG.append(json.loads(raw or b"{}"))
         plan["state"] = "dismissed" if p.endswith("/dismiss") else "started"
         h.send_json({"plan": plan})
         return True
@@ -27682,7 +27701,7 @@ class H(BaseHTTPRequestHandler):
             # MOCK_CANT_ANSWER: the Codex thread a test attached is not joined again (#6868).
             SESSIONS[:] = [copy.deepcopy(CANT_ANSWER_START[x["session_id"]]) if x["session_id"] in CANT_ANSWER_START else x
                            for x in SESSIONS]
-            del RECONNECTS[:], STARTED[:], SEEN[:]
+            del RECONNECTS[:], STARTED[:], SEEN[:], PLAN_START_LOG[:]
             INTERACTIONS.extend(SESSION_CLOSE["interactions"])
             SESSION_CLOSE.update(fail=False, attempts=[], closed=[], interactions=[])
             SESSIONS.extend(SESSION_DELETED); del SESSION_DELETED[:]
@@ -32933,7 +32952,7 @@ def ultracode_route(handler, p, body):
             for m in MACHINES: push_machine(m["id"])
             if MOCK_TASKS:  # an open page draws the plan open again without a reload
                 for send, _ in list(LIVE):
-                    try: send(from_default({"type": "task_plan", "plan": TASK_PLANS["plan_mock_3"]}))
+                    try: send(from_default({"type": "task_plan", "plan": suggested_plan(TASK_PLANS["plan_mock_3"])}))
                     except Exception: pass
         handler.send_json({"requests": ULTRACODE_LOG, "started": [b for b in STARTED if "ultracode" in b], "plan_starts": ULTRACODE_PLAN_STARTS,
                            "sends": ULTRACODE_SENDS})
@@ -33402,6 +33421,7 @@ def features():
 MOCK_HELP.append("MOCK_START_REMEDIES=1  配合 MOCK_TASKS=1（#10365）：features 带 task_retry_launcher / start_continue / todo_start_answer；"
                  "末尾三个失败任务分别是 launcher_missing + retry_with、无 plan_id 的 worktree_path_taken、todo_start_answer 的 shell_waiting；"
                  "另有一个 start_continue 的 Agent 会话。Retry 记录空 body 或 launcher，回答两个 start 路由；GET /mock/start-remedies 看请求")
+MOCK_HELP.append("MOCK_PLAN_START_REASON=<reason>|legacy  With MOCK_TASKS=1: an open plan's start projection uses this reason (start_authorization by default); legacy omits the field like an older hub (#17853)")
 MOCK_HELP.append("MOCK_TOOL_SEARCH=1  普通主对话的 tool_search_unsupported 原始 400 turn error，看专用 Retry 卡（#10365）")
 
 

@@ -2653,8 +2653,8 @@ Kinds: questions, plan approvals, tool approvals, secret entry, MCP forms, and w
   count three things and say so: "N pending" the conversation's own cards in the stack, "N more" the tasks' other
   questions, and Needs you its rows (one for each task or Agent that asks, plus the conversation's own cards, plans and
   drafts). An open plan is also a card among the conversation's lines (iOS `FeedLine`, web `FeedLineView` #8193, Android on Glass `GlassPlanCard`), at the
-  end of the exchange it happened in: its tasks, where each would run, "Start these directly", then Start, Edit and Don't start;
-  once started the hand-off cards take its place, and a dismissed one reads "Not started · N tasks". A task's or an Agent's row in the tray opens that task's or Agent's detail, as iOS's rows do, where its page
+  end of the exchange it happened in: its tasks, where each would run, then Start, Edit and Don't start. On iOS and web, "Start these directly" appears before those actions only when the hub's `start` presentation says at least one task has a useful uncovered trust rule to remember. A hard gate, an unknown future reason or existing trust coverage hides that checkbox; if a refreshed plan withdraws the offer, Start does not submit the stale local tick. A legacy plan whose original outbound decision was not recorded keeps the previous presentation rather than making the hub run a model while it is read. The plan still waits for Start; Start, Edit and Don't start keep their place.
+  Once started the hand-off cards take its place, and a dismissed one reads "Not started · N tasks". A task's or an Agent's row in the tray opens that task's or Agent's detail, as iOS's rows do, where its page
   and its cards are. In the former native layout the two places of cards shared the footer room above the composer.
   Each had half the room when both were open. A shorter card left its unused space to the other (#9392, #12306).
   **Card height by hand** (iOS and iPadOS, #12306): with the keyboard down, a lone question card over the composer (the

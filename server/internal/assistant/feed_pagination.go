@@ -92,7 +92,7 @@ func (s *Service) pagedFeed(ctx context.Context, conversation string, since time
 		next = base64.RawURLEncoding.EncodeToString(raw)
 	}
 	for i, item := range items {
-		items[i] = readTaskNotice(item)
+		items[i] = s.presentPlanFeed(ctx, readTaskNotice(item))
 	}
 	s.settleCards(ctx, items)
 	s.fileCards(ctx, items)

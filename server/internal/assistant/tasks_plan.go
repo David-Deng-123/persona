@@ -120,6 +120,7 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 		t.WorkspaceResolved, t.ReservedTodoID, t.WorkspaceInferred = nil, "", false
 		t.OwnerStarted = false // the hub's: only the owner's Start on the card sets it (startPlan)
 		t.MemoryTopic = nil    // the hub's: the plan's own confirmation decision sets it (below)
+		t.ConfirmOutbound = nil
 		t.RequestGate, t.Queue = "", nil
 		t.CloseTabOnAccept, t.TerminalTarget, t.TerminalCleanup = false, taskTerminalTarget{}, ""
 		t.TerminalAuthorized = false
@@ -476,6 +477,12 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 				a.Tasks[i].MemoryTopic = slices.Clone(u.Categories)
 			}
 		}
+		// Keep the exact outbound wait, including u.Known=false with no categories. Reads must not invoke the model again
+		// just to decide whether the card's trust offer could remove this gate.
+		confirmOutbound := policy.ConfirmOutbound
+		for i := range a.Tasks {
+			a.Tasks[i].ConfirmOutbound = &confirmOutbound
+		}
 	}
 	var round Task
 	var inRound bool
@@ -513,9 +520,12 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 		return "", err
 	}
 	// The plan goes in the item's body too: a client that missed the task_plan event (or raced it) still draws the
-	// card from the conversation itself.
+	// card from the conversation itself. Keep its read-time Start presentation out of storage; presentPlanFeed adds it back.
 	if scope == nil {
-		if _, err := s.appendFeed(ctx, sessionID, feedPlan, p.ID, map[string]any{"plan": s.planWithSpace(ctx, p)}); err != nil {
+		presented := s.planWithSpace(ctx, p)
+		stored := *presented
+		stored.Start = nil
+		if _, err := s.appendFeed(ctx, sessionID, feedPlan, p.ID, map[string]any{"plan": &stored}); err != nil {
 			s.logf("task plan %s: feed: %v", p.ID, err)
 		}
 	}

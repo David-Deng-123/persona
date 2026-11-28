@@ -125,6 +125,10 @@ type PlanTask struct {
 	// and this carries every one of the entry's categories (memory_handoff.go). The hub's: set when the plan is made,
 	// never what a tool call or an edit says.
 	MemoryTopic []string `json:"memory_topic,omitempty"`
+	// ConfirmOutbound records the plan's own exit-policy decision, including an unknown information use that has no
+	// MemoryTopic. Nil means a legacy plan whose decision cannot be reconstructed without calling the tagging model again.
+	// The hub sets it when the plan is made; a tool call or a card edit cannot supply it.
+	ConfirmOutbound *bool `json:"confirm_outbound,omitempty"`
 	// CloseTabOnAccept is set only by the owner's Start request.
 	CloseTabOnAccept   bool               `json:"close_tab_on_accept,omitempty"`
 	TerminalTarget     taskTerminalTarget `json:"terminal_target,omitzero"`
@@ -310,6 +314,9 @@ type TaskPlan struct {
 	// Suggestion: the owner started this kind of task three times; the open plan's card offers to start it directly
 	// from now on (rule_suggest.go, #4929). Filled in where the apps read the plan, never kept with it.
 	Suggestion *proto.RuleSuggestion `json:"suggestion,omitempty"`
+	// Start: why an open plan waits and which tasks have a useful trust rule to remember. Computed where the apps read
+	// the plan, never stored; nil on a started or dismissed plan. Hubs from before #17853 omit it.
+	Start *assistantwire.PlanStartView `json:"start,omitempty"`
 }
 
 const (
@@ -658,7 +665,7 @@ func (s *Service) appendFeedItem(ctx context.Context, id string, once bool, conv
 			return FeedItem{}, false, err
 		}
 	}
-	s.event(ctx, map[string]any{"type": "assistant_feed", "conversation": conversation, "item": it})
+	s.event(ctx, map[string]any{"type": "assistant_feed", "conversation": conversation, "item": s.presentPlanFeed(ctx, it)})
 	if kind == feedReceipt {
 		s.interruptsSoon() // a task went on after being cut off (interruptions.go)
 	}
@@ -666,6 +673,26 @@ func (s *Service) appendFeedItem(ctx context.Context, id string, once bool, conv
 }
 
 const feedPage = 500
+
+// presentPlanFeed refreshes the duplicate plan in a feed body at the same read/event boundary as the plans map. Storage
+// keeps the body without TaskPlan.Start, so a restart or a later trust change cannot resurrect a stale presentation.
+func (s *Service) presentPlanFeed(ctx context.Context, it FeedItem) FeedItem {
+	if it.Kind != feedPlan || len(it.Body) == 0 {
+		return it
+	}
+	var body struct {
+		Plan *TaskPlan `json:"plan"`
+	}
+	if err := json.Unmarshal(it.Body, &body); err != nil || body.Plan == nil {
+		return it
+	}
+	raw, err := json.Marshal(map[string]any{"plan": s.planWithSpace(ctx, body.Plan)})
+	if err != nil {
+		return it
+	}
+	it.Body = raw
+	return it
+}
 
 // feedItems is a conversation's items after since, oldest first (with the message cards sent after since: the client
 // has them, not that they went out), without the plans they name: for readers that look only at the items.
@@ -675,7 +702,7 @@ func (s *Service) feedItems(ctx context.Context, conversation string, since time
 		return nil, err
 	}
 	for i, item := range items {
-		items[i] = readTaskNotice(item)
+		items[i] = s.presentPlanFeed(ctx, readTaskNotice(item))
 	}
 	s.settleCards(ctx, items)
 	s.fileCards(ctx, items)
@@ -1215,7 +1242,7 @@ func (s *Service) taskRoutes() {
 			planErr(w, err)
 			return
 		}
-		apierr.WriteJSON(w, map[string]any{"plan": s.planWithSuggestion(r.Context(), p, s.requestLang(r))})
+		apierr.WriteJSON(w, map[string]any{"plan": s.planWithSpace(r.Context(), s.planWithSuggestion(r.Context(), p, s.requestLang(r)))})
 	})
 	s.handle("POST /api/v1/task-plans/{id}/start", func(w http.ResponseWriter, r *http.Request) {
 		if !fullRole(r) {

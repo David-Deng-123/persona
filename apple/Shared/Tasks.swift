@@ -135,11 +135,23 @@ nonisolated struct TaskPlan: Codable, Hashable, Identifiable, Sendable {
     /// The space of the conversation that made it ("health", a domain space's slug; nil: the assistant's own). Main's
     /// Needs You lists every open plan but Health's, which stay in Health. A hub from before sends none.
     var space: String?
+    /// Why an open plan waits and which tasks have a useful trust rule to remember (#17853); nil from an older hub.
+    var start: PlanStartView?
 
     enum CodingKeys: String, CodingKey {
-        case id, conversation, tasks, state, suggestion, space
+        case id, conversation, tasks, state, suggestion, space, start
         case createdAt = "created_at", updatedAt = "updated_at"
     }
+
+    /// Compatibility baseline: the existing card keeps offering the rule until it reads the server's start projection.
+    /// A current hub offers it only for ordinary start authorization with at least one uncovered writable task.
+    var startRememberOffered: Bool {
+        guard let start else { return true }
+        return start.reason == .startAuthorization && start.remember?.isEmpty == false
+    }
+
+    /// A refreshed plan's withdrawn offer also withdraws an older local tick before Start sends it.
+    func rememberStart(_ selected: Bool) -> Bool { selected && startRememberOffered }
 
     /// The plan with no rule suggested on it: once the suggestion was answered or is gone.
     var withoutSuggestion: TaskPlan {

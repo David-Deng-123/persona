@@ -125,6 +125,15 @@ of a lazy list's scroll without an app frame, and the SwiftUI instrument does no
 with a switch per suspect part, measured alternately, attributes the cost instead. Builds or CI on the same Mac during a
 run move the numbers more than most fixes; log the load average with each run.
 
+## A lazy chat list needs geometry-driven XCUITest scrolling (#17853)
+
+At accessibility text sizes, `exists` can be true while the plan is still outside the lazy list's rendered viewport, and
+`isHittable` can become true during a scroll animation whose captured frame is already different. Full swipes in one
+direction can also skip the card completely. Bring the title into view, then use bounded short drags in the direction
+given by the control's actual `frame` until it sits in a safe part of the viewport; wait for the scroll to settle and
+check the title, every required control and the action again before capture. An XCUITest exit of zero is not a substitute
+for looking at the resulting light/dark and default/largest-text images.
+
 ## A reversed range traps on the audio tap's thread (#7740)
 
 A TestFlight iPhone crashed with `EXC_BREAKPOINT` (`brk 1`) on the recorder's input-tap queue, an `NSLock` and a

@@ -37,6 +37,7 @@ import {
   type TaskPlan,
   type TodayBody,
 } from "../../lib/feed";
+import { parsePlanStartReason } from "../../lib/plan-start-wire";
 import { backgroundWorkLine, type BackgroundWork } from "../../lib/background-work";
 import { acceptedAtRest, awaitsReview, dockAgents, type DockAgent, isRemovable, mostUrgentAgent, openAsk, orphanedLine, personalVerificationAsk, stoppedReason, taskNow, todoStatus, todoSupervisorLabel, TODO_STATUS_INFO, updateTodo, waitingLine, type SessionLookup, type Todo, type TodoStatus } from "../../lib/todos";
 import { hasActiveAgentWork } from "../../lib/todo-triage";
@@ -268,6 +269,14 @@ export function rememberScope(tasks: PlanTask[], machines: Machine[]): string {
   return places.length ? t("assistant-tasks.plan_remember", { places: formatList(places) }) : "";
 }
 
+/** A current hub names the uncovered writable tasks; an unknown gate fails closed. No start field means an older hub. */
+function rememberTasks(plan: TaskPlan): PlanTask[] {
+  if (!plan.start) return plan.tasks;
+  if (parsePlanStartReason(plan.start.reason) !== "start_authorization") return [];
+  const offered = new Set(plan.start.remember ?? []);
+  return plan.tasks.filter((_, index) => offered.has(index));
+}
+
 /** The scheduled task whose own run planned this (#8045), named for the card's "Let … start these by itself"; null for
  *  every other plan, which the card draws as before. */
 export function planSchedule(plan: TaskPlan): { id: string; name: string } | null {
@@ -306,9 +315,10 @@ export function PlanCard({ plan }: { plan: TaskPlan }) {
   // opens with it (so a task moved there to a computer that can has it again), and Start sends it, off where it can't
   const ultracode = plan.tasks.map((task, i) => ultraChoice[i] ?? task.ultracode === true);
   const editedPlan = { ...plan, tasks: plan.tasks.map((task, i) => workspaceChoice[i] === undefined ? task : { ...task, workspace: workspaceChoice[i], workspace_resolved: undefined }) };
-  const scope = rememberScope(editedPlan.tasks, machines);
-  // offered where "Start these directly" is: a plan of only read-only tasks starts without asking anyway
-  const schedule = scope ? planSchedule(plan) : null;
+  const scope = rememberScope(rememberTasks(editedPlan), machines);
+  const rememberStart = remember && scope !== "";
+  // A hard start gate withdraws only tasks.trust; the scheduled task's independent grant still covers every writable task.
+  const schedule = rememberScope(editedPlan.tasks, machines) ? planSchedule(plan) : null;
   const grant = Boolean(schedule) && scheduleGrant;
   const startEdits = () => {
     const edits = planUltracodeToSend(plan, ultracode, ultracodeBlockedNow) ?? plan.tasks.map(() => ({}));
@@ -341,7 +351,7 @@ export function PlanCard({ plan }: { plan: TaskPlan }) {
       {/* Start stays in reach (#3822): a card taller than the tray it scrolls in (several tasks, an opened brief) keeps
           its buttons at the tray's bottom edge; a card that fits looks as it did (the padding it takes it gives back) */}
       <div data-plan-actions className="sticky bottom-0 z-[1] -mx-4 -mt-2 -mb-4 flex gap-2 rounded-b-card bg-surface px-4 pt-2 pb-4">
-        <Button tone="accent" busy={busy} onClick={() => run(() => startPlan(plan, remember, startEdits(), grant))} className="flex-1">
+        <Button tone="accent" busy={busy} onClick={() => run(() => startPlan(plan, rememberStart, startEdits(), grant))} className="flex-1">
           {plan.tasks.length > 1 ? t("assistant-tasks.plan_start_n", { count: plan.tasks.length }) : t("assistant-tasks.plan_start")}
         </Button>
         <Button disabled={busy} onClick={() => setEditing(true)}>
@@ -359,7 +369,7 @@ export function PlanCard({ plan }: { plan: TaskPlan }) {
           onClose={() => setEditing(false)}
           onStart={(edits) => {
             setEditing(false);
-            void run(() => startPlan(plan, remember, edits, grant));
+            void run(() => startPlan(plan, rememberStart, edits, grant));
           }}
         />
       </Suspense>}

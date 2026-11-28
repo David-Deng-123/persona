@@ -5981,6 +5981,7 @@ in plan order (a task without `todo_id` did not start and has no link); no extra
 ```jsonc
 // TaskPlan
 {"id":"plan_…","conversation":"<assistant chat id>","state":"open|started|dismissed","created_at":"...","updated_at":"...",
+ "start":{"reason":"start_authorization","remember":[0]},  // optional, open plans only (#17853): the read-time Start presentation below
  "tasks":[{"title":"Fix the login crash","prompt":"The first message to the Agent","machine":"<machine id>","cwd":"/abs/path",
            "launcher":"","model":"","permission":"acceptEdits","readonly":false,"why":"one-line reason",
            "ultracode":true,            // optional (#12): the Claude Code Agent starts with ultracode on; on start, true / false sets it and leaving it out keeps the assistant's choice
@@ -5998,6 +5999,14 @@ in plan order (a task without `todo_id` did not start and has no link); no extra
                                          // optional (#1642): the start's coded refusal and its details, as a session's start_error_code / start_error_args
                                          // error_args.launcher (#10365): the launcher that start ran; the hub adds it when the refusal does not name it, also with no error_code
 // An open plan may also carry "suggestion" (RuleSuggestion, below); it is filled in where the apps read the plan and never stored with it.
+// start is PlanStartView from schema/wire/plan-start.schema.json. reason is outbound_confirmation, owner_step, request_gate,
+// continuation or start_authorization. remember contains zero-based writable task indexes not covered by tasks.trust and is
+// present only for start_authorization; empty or omitted means no trust offer. Other or unknown reasons offer no remembered rule.
+// The field is computed on every open-plan direct read, paginated or ordinary feed read and live event, and is never stored.
+// Settled plans omit it. Each task's optional confirm_outbound boolean is the hub-owned exit-policy decision recorded when the
+// plan is made; it preserves an outbound wait even when unknown information use has no memory_topic. Its absence marks a legacy
+// plan whose decision cannot be reconstructed without another model call. Such a legacy plan, like one from an older hub, omits
+// an otherwise ambiguous start field and a new client keeps the legacy behavior; older clients ignore both additive fields.
 
 // RuleSuggestion (#4929, unified-entry.md "A rule after the same answer three times"): the line a card carries once the owner gave
 // the same answer to its kind of card for the same scope 3 times within 14 days. Optional on TaskPlan (`suggestion`), on a to-do's
