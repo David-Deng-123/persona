@@ -186,6 +186,13 @@ func (s *Service) logicalCall(ctx context.Context, machine, method string, raw j
 		}
 		withEpoch = st.WithDrainedConversationEpoch
 	}
+	// The queue may outlive these permissions and dispatch to another physical segment. Its
+	// durable payload and receipt always use the ordinary text prepared by the manager.
+	diagnostic, _ := ctx.Value(agyRelayContextKey{}).(agyRelayContext)
+	withDiagnostic := diagnostic.matches(machine, method, p)
+	if withDiagnostic {
+		p["text"] = diagnostic.plain
+	}
 	dispatched := false
 	err = withEpoch(ctx, machine, id, c.Epoch, func(current *db.LogicalConversation) error {
 		active, ok = current.Active()
@@ -281,6 +288,10 @@ func (s *Service) logicalCall(ctx context.Context, machine, method string, raw j
 			}
 		}
 		physical := cloneLogicalParams(p, active)
+		if withDiagnostic && active.MachineID == machine && active.SessionID == id {
+			// This delivery neither queues nor changes the verified recipient, under the same epoch lock.
+			physical["text"] = diagnostic.block + diagnostic.plain
+		}
 		for _, key := range []string{"at_item_id", "answer_again_after"} {
 			if ref, _ := physical[key].(string); ref != "" {
 				source, err := activeLogicalItemID(active, ref)
@@ -461,8 +472,25 @@ func (s *Service) logicalSendModel(ctx context.Context, machine, session string,
 	if launcher == "" {
 		return true, logicalRefusal(ctx, "unknown_engine")
 	}
-	if model, _ := p["model"].(string); model == "" {
-		p["model"] = a.Model
+	if model, _ := p["model"].(string); strings.TrimSpace(model) == "" {
+		if a.Model != "" {
+			p["model"] = a.Model
+		} else if inherited, _ := p[larkAgentInheritedModelKey].(bool); !inherited && !proto.IsExternalLauncher(launcher) {
+			if effort, _ := p["effort"].(string); effort == "" && a.Effort != "" {
+				p["effort"] = a.Effort
+			}
+			if mode, _ := p["permission_mode"].(string); mode == "" && a.PermissionMode != "" {
+				p["permission_mode"] = a.PermissionMode
+			}
+			delete(p, "model")
+			purpose := s.conversationModelPurpose(ctx, machine, session)
+			if err := preservePermissionMode(p, func() error { return s.applyModel(ctx, purpose, p) }); err != nil {
+				return true, err
+			}
+			return true, nil
+		} else {
+			p["model"] = a.Model
+		}
 	} else if err := checkModelID(model); err != nil {
 		return true, err
 	}

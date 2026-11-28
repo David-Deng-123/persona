@@ -33,6 +33,7 @@ type Fake struct {
 	layouts     []any
 	trees       []map[string]any
 	screens     map[string]map[string]any
+	outputs     map[string]*output
 	status      map[string]any
 	on          map[string]func(params map[string]any) any
 	keepalive   int
@@ -76,7 +77,7 @@ func New(t testing.TB) *Fake {
 	kind, socket := Endpoint(dir)
 	f := &Fake{
 		MetaPath: filepath.Join(dir, "orca-runtime.json"), Socket: socket, Kind: kind,
-		token: "test-token-1", runtimeID: "rt-1", screens: map[string]map[string]any{},
+		token: "test-token-1", runtimeID: "rt-1", screens: map[string]map[string]any{}, outputs: map[string]*output{},
 		on: map[string]func(map[string]any) any{}, agentStatus: map[string]map[string]any{}, revisions: map[string]int{},
 		status: map[string]any{"appVersion": "1.4.245", "runtimeProtocolVersion": 3, "minCompatibleRuntimeClientVersion": 2,
 			"protocolVersion": 3, "capabilities": []string{"terminal.prompt-delivery.v1"}},
@@ -244,7 +245,7 @@ func (f *Fake) answerLocked(method string, p map[string]any) any {
 				"handle": newHandle, "tabId": newTab, "leafId": newLeaf, "incarnationId": newInc,
 				"worktreeId": wtID, "title": title, "connected": true, "writable": true,
 				"orphaned": false, "executionHostId": "local", "agentIdentity": "",
-				"paneKey": newTab + ":" + newLeaf,
+				"paneKey": newTab + ":" + newLeaf, "processId": os.Getpid(),
 			},
 		}
 	case "terminal.list":
@@ -280,6 +281,9 @@ func (f *Fake) answerLocked(method string, p map[string]any) any {
 	}
 	switch method {
 	case "terminal.read":
+		if p["screen"] != true {
+			return map[string]any{"terminal": f.readOutputLocked(h, p)}
+		}
 		s := f.screens[h]
 		if s == nil {
 			s = map[string]any{"tail": []string{}, "tailRows": []any{}}
@@ -421,6 +425,11 @@ func validate(method string, p map[string]any) string {
 		if p["screen"] == true && p["cursor"] != nil {
 			return "Cursor cannot be combined with a screen read"
 		}
+		if v, ok := p["cursor"]; ok {
+			if c, isNum := v.(float64); !isNum || c < 0 || c != float64(int64(c)) {
+				return "Cursor must be a non-negative integer"
+			}
+		}
 		return first(handle(), literalTrue("screen"))
 	case "terminal.agentStatus", "terminal.close":
 		return handle()
@@ -435,6 +444,9 @@ func validate(method string, p map[string]any) string {
 	case "worktree.create":
 		return first(str("repo", true), str("name", false), str("branchNameOverride", false), str("baseBranch", false),
 			str("parentWorktree", false), boolean("activate"), boolean("nameWasGenerated"))
+	case "worktree.rm": // Orca 1.4.277's worktree.rm params (the ones Persona sends)
+		return first(str("worktree", true), str("hostId", false), boolean("deleteBranch"), boolean("force"),
+			boolean("runHooks"), boolean("waitForBackgroundRemoval"))
 	case "agentSession.history":
 		if r := str("sessionId", true); r != "" {
 			return r
@@ -458,27 +470,55 @@ func validate(method string, p map[string]any) string {
 			}
 		}
 		return ""
+	case "session.tabs.listAll":
+		return ""
+	case "agentSession.reveal":
+		return str("sessionId", true)
+	case "agentSession.respondToApproval":
+		return first(envelopeOf(p), str("itemId", true), str("optionId", true), positiveInt(p, "expectedRevision"))
+	case "agentSession.respondToQuestion":
+		if r := first(envelopeOf(p), str("itemId", true), positiveInt(p, "expectedRevision")); r != "" {
+			return r
+		}
+		answers, hasAnswers := p["answers"].([]any)
+		_, hasOption := p["optionId"]
+		if hasAnswers == hasOption {
+			return "Send exactly one of an option id or answers"
+		}
+		if hasAnswers && len(answers) == 0 {
+			return "answers must not be empty"
+		}
+		return ""
+	case "agentSession.setOption":
+		return first(envelopeOf(p), str("key", true))
+	case "agentSession.rename":
+		if name, _ := p["name"].(string); len(name) > 4096 {
+			return "name must be at most 4096 characters"
+		}
+		return first(str("sessionId", true), str("name", true))
+	case "agentSession.rewind":
+		return first(envelopeOf(p), str("itemId", true), str("expectedEpoch", true))
+	case "agentSession.acknowledgeAttention":
+		cursor, isObject := p["observedCursor"].(map[string]any)
+		epoch, _ := cursor["epoch"].(string)
+		sequence, isNumber := cursor["sequence"].(float64)
+		if !isObject || epoch == "" || !isNumber || sequence < 0 || sequence != float64(int64(sequence)) {
+			return "observedCursor must contain epoch and a non-negative sequence"
+		}
+		return str("sessionId", true)
+	case "agentSession.cancel":
+		return envelopeOf(p)
+	case "preflight.installedAgents":
+		return ""
+	case "agentSession.createSupport":
+		return first(str("worktree", true), str("agent", true))
+	case "agent.launch":
+		return launchInvalid(p)
+	case "agentSession.create":
+		return createInvalid(p)
 	case "agentSession.send":
-		envelope, ok := p["envelope"].(map[string]any)
-		if !ok {
-			return "Missing envelope"
-		}
-		for _, field := range []string{"sessionId", "clientOperationId", "payloadFingerprint"} {
-			if value, _ := envelope[field].(string); value == "" {
-				return "Missing envelope." + field
-			}
-		}
-		fingerprint, _ := envelope["payloadFingerprint"].(string)
-		if len(fingerprint) != 64 {
-			return "payloadFingerprint must be a sha256 hex digest"
-		}
-		for _, r := range fingerprint {
-			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
-				return "payloadFingerprint must be lowercase hex"
-			}
-		}
-		if fence, ok := envelope["expectedRuntimeFence"].(float64); !ok || fence <= 0 {
-			return "expectedRuntimeFence must be positive"
+		if r := envelopeOf(p); r != "" {
+			return r
 		}
 		body, ok := p["body"].(map[string]any)
 		if !ok || body["kind"] != "message" || body["role"] != "user" {
@@ -540,6 +580,165 @@ func validate(method string, p map[string]any) string {
 		return ""
 	}
 	return ""
+}
+
+// envelopeOf checks an agentSession write's envelope as Orca's schema does: session, operation id and a lowercase
+// sha256 fingerprint, and a positive fence ("" when valid). null, which a create sends, is checked by its method.
+func envelopeOf(p map[string]any) string {
+	envelope, ok := p["envelope"].(map[string]any)
+	if !ok {
+		return "Missing envelope"
+	}
+	for _, field := range []string{"sessionId", "clientOperationId", "payloadFingerprint"} {
+		if value, _ := envelope[field].(string); value == "" {
+			return "Missing envelope." + field
+		}
+	}
+	fingerprint, _ := envelope["payloadFingerprint"].(string)
+	if len(fingerprint) != 64 {
+		return "payloadFingerprint must be a sha256 hex digest"
+	}
+	for _, r := range fingerprint {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return "payloadFingerprint must be lowercase hex"
+		}
+	}
+	if fence, ok := envelope["expectedRuntimeFence"].(float64); !ok || fence <= 0 {
+		return "expectedRuntimeFence must be positive"
+	}
+	return ""
+}
+
+// positiveInt checks that p[k] is a positive integer ("" when it is).
+func positiveInt(p map[string]any, k string) string {
+	n, ok := p[k].(float64)
+	if !ok || n < 1 || n != float64(int64(n)) {
+		return k + " must be a positive integer"
+	}
+	return ""
+}
+
+// orcaSessionID is what Orca 1.4.277 takes as a session id.
+func orcaSessionID(id string) bool {
+	if len(id) < 8 || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// stringMap checks that v, when present, is an object of at most 32 string values ("" when it is).
+func stringMap(v any, name string) string {
+	if v == nil {
+		return ""
+	}
+	m, ok := v.(map[string]any)
+	if !ok || len(m) > 32 {
+		return name + " must be an object of at most 32 strings"
+	}
+	for _, x := range m {
+		if s, ok := x.(string); !ok || s == "" {
+			return name + " values must be non-empty strings"
+		}
+	}
+	return ""
+}
+
+// userMessage checks a user message body as agentSession.send and agentSession.create take it.
+func userMessage(v any) string {
+	body, ok := v.(map[string]any)
+	if !ok || body["kind"] != "message" || body["role"] != "user" {
+		return "body must be a user message"
+	}
+	if blocks, ok := body["blocks"].([]any); !ok || len(blocks) == 0 || len(blocks) > 64 {
+		return "body.blocks must contain 1–64 blocks"
+	}
+	return ""
+}
+
+// launchInvalid checks agent.launch's params as Orca 1.4.277 does ("" when they pass): the agent, a launch operation
+// id ("<13-digit ms>-<32 hex>"), an existing worktree target, a prompt to submit or draft, string chat options, and
+// the session id and surface it may name.
+func launchInvalid(p map[string]any) string {
+	if agent, _ := p["agent"].(string); agent == "" {
+		return "Missing agent"
+	}
+	if op, ok := p["operationId"]; ok {
+		s, _ := op.(string)
+		head, hexPart, cut := strings.Cut(s, "-")
+		if !cut || len(head) != 13 || len(hexPart) != 32 || strings.Trim(head, "0123456789") != "" ||
+			strings.Trim(hexPart, "0123456789abcdef") != "" {
+			return "Malformed launch operation id"
+		}
+	}
+	target, _ := p["target"].(map[string]any)
+	if worktree, _ := target["worktree"].(string); target["kind"] != "existing" || worktree == "" {
+		return "target must be an existing worktree"
+	}
+	if prompt, ok := p["prompt"]; ok {
+		pr, _ := prompt.(map[string]any)
+		if _, isText := pr["text"].(string); !isText || pr["delivery"] != "submit" && pr["delivery"] != "draft" {
+			return "prompt must have text and a delivery"
+		}
+	}
+	if r := stringMap(p["chatOptions"], "chatOptions"); r != "" {
+		return r
+	}
+	if id, ok := p["sessionId"]; ok {
+		if s, _ := id.(string); !orcaSessionID(s) {
+			return "Invalid session id"
+		}
+	}
+	if surface, ok := p["surface"]; ok && surface != "chat" && surface != "terminal" {
+		return "surface must be chat or terminal"
+	}
+	return ""
+}
+
+// createInvalid checks agentSession.create's params as Orca 1.4.277 does ("" when they pass): an envelope naming no
+// fence (the session does not exist yet), the worktree and agent, a first message, string options, nothing else.
+func createInvalid(p map[string]any) string {
+	envelope, ok := p["envelope"].(map[string]any)
+	if !ok {
+		return "Missing envelope"
+	}
+	if fence, has := envelope["expectedRuntimeFence"]; !has || fence != nil {
+		return "agent_session_operation_invalid: requestMalformed (a create names no fence)"
+	}
+	if id, _ := envelope["sessionId"].(string); !orcaSessionID(id) {
+		return "Invalid session id"
+	}
+	for _, field := range []string{"clientOperationId", "payloadFingerprint"} {
+		if value, _ := envelope[field].(string); value == "" {
+			return "Missing envelope." + field
+		}
+	}
+	for k := range p {
+		if !slices.Contains([]string{"envelope", "worktree", "agent", "firstMessage", "options", "optionsMode", "tabId",
+			"tabPlacement", "resumeFrom", "forkFrom"}, k) {
+			return "Unrecognized key " + k
+		}
+	}
+	if worktree, _ := p["worktree"].(string); worktree == "" {
+		return "Missing worktree"
+	}
+	if agent, _ := p["agent"].(string); agent == "" {
+		return "Missing agent"
+	}
+	if msg, ok := p["firstMessage"]; ok {
+		f, _ := msg.(map[string]any)
+		if id, _ := f["clientMessageId"].(string); id == "" {
+			return "Missing firstMessage.clientMessageId"
+		}
+		if r := userMessage(f["body"]); r != "" {
+			return r
+		}
+	}
+	return stringMap(p["options"], "options")
 }
 
 // Write is one terminal.send or terminal.close the fake took: what reached the terminal.
@@ -732,13 +931,14 @@ func (f *Fake) SetTerminals(terms ...map[string]any) {
 		}
 		if !seen[tab] {
 			seen[tab] = true
-			byTree[w] = append(byTree[w], map[string]any{"tabId": tab, "title": "tab " + tab, "activeLeafId": t["leafId"]})
+			byTree[w] = append(byTree[w], map[string]any{"tabId": tab, "title": "tab " + tab, "activeLeafId": t["leafId"],
+				"panes": map[string]any{"type": "terminal", "handle": t["handle"], "tabId": tab, "leafId": t["leafId"]}})
 		}
 	}
 	var layouts []any
 	for _, w := range order {
 		layouts = append(layouts, map[string]any{"worktreeId": w, "root": map[string]any{"type": "group",
-			"groupId": "g-" + w, "tabs": byTree[w]}})
+			"groupId": "g-" + w, "activeTabId": byTree[w][0].(map[string]any)["tabId"], "tabs": byTree[w]}})
 	}
 	f.mu.Lock()
 	f.terms, f.layouts = terms, layouts
@@ -802,6 +1002,92 @@ func (f *Fake) SetScreenRows(handle string, lines []string, wrapped []bool) {
 	f.mu.Lock()
 	f.screens[handle] = map[string]any{"tail": lines, "tailRows": rows}
 	f.mu.Unlock()
+}
+
+// output is what a terminal's program wrote, as Orca keeps it (terminal.read without screen).
+type output struct {
+	// tail is the output tail: the newest lines, rows redrawn in place as they ended, the line being written last.
+	tail          []string
+	tailTruncated bool
+	// log is every completed line, redrawn rows each time, oldest kept first; total counts all the completed lines
+	// ever written (the cursor after the newest), so the oldest kept is total-len(log).
+	log   []string
+	total int
+	// noCursor answers as an Orca without cursor reads: no cursors, a cursor ignored.
+	noCursor bool
+}
+
+// SetOutput sets what terminal.read without screen answers for a handle: tail is the output tail (the newest lines,
+// rows redrawn in place as they ended, the line being written last; truncated: Orca let older lines of it go), log
+// every completed line, redrawn rows each time, oldest kept first, and total the count of every completed line ever
+// written (the cursor after the newest; the oldest kept is total-len(log)). A handle without output answers a tail read
+// with the screen, as Orca does for a program on the alternate screen.
+func (f *Fake) SetOutput(handle string, tail []string, truncated bool, log []string, total int) {
+	f.mu.Lock()
+	f.outputs[handle] = &output{tail: tail, tailTruncated: truncated, log: log, total: total}
+	f.mu.Unlock()
+}
+
+// SetOldOutput sets a handle's output tail as an Orca without cursor reads answers it: no cursors, a cursor ignored.
+func (f *Fake) SetOldOutput(handle string, tail []string) {
+	f.mu.Lock()
+	f.outputs[handle] = &output{tail: tail, noCursor: true}
+	f.mu.Unlock()
+}
+
+// readOutputLocked answers terminal.read without screen as Orca 1.4.277 does (lFt in its runtime): a cursor pages
+// the log, at most limit (default and cap 2000) lines; without one, the tail's last limit (default 120, cap 2000)
+// lines, cut further to 32 KiB of text from the end.
+func (f *Fake) readOutputLocked(h string, p map[string]any) map[string]any {
+	o := f.outputs[h]
+	if o == nil {
+		s := f.screens[h]
+		if s == nil {
+			s = map[string]any{"tail": []string{}, "tailRows": []any{}}
+		}
+		out := map[string]any{"handle": h, "status": "running", "truncated": false, "source": "screen"}
+		maps.Copy(out, s)
+		return out
+	}
+	limit := func(def int) int {
+		if v, ok := p["limit"].(float64); ok && v > 0 {
+			return min(max(1, int(v)), 2000)
+		}
+		return def
+	}
+	oldest, latest := max(0, o.total-len(o.log)), o.total
+	out := map[string]any{"handle": h, "status": "running", "source": "stream"}
+	if !o.noCursor {
+		out["oldestCursor"], out["nextCursor"], out["latestCursor"] = fmt.Sprint(oldest), fmt.Sprint(latest), fmt.Sprint(latest)
+	}
+	if c, ok := p["cursor"].(float64); ok && !o.noCursor {
+		cursor := int(c)
+		if cursor > latest {
+			out["tail"], out["truncated"], out["limited"] = []string{}, false, false
+			return out
+		}
+		from := max(cursor, oldest)
+		rest := o.log[from-oldest:]
+		lines := rest[:min(len(rest), limit(2000))]
+		out["tail"], out["truncated"], out["limited"] = slices.Clone(lines), cursor < oldest, len(lines) < len(rest)
+		out["nextCursor"] = fmt.Sprint(from + len(lines))
+		return out
+	}
+	lines := slices.Clone(o.tail[max(0, len(o.tail)-limit(120)):])
+	limited := len(lines) < len(o.tail)
+	chars := 0
+	for _, l := range lines {
+		chars += len(l)
+	}
+	for len(lines) > 0 && chars-len(lines[0]) >= 32768 {
+		chars -= len(lines[0])
+		lines, limited = lines[1:], true
+	}
+	if chars > 32768 {
+		lines[0], limited = lines[0][chars-32768:], true
+	}
+	out["tail"], out["truncated"], out["limited"] = lines, o.tailTruncated, limited
+	return out
 }
 
 // Handle makes a method answer through fn (a Fail for an error).

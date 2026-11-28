@@ -104,6 +104,7 @@ const SHARED_INDEX: SearchGroup[] = [
   { tab: "persona", group: t("settings-assistantsettings.inbox_todo_forward"), anchor: "inbox-todo-forward" },
   { tab: "persona", group: t("settings-assistantsettings.default_permissions"), hint: words(t("settings-directionnotes.title"), t("settings-directionnotes.permissions")), anchor: "default-permissions" },
   { tab: "persona", group: t("settings-assistantsettings.readonly_mode"), anchor: "readonly-mode" },
+  { tab: "persona", group: t("settings-assistantsettings.approval_mirror_main"), anchor: "approval-mirror-main" },
   {
     tab: "persona",
     group: t("settings-assistantsettings.owner_approval_title"),
@@ -145,6 +146,8 @@ const SHARED_INDEX: SearchGroup[] = [
   { tab: "models", group: t("settings.add_provider"), hint: words("API Key", t("settings.search_key_words"), t("settings-providerimport.import")), anchor: "settings-providers" },
   { tab: "models", group: t("settings-nav.tab_model_config"), anchor: "settings-model-config" },
   { tab: "models", group: path(t("settings-nav.tab_model_config"), t("settings-modelconfiguration.effort")), hint: words(t("settings-modelconfiguration.model_provider"), t("settings-modelconfiguration.model")), anchor: "settings-model-config" },
+  { tab: "models", group: t("execution.runtimes_title"), anchor: "settings-runtimes" },
+  { tab: "models", group: t("execution.channels_title"), hint: words(t("execution.channel_base_url"), t("execution.rollback")), anchor: "settings-execution-channels" },
   { tab: "models", group: t("settings-modelprofiles.title"), anchor: "model-profiles" },
   { tab: "agents", group: "Claude Code", anchor: "settings-claude" },
   { tab: "agents", group: "Codex", anchor: "settings-codex" },
