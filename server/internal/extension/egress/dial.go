@@ -36,7 +36,7 @@ func (p *Proxy) dialOut(ctx context.Context, host, port string, rule Rule) (net.
 	target := net.JoinHostPort(host, port)
 	ip := net.ParseIP(host)
 	if ip != nil {
-		if isSelfIP(host) && p.ownPort(port) {
+		if p.isSelfService(ip, port) {
 			return nil, fmt.Errorf("%s:%s %w", host, port, errInternal)
 		}
 		up, err := upstream(&url.URL{Scheme: "https", Host: target})
@@ -55,7 +55,7 @@ func (p *Proxy) dialOut(ctx context.Context, host, port string, rule Rule) (net.
 	var last error = fmt.Errorf("%s: no address", host)
 	var checked []net.IP
 	for _, ip := range ips {
-		if Unreachable(ip) {
+		if !p.forSettings(ip, port) {
 			last = fmt.Errorf("%s %w", host, errInternal)
 			continue
 		}
