@@ -47,6 +47,7 @@ import {
   makeSessionLookup,
   mostUrgentAgent,
   normalizedPR,
+  openAsk,
   orphanedLine,
   reportConcern,
   responsibleOf,
@@ -153,7 +154,7 @@ import { TodoCausalTraceSection } from "../features/todos/TodoCausalTraceSection
 import { boardAttention, boardSectionMap, consumeBoardDirectionGroups, consumeBoardStatusGroups, isBoardOpen } from "../features/todos/board-consumer";
 import { loadOlderClosed } from "../features/todos/closed-history";
 import { pref, setPref, useTodoPreference } from "../features/todos/preferences";
-import { formatRowRepoGate, repoGatePRLabel, repoGatePRLook, repoGateReasonLabel, repoGateTone, shouldShowRowRepoGate, type RepoGateTone } from "../features/todos/repo-gate";
+import { formatRowRepoGate, formatRowRepoGateTitle, repoGatePRLabel, repoGatePRLook, repoGateReasonLabel, repoGateTone, shouldShowRowRepoGate, type RepoGateTone } from "../features/todos/repo-gate";
 import { useRestoredTodos } from "../lib/todo-restore";
 import { stepsWords } from "../lib/todo-steps";
 import { useOwnerNeeds, useTodoBoard, useTodoLookup, useTodoMinute } from "../lib/todo-owner-needs";
@@ -505,12 +506,12 @@ function TodoListView({
   // Lightweight All / To-dos / Tasks filter gated behind todos_v2 (#14642); turning todos_v2 off reverts immediately.
   const [kindFilter, setKindFilter] = useTodoPreference<TodoKindFilter>("persona.todos.kindFilter", (value) => isTodoKindFilter(value) ? value : "all");
   const effectiveKindFilter: TodoKindFilter = todosV2 ? kindFilter : "all";
-  // Shared external blockers summary strip gated behind todos_v2 (#14728).
+  // Shared blockers summary strip gated behind todos_v2 (#14728, #17938).
   const rawSharedBlockers = useStore((s) => s.sharedBlockers);
   const visibleTodoIds = useMemo(() => new Set(todos.map((td) => td.id)), [todos]);
   const sharedBlockers = useMemo(
-    () => (todosV2 ? parseSharedBlockers(rawSharedBlockers, visibleTodoIds) : []),
-    [todosV2, rawSharedBlockers, visibleTodoIds],
+    () => (todosV2 ? parseSharedBlockers(rawSharedBlockers, visibleTodoIds, todosById) : []),
+    [todosV2, rawSharedBlockers, visibleTodoIds, todosById],
   );
   const closedCursors = useStore((s) => s.closedCursors);
   const closedLoading = useStore((s) => s.closedLoading);
@@ -1605,6 +1606,8 @@ function TodoListView({
               blockers={sharedBlockers}
               selectedKey={activeBlocker?.key ?? null}
               onSelect={setSelectedBlockerKey}
+              onOpenTodo={openFromList}
+              openableTodoIds={visibleTodoIds}
             />
           )}
           {!boardOn && todosV2 && !requestMode && reorganizeMode && (
@@ -1940,7 +1943,9 @@ function TodoListView({
                                       reorganizeSelected={reorganizeProps?.selectedIds.has(todo.id)}
                                       onToggleReorganize={reorganizeProps?.onToggle}
                                       slim={todosV2}
+                                      hideDirectionBadge={todosV2}
                                       parentGoalTitle={todo.part_of ? todosById.get(todo.part_of)?.title : undefined}
+                                      todosById={todosV2 && todo.wait != null ? todosById : undefined}
                                       onSelect={openFromList}
                                       onToggleDone={toggleDone}
                                       onMenu={openRowMenu}
@@ -1967,7 +1972,9 @@ function TodoListView({
                                         reorganizeSelected={reorganizeProps?.selectedIds.has(todo.id)}
                                         onToggleReorganize={reorganizeProps?.onToggle}
                                         slim={todosV2}
+                                        hideDirectionBadge={todosV2}
                                         parentGoalTitle={todo.part_of ? todosById.get(todo.part_of)?.title : undefined}
+                                        todosById={todosV2 && todo.wait != null ? todosById : undefined}
                                         onSelect={openFromList}
                                         onToggleDone={toggleDone}
                                         onMenu={openRowMenu}
@@ -2259,12 +2266,14 @@ interface TodoReorganizeSelection {
   onToggle: (id: string) => void;
 }
 
-/** Section-local parent/child hierarchy row for Direction and Project groupings under todos_v2 (#16939). */
+/** Section-local parent/child hierarchy row for Direction and Project groupings under todos_v2 (#16939, #17938). */
 function TodoHierarchyRow({
   entry,
   views,
+  allTodosById,
   reorganize,
   slim,
+  hideDirectionBadge,
   mergeTrainByTodo,
   selectedId,
   onSelect,
@@ -2274,8 +2283,10 @@ function TodoHierarchyRow({
 }: {
   entry: SectionHierarchyEntry;
   views: ReadonlyMap<string, TodoRowView>;
+  allTodosById?: ReadonlyMap<string, Todo>;
   reorganize?: TodoReorganizeSelection;
   slim?: boolean;
+  hideDirectionBadge?: boolean;
   mergeTrainByTodo?: Readonly<Record<string, MergeTrainTodoBadge>>;
   selectedId: string | undefined;
   onSelect: (id: string) => void;
@@ -2303,6 +2314,8 @@ function TodoHierarchyRow({
         reorganizeSelected={reorganize?.selectedIds.has(entry.todo.id)}
         onToggleReorganize={reorganize?.onToggle}
         slim={slim}
+        hideDirectionBadge={hideDirectionBadge}
+        todosById={slim && entry.todo.wait != null ? allTodosById : undefined}
         mergeTrainBadge={mergeTrainByTodo?.[entry.todo.id]}
         onSelect={onSelect}
         onToggleDone={onToggleDone}
@@ -2336,13 +2349,14 @@ function TodoHierarchyRow({
               reorganizeSelected={reorganize?.selectedIds.has(child.todo.id)}
               onToggleReorganize={reorganize?.onToggle}
               slim={slim}
+              hideDirectionBadge={hideDirectionBadge}
+              todosById={slim && child.todo.wait != null ? allTodosById : undefined}
               mergeTrainBadge={mergeTrainByTodo?.[child.todo.id]}
               onSelect={onSelect}
               onToggleDone={onToggleDone}
               section={child.section}
               onSeen={onSeen}
               onMenu={onMenu}
-              parentGoalTitle={child.parentGoalTitle}
             />
           ))}
         </div>
@@ -2403,6 +2417,7 @@ const TodoProjectSection = memo(function TodoProjectSection({
             key={entry.todo.id}
             entry={entry}
             views={viewById}
+            allTodosById={allTodosById}
             reorganize={reorganize}
             slim={slim}
             mergeTrainByTodo={mergeTrainByTodo}
@@ -2423,6 +2438,7 @@ const TodoProjectSection = memo(function TodoProjectSection({
             onToggleReorganize={reorganize?.onToggle}
             slim={slim}
             parentGoalTitle={todo.part_of ? allTodosById?.get(todo.part_of)?.title : undefined}
+            todosById={slim && todo.wait != null ? allTodosById : undefined}
             mergeTrainBadge={mergeTrainByTodo?.[todo.id]}
             onSelect={onSelect}
             onToggleDone={onToggleDone}
@@ -2627,15 +2643,24 @@ const TodoDirectionSection = memo(function TodoDirectionSection({
     [foldChildren, todos, allTodosById, sectionOf],
   );
   const directionKey = direction.secretary ? DONE_UNCATEGORIZED_ID : direction.id;
+  // Under todos_v2 (#17938), expanded direction headers omit the lone running arc next to "✓ Done N"
+  // because every child row below already displays its own live StatusMark; folded headers keep it when
+  // an Agent under the direction is actually running. Legacy mode preserves direction.running verbatim.
+  const headerDirection = slim
+    ? {
+        ...direction,
+        running: folded && todos.some((td) => views.get(td.id)?.dotState === "working"),
+      }
+    : direction;
   return (
     <div className="mt-1 first:mt-0" data-testid="todo-group" data-group={`direction:${direction.secretary ? "secretary" : direction.id}`}>
-      <div className="flex min-w-0 items-center gap-1">
-        <button type="button" aria-expanded={!folded} onClick={toggle} className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-control px-2 text-left text-[12px] text-ink-2 hover:bg-hover [@media(pointer:coarse)]:min-h-11">
+      <div className="flex min-w-0 items-center gap-1 overflow-hidden">
+        <button type="button" aria-expanded={!folded} onClick={toggle} className="flex h-7 min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded-control px-2 text-left text-[12px] text-ink-2 hover:bg-hover [@media(pointer:coarse)]:min-h-11">
           <Icon name="chevron" size={10} stroke={2.4} className="shrink-0 opacity-60 transition-transform" style={{ transform: folded ? "rotate(-90deg)" : "none" }} />
           <Icon name={direction.secretary ? (slim ? "inbox" : "person") : "target"} size={12} stroke={2} className="shrink-0 text-ink-3" />
           <span className="min-w-0 flex-1 truncate font-semibold">{title}</span>
           {folded && <OwnerMarkCount count={ownerCount(todos, views)} />}
-          <DirectionCountsText direction={direction} />
+          <DirectionCountsText direction={headerDirection} className="px-0.5" />
         </button>
         {slim && completedCount > 0 && onReviewCompleted && (
           <button
@@ -2663,8 +2688,10 @@ const TodoDirectionSection = memo(function TodoDirectionSection({
                   key={entry.todo.id}
                   entry={entry}
                   views={views}
+                  allTodosById={allTodosById}
                   reorganize={reorganize}
                   slim={slim}
+                  hideDirectionBadge={slim}
                   mergeTrainByTodo={mergeTrainByTodo}
                   selectedId={selectedId}
                   onSelect={onSelect}
@@ -2681,7 +2708,9 @@ const TodoDirectionSection = memo(function TodoDirectionSection({
                   reorganizeSelected={reorganize?.selectedIds.has(todo.id)}
                   onToggleReorganize={reorganize?.onToggle}
                   slim={slim}
+                  hideDirectionBadge={slim}
                   parentGoalTitle={todo.part_of ? allTodosById?.get(todo.part_of)?.title : undefined}
+                  todosById={slim && todo.wait != null ? allTodosById : undefined}
                   mergeTrainBadge={mergeTrainByTodo?.[todo.id]}
                   onSelect={onSelect}
                   onToggleDone={onToggleDone}
@@ -2962,6 +2991,7 @@ function TodoTriageRow({
       reorganizeSelected={reorganize?.selectedIds.has(td.id)}
       onToggleReorganize={reorganize?.onToggle}
       slim={slim}
+      todosById={slim && td.wait != null ? todosById : undefined}
       mergeTrainBadge={mergeTrainByTodo?.[td.id]}
       onSelect={onSelect}
       onToggleDone={onToggleDone}
@@ -3004,6 +3034,7 @@ function TodoTriageRow({
               reorganizeSelected={reorganize?.selectedIds.has(child.todo.id)}
               onToggleReorganize={reorganize?.onToggle}
               slim={slim}
+              todosById={slim && child.todo.wait != null ? todosById : undefined}
               mergeTrainBadge={mergeTrainByTodo?.[child.todo.id]}
               onSelect={onSelect}
               onToggleDone={onToggleDone}
@@ -3244,6 +3275,13 @@ function mergeTrainBadgeText(badge: MergeTrainTodoBadge): string {
     : stateText;
 }
 
+function slimMergeTrainBadgeText(badge: MergeTrainTodoBadge): string {
+  if (badge.state === "queued" && badge.position > 0) {
+    return t("todos.slim_mergetrain_queued", { position: badge.position });
+  }
+  return mergeTrainBadgeText(badge);
+}
+
 function safeHttpUrl(raw?: string): string | undefined {
   return safeWebURL(raw);
 }
@@ -3255,6 +3293,8 @@ const TodoListItem = memo(function TodoListItem({
   reorganizeSelected,
   onToggleReorganize,
   slim,
+  hideDirectionBadge,
+  todosById,
   onSelect,
   onToggleDone,
   section,
@@ -3273,6 +3313,10 @@ const TodoListItem = memo(function TodoListItem({
   onToggleReorganize?: (id: string) => void;
   /** Under todos_v2 (#14830), compact 1-line personal / max 2-line task row layout. */
   slim?: boolean;
+  /** Under todos_v2 (#17938), omit redundant inline direction tag when rows sit inside a direction group. */
+  hideDirectionBadge?: boolean;
+  /** Optional lookup map passed for waiting slim rows so raw `todo_...` wait targets resolve cleanly. */
+  todosById?: ReadonlyMap<string, Todo>;
   onSelect: (id: string) => void;
   onToggleDone: (todo: Todo, open?: boolean) => void;
   /** Its status section (#3156): a PR to merge shows its link, a shelved one its Restore, a Just finished one Got it. */
@@ -3395,7 +3439,7 @@ const TodoListItem = memo(function TodoListItem({
             >
               {todo.title}
             </span>
-            {view.directionLabel && (
+            {!hideDirectionBadge && view.directionLabel && (
               <span
                 data-testid="todo-direction-tag"
                 className="max-w-28 shrink-0 truncate rounded-chip bg-field px-1.5 py-0.5 text-submeta text-ink-2"
@@ -3419,10 +3463,9 @@ const TodoListItem = memo(function TodoListItem({
                 role="img"
                 aria-label={t("todos.priority_high")}
                 title={t("todos.priority_high")}
-                className="inline-flex shrink-0 items-center gap-0.5 text-ink-3"
+                className="inline-flex shrink-0 items-center text-ink-3"
               >
                 <Icon name="flag" size={10} stroke={2} />
-                <span>{t("todos.priority_option_high")}</span>
               </span>
             )}
             {due && (
@@ -3450,9 +3493,22 @@ const TodoListItem = memo(function TodoListItem({
     }
 
     const pr = prLink(todo.pr_status?.url ?? todo.pr_url);
+    const hasLine1PR = Boolean(!goalSummary && !childSummary && pr);
+    const activeAsk = openAsk(todo);
     const repoCount = repoCountOf(todo);
-    const rowRepoGate = shouldShowRowRepoGate(todo.repo_gate) ? todo.repo_gate : undefined;
-    const rowRepoGateText = rowRepoGate ? formatRowRepoGate(rowRepoGate) : undefined;
+    const rowRepoGate = shouldShowRowRepoGate(todo.repo_gate, {
+      effectiveSection,
+      hasOpenAsk: Boolean(activeAsk),
+      askOutcome: activeAsk?.outcome,
+      done: Boolean(todo.done_at),
+      hasLine1PR,
+      hasActiveDeliveryPR: Boolean(pr || todo.repo_gate?.blocking_pr?.trim()),
+      hasExecutionFailure: failedOpen,
+    })
+      ? todo.repo_gate
+      : undefined;
+    const rowRepoGateText = rowRepoGate ? formatRowRepoGate(rowRepoGate, { hasLine1PR }) : undefined;
+    const rowRepoGateTitle = rowRepoGate ? formatRowRepoGateTitle(rowRepoGate) : undefined;
     const rowRepoGateToneClass: Record<RepoGateTone, string> = {
       green: "text-green font-medium",
       red: "text-red font-medium",
@@ -3465,6 +3521,8 @@ const TodoListItem = memo(function TodoListItem({
       held,
       due,
       overdue,
+      line1PrText: hasLine1PR ? pr?.text : undefined,
+      todosById,
     });
     const showSeenAction = effectiveSection === "just_done" && seenCanFile(todo) && Boolean(onSeen);
     const showRestoreAction = section === "shelved" && Boolean(onRestore);
@@ -3476,7 +3534,7 @@ const TodoListItem = memo(function TodoListItem({
         mergeTrain: Boolean(mergeTrainBadge),
         parentGoal: Boolean(parentGoalTitle),
         childWorking: Boolean(childSummary && childSummary.working > 0),
-        direction: Boolean(view.directionLabel),
+        direction: !hideDirectionBadge && Boolean(view.directionLabel),
         project: Boolean(view.projectLabel),
         repoCount: Boolean(!rowRepoGate && repoCount > 0),
       },
@@ -3526,11 +3584,11 @@ const TodoListItem = memo(function TodoListItem({
                   : "bg-field text-ink-2",
               )}
             >
-              {mergeTrainBadgeText(mergeTrainBadge)}
+              {slimMergeTrainBadgeText(mergeTrainBadge)}
             </span>
           ) : null;
         case "direction":
-          return view.directionLabel ? (
+          return !hideDirectionBadge && view.directionLabel ? (
             <span key="direction" data-testid="todo-direction-tag" className={cx("max-w-28 shrink-0 truncate text-ink-2", cue && "max-w-[42%]")}>
               {view.directionLabel}
             </span>
@@ -3547,7 +3605,7 @@ const TodoListItem = memo(function TodoListItem({
               key="repo_gate"
               data-testid="todo-row-repo-gate"
               data-gate-state={rowRepoGate.state}
-              title={rowRepoGateText}
+              title={rowRepoGateTitle}
               className={cx("shrink-0 truncate whitespace-nowrap tabular-nums", cue ? "max-w-[42%]" : "max-w-44", rowRepoGateToneClass[repoGateTone(rowRepoGate.state)])}
             >
               {rowRepoGateText}
@@ -3647,10 +3705,9 @@ const TodoListItem = memo(function TodoListItem({
                   role="img"
                   aria-label={t("todos.priority_high")}
                   title={t("todos.priority_high")}
-                  className="inline-flex shrink-0 items-center gap-0.5 text-ink-3"
+                  className="inline-flex shrink-0 items-center text-ink-3"
                 >
                   <Icon name="flag" size={10} stroke={2} />
-                  <span>{t("todos.priority_option_high")}</span>
                 </span>
               )}
               {goalSummary ? (

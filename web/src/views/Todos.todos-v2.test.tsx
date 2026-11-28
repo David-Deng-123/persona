@@ -1350,25 +1350,31 @@ describe("TodosView slim header & left pane under todos_v2 (#14830)", () => {
     expect(toolbar.querySelector("[data-testid=todos-filter]")).toBeTruthy();
     expect(toolbar.querySelector("[data-testid=todos-reorganize-toggle]")).toBeTruthy();
 
-    // 3. Task rows: max 2 lines, no redundant status line, PR anchor, direction meta, subtle priority & pending decision preserved
+    // 3. Task rows: max 2 lines, no redundant status line, PR anchor, direction meta, icon-only subtle priority & pending decision preserved
     const workingRow = host.querySelector<HTMLElement>('[data-todo="task_pr_working"]')!;
     expect(workingRow.dataset.todoRowLayout).toBe("task-slim");
     expect(workingRow.querySelector("[data-testid=todo-status-line]")).toBeNull();
     expect(workingRow.querySelector("[data-testid=todo-slim-pr]")?.textContent).toBe("PR #14830");
     expect(workingRow.querySelector("[data-testid=todo-direction-tag]")?.textContent).toBe("Platform");
-    expect(workingRow.querySelector("[data-testid=todo-priority-subtle]")?.textContent).toContain(t("todos.priority_option_high"));
+    const workingPrio = workingRow.querySelector("[data-testid=todo-priority-subtle]")!;
+    expect(workingPrio.getAttribute("aria-label")).toBe(t("todos.priority_high"));
+    expect(workingPrio.textContent?.trim()).toBe("");
 
     const decisionRow = host.querySelector<HTMLElement>('[data-todo="task_decision"]')!;
     expect(decisionRow.dataset.todoRowLayout).toBe("task-slim");
     expect(decisionRow.querySelector("[data-testid=todo-ask]")?.textContent).toContain("Proceed with blue-green swap?");
-    expect(decisionRow.querySelector("[data-testid=todo-priority-subtle]")?.textContent).toContain(t("todos.priority_option_high"));
+    const decisionPrio = decisionRow.querySelector("[data-testid=todo-priority-subtle]")!;
+    expect(decisionPrio.getAttribute("aria-label")).toBe(t("todos.priority_high"));
+    expect(decisionPrio.textContent?.trim()).toBe("");
 
-    // 4. Personal to-do: minimal single-line layout with due date & subtle priority
+    // 4. Personal to-do: minimal single-line layout with due date & icon-only subtle priority
     const personalRow = host.querySelector<HTMLElement>('[data-todo="personal_due"]')!;
     expect(personalRow.dataset.todoRowLayout).toBe("personal-slim");
     expect(personalRow.querySelector("[data-testid=todo-slim-line2]")).toBeNull();
     expect(personalRow.querySelector("[data-testid=todo-due-compact]")?.textContent).toBeTruthy();
-    expect(personalRow.querySelector("[data-testid=todo-priority-subtle]")?.textContent).toContain(t("todos.priority_option_high"));
+    const personalPrio = personalRow.querySelector("[data-testid=todo-priority-subtle]")!;
+    expect(personalPrio.getAttribute("aria-label")).toBe(t("todos.priority_high"));
+    expect(personalPrio.textContent?.trim()).toBe("");
 
     // 5. Parked & Done sections start compactly folded with counts and external wait hint
     const parkedSec = host.querySelector<HTMLElement>('[data-testid="todo-section"][data-section="parked"]')!;
@@ -2286,5 +2292,309 @@ describe("TodosView detail active_blockers strip under todos_v2 (#16138)", () =>
     await flush();
     expect(host.querySelector("[data-testid=todo-active-blockers]")).toBeNull();
     expect(host.querySelector("[data-testid=todo-add-pr-blocker-btn]")).toBeNull();
+  });
+});
+
+describe("TodosView left-list density, direction header & readable shared blockers under todos_v2 (#17938 Sub-PR 1)", () => {
+  const densityTodos: Todo[] = [
+    {
+      id: "todo_e8acf635da201b7a",
+      title: "Stabilize Steam extension pipeline",
+      direction_id: "dir-steam",
+      effective_direction_id: "dir-steam",
+      effective_direction_name: "Steam Extension",
+      priority: "high",
+      agents: [{ machine_id: "m1", session_id: "s-steam", linked_at: iso(2 * HOUR) }],
+      created_at: iso(8 * HOUR),
+      updated_at: iso(1 * HOUR),
+      view: view("working", "agent_running", "working", 0),
+    },
+    {
+      id: "todo_child_direct",
+      title: "Unstarted placeholder child",
+      part_of: "todo_e8acf635da201b7a",
+      direction_id: "dir-steam",
+      effective_direction_id: "dir-steam",
+      effective_direction_name: "Steam Extension",
+      origin: "conv-main",
+      repo_gate: {
+        state: "missing_pr",
+        target_count: 1,
+        ready_count: 0,
+        reference_count: 0,
+        blocking_repo: "nwverse/persona",
+        reason: "missing_pr",
+      },
+      created_at: iso(7 * HOUR),
+      updated_at: iso(2 * HOUR),
+      view: view("working", "rest", "working", 1),
+    },
+    {
+      id: "todo_grandchild",
+      title: "Grandchild waiting on prerequisite",
+      part_of: "todo_child_direct",
+      direction_id: "dir-steam",
+      effective_direction_id: "dir-steam",
+      effective_direction_name: "Steam Extension",
+      wait: { kind: "external_event", waiting_on: "todo_e8acf635da201b7a" },
+      created_at: iso(6 * HOUR),
+      updated_at: iso(2 * HOUR),
+      view: view("waiting", "external_wait", "waiting", 2),
+    },
+    {
+      id: "todo_pr_dup",
+      title: "Land PR #1446 without duplicate line-2 PR number",
+      direction_id: "dir-steam",
+      effective_direction_id: "dir-steam",
+      effective_direction_name: "Steam Extension",
+      pr_url: "https://github.com/nwverse/persona/pull/1446",
+      wait: { kind: "external_event", waiting_on: "PR #1446 (nwverse/persona)" },
+      repo_gate: {
+        state: "awaiting_review",
+        target_count: 1,
+        ready_count: 0,
+        reference_count: 0,
+        blocking_repo: "nwverse/persona",
+        reason: "review_required",
+      },
+      created_at: iso(5 * HOUR),
+      updated_at: iso(1 * HOUR),
+      view: view("waiting", "pr_merge", "waiting", 3),
+    },
+    {
+      id: "todo_delivered_ready",
+      title: "Delivered task awaiting owner verification",
+      direction_id: "dir-steam",
+      effective_direction_id: "dir-steam",
+      effective_direction_name: "Steam Extension",
+      ask: { verdict: "Done: please verify results", asked_at: iso(1 * HOUR), outcome: "done" },
+      repo_gate: {
+        state: "ready",
+        target_count: 1,
+        ready_count: 1,
+        reference_count: 0,
+        reason: "all_targets_ready",
+      },
+      created_at: iso(4 * HOUR),
+      updated_at: iso(1 * HOUR),
+      view: view("just_finished", "finished_unseen", "ready", 0),
+    },
+    {
+      id: "todo_steam_done",
+      title: "Shipped earlier Steam fix",
+      direction_id: "dir-steam",
+      effective_direction_id: "dir-steam",
+      effective_direction_name: "Steam Extension",
+      done_at: iso(3 * HOUR),
+      created_at: iso(9 * HOUR),
+      updated_at: iso(3 * HOUR),
+      view: view("done", "closed", "done", 0),
+    },
+  ];
+
+  const densityBoard: TodoBoardProjection = {
+    status_groups: [
+      {
+        key: "in_progress",
+        total_count: 2,
+        visible_count: 2,
+        entries: [
+          {
+            todo_id: "todo_e8acf635da201b7a",
+            folded_child_ids: ["todo_child_direct", "todo_grandchild"],
+            folded_count: 2,
+          },
+          { todo_id: "todo_pr_dup" },
+        ],
+      },
+      {
+        key: "pending_review",
+        total_count: 1,
+        visible_count: 1,
+        entries: [{ todo_id: "todo_delivered_ready" }],
+      },
+      {
+        key: "done",
+        total_count: 1,
+        visible_count: 1,
+        entries: [{ todo_id: "todo_steam_done" }],
+      },
+    ],
+    direction_groups: [
+      {
+        direction_id: "dir-steam",
+        label: "Steam Extension",
+        counts: { needs_you: 0, in_progress: 3, pending_review: 1, waiting: 1, done: 1, total: 6 },
+        todo_ids: [
+          "todo_e8acf635da201b7a",
+          "todo_child_direct",
+          "todo_grandchild",
+          "todo_pr_dup",
+          "todo_delivered_ready",
+          "todo_steam_done",
+        ],
+      },
+    ],
+    sidebar_tree: [],
+    counts: {
+      needs_you: 0,
+      in_progress: 3,
+      pending_review: 1,
+      waiting: 1,
+      someday: 0,
+      done: 1,
+      open_total: 5,
+    },
+  };
+
+  it("deduplicates direction & nested parent badges, tones down repo_gate & wait cues, prevents clipped direction arcs, and resolves raw todo_... shared blockers", async () => {
+    const rawTodoSharedBlocker = [
+      {
+        key: "target:todo_e8acf635da201b7a",
+        kind: "external_target",
+        label: "todo_e8acf635da201b7a",
+        todo_ids: ["todo_child_direct", "todo_grandchild"],
+        count: 2,
+      },
+    ];
+    api.mockImplementation(async (path: string) => {
+      if (path.includes("/kb")) return { items: kbProjects };
+      if (path === "/todos/mergetrain") {
+        return {
+          repos: [],
+          by_todo: {
+            todo_pr_dup: { repo_key: "nwverse/persona", position: 3, state: "queued" },
+          },
+        };
+      }
+      return {};
+    });
+
+    await render({
+      todos: densityTodos,
+      todoBoard: densityBoard,
+      sharedBlockers: rawTodoSharedBlocker,
+      sessions: {
+        m1: [
+          {
+            id: "s-steam",
+            machine_id: "m1",
+            session_id: "s-steam",
+            agent: "claude",
+            title: "Steam worker",
+            cwd: "/repo",
+            state: "working",
+            updated_at: iso(1 * 60_000),
+          },
+        ],
+      },
+      todosV2: true,
+      grouping: "direction",
+      leaders: ["dir-steam"],
+      conversations: [{ machine_id: "m1", session_id: "dir-steam", title: "Steam Extension" }],
+      selectedId: "todo_pr_dup",
+    });
+
+    // 1. SharedBlockersStrip resolves raw todo_... ID to readable title and never leaks raw todo_... ID
+    const strip = host.querySelector<HTMLElement>("[data-testid=todos-shared-blockers]")!;
+    expect(strip).toBeTruthy();
+    expect(strip.textContent).toContain("Stabilize Steam extension pipeline");
+    expect(strip.textContent).not.toContain("todo_e8acf635da201b7a");
+    const openBlockerBtn = strip.querySelector<HTMLButtonElement>("[data-testid=shared-blocker-open-todo]")!;
+    expect(openBlockerBtn).toBeTruthy();
+
+    // 2. Direction grouping suppresses redundant inline direction badges on every row
+    const dirGroup = host.querySelector<HTMLElement>('[data-testid="todo-group"][data-group="direction:dir-steam"]')!;
+    expect(dirGroup).toBeTruthy();
+    expect(dirGroup.querySelectorAll("[data-testid=todo-direction-tag]")).toHaveLength(0);
+
+    // 3. Nested children inside TodoHierarchyRow omit redundant parent goal tags
+    const nestedBox = dirGroup.querySelector<HTMLElement>('[data-testid="todo-goal-children"][data-parent="todo_e8acf635da201b7a"]')!;
+    expect(nestedBox).toBeTruthy();
+    expect(nestedBox.querySelectorAll("[data-testid=todo-parent-goal]")).toHaveLength(0);
+
+    // 4. Expanded direction header omits stray running arc next to "✓ Done 1" and protects overflow cleanly
+    const headerRow = dirGroup.firstElementChild as HTMLElement;
+    expect(headerRow.className).toContain("overflow-hidden");
+    expect(headerRow.querySelector("button[aria-expanded]")?.className).toContain("overflow-hidden");
+    expect(dirGroup.querySelector("[data-direction-counts] [data-shape='arc']")).toBeNull();
+    expect(dirGroup.querySelector("[data-testid=todo-direction-review-done]")).toBeTruthy();
+
+    // Folding the direction header shows the working arc inside a non-clipping wrapper since s-steam is working
+    await act(async () => headerRow.querySelector<HTMLButtonElement>("button[aria-expanded]")!.click());
+    await flush();
+    expect(dirGroup.querySelector("[data-direction-counts] [data-shape='arc']")).toBeTruthy();
+    await act(async () => headerRow.querySelector<HTMLButtonElement>("button[aria-expanded]")!.click());
+    await flush();
+
+    // 5. Unstarted placeholder task omits missing_pr repo_gate alarm
+    expect(dirGroup.querySelector('[data-todo="todo_child_direct"] [data-testid="todo-row-repo-gate"]')).toBeNull();
+
+    // 6. Grandchild wait cue resolves raw todo_... ID with concise prerequisite prefix
+    const grandchildCue = dirGroup.querySelector('[data-todo="todo_grandchild"] [data-testid="todo-slim-cue"]')?.textContent ?? "";
+    expect(grandchildCue).toContain("Stabilize Steam extension pipeline");
+    expect(grandchildCue).not.toContain("todo_e8acf635da201b7a");
+
+    // 7. Single-repo PR row keeps PR #1446 on line 1, omits duplicate PR #1446 on line 2, omits redundant repo_gate, and shows concise queued merge-train
+    const prRow = dirGroup.querySelector<HTMLElement>('[data-todo="todo_pr_dup"]')!;
+    expect(prRow.querySelector("[data-testid=todo-slim-pr]")?.textContent).toBe("PR #1446");
+    expect(prRow.querySelector("[data-testid=todo-row-repo-gate]")).toBeNull();
+    const prCue = prRow.querySelector("[data-testid=todo-slim-cue]")?.textContent ?? "";
+    expect(prCue).not.toContain("1446");
+    expect(prRow.querySelector("[data-testid=todo-mergetrain-badge]")?.textContent).toBe(t("todos.slim_mergetrain_queued", { position: 3 }));
+
+    // 8. Delivered / awaiting-review task omits green ready repo_gate badge so the ask cue owns line 2
+    const deliveredRow = dirGroup.querySelector<HTMLElement>('[data-todo="todo_delivered_ready"]')!;
+    expect(deliveredRow.querySelector("[data-testid=todo-row-repo-gate]")).toBeNull();
+    expect(deliveredRow.querySelector("[data-testid=todo-ask]")?.textContent).toBe("Done: please verify results");
+
+    // 9. Clicking the open-todo button in SharedBlockersStrip selects the prerequisite todo
+    await act(async () => openBlockerBtn.click());
+    await flush();
+    expect(host.querySelector<HTMLInputElement>("[data-testid=todos-detail-column] input[type=text]")?.value).toBe(
+      "Stabilize Steam extension pipeline",
+    );
+  });
+
+  it("maintains full en/zh-Hans/ja parity for all #17938 Sub-PR 1 localization keys", async () => {
+    const [enTodos, zhTodos, jaTodos] = await Promise.all([
+      import("../i18n/locales/en/todos.json"),
+      import("../i18n/locales/zh-Hans/todos.json"),
+      import("../i18n/locales/ja/todos.json"),
+    ]);
+    const keys = [
+      "shared_blockers_region",
+      "shared_blockers_title",
+      "shared_blockers_unknown_todo",
+      "repo_gate_row_ready",
+      "repo_gate_row_blocked",
+      "repo_gate_row_pending",
+      "slim_wait_prereq",
+      "slim_wait_prereq_target",
+      "slim_wait_target",
+      "slim_wait_external",
+      "slim_wait_reply",
+      "slim_wait_reply_target",
+      "slim_wait_merge_review",
+      "slim_wait_merge_review_target",
+      "slim_wait_pr_merge",
+      "slim_wait_pr_merge_target",
+      "slim_wait_date",
+      "slim_wait_date_target",
+      "slim_wait_agent_target",
+      "slim_pr_ci_failed",
+      "slim_pr_conflicts",
+      "slim_pr_changes",
+      "slim_pr_checks_pending",
+      "slim_mergetrain_queued",
+    ] as const;
+    for (const key of keys) {
+      expect(enTodos.default[key], `en.${key}`).toBeTruthy();
+      expect(zhTodos.default[key], `zh-Hans.${key}`).toBeTruthy();
+      expect(jaTodos.default[key], `ja.${key}`).toBeTruthy();
+    }
+    expect(zhTodos.default.shared_blockers_title).toBe("公共卡点 · {count}");
+    expect(zhTodos.default.shared_blockers_region).toBe("公共卡点");
+    expect(jaTodos.default.shared_blockers_title).toBe("共通ブロッカー · {count}");
   });
 });
