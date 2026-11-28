@@ -63,7 +63,7 @@ def features():
                 (["sessions_list", "sessions_lookup"] + (["sessions_hierarchy"] if NET["hierarchy"] else []) + ["sessions_todo", "sessions_quick_filters", "sessions_just_finished", "sessions_agents_only"]) if os.environ.get("MOCK_SESSIONS_LIST") == "1" else []) + (
                 ["sessions_catalog"] if CATALOG else []) + (
                 ["sessions_side_fold"] if SIDE_FOLD else []) + (
-                ["preview"] if os.environ.get("MOCK_PREVIEW") else []) + (
+                mock_preview.features() if globals().get("preview_route") else (["preview"] if os.environ.get("MOCK_PREVIEW") else [])) + (
                 ["task_cron"] if os.environ.get("MOCK_CRON") == "1" else []) + (
                 [] if os.environ.get("MOCK_TODO_SEEN") == "off" else ["todo_seen"]) + (
                 ([] if os.environ.get("MOCK_LOOK_UPLOADS") == "off" else
