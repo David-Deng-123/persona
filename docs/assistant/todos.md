@@ -2049,13 +2049,26 @@ If a mirror times out, preparation can still fetch directly from the remote.
 The Hub gives manual mirror sync and workspace prepare requests time to finish
 those operations.
 
+Each Node lets two network Git commands run at a time across direct workspace
+preparation and managed mirror sync. Commands for the same normalized clone
+URL take turns, even if they target separate bare stores. The key ignores
+userinfo, scheme and host casing, and trailing `.git` and slashes. Git uses
+the stored clone URL for authentication and transport. Local mirror copies,
+ref reads, and worktree creation can proceed while both network slots are busy.
+
+The preparation deadline and the mirror flight's ten-minute deadline include
+queue time. The Git command gets its own budget after admission, capped by the
+remaining outer budget. A deadline while waiting for or running a workspace
+source lookup or fetch is recorded as `source_fetch_timeout` in its receipt.
+
 - **Node RPCs (`server/internal/node/repo_mirror.go`, registered via `nodeRPC`)**:
   - `repo.mirror.ensure`: initializes `~/.persona/repos/<repo_id>.git` as a bare
     mirror if missing, or refreshes it with `git fetch --prune --tags` when
     older than the requested TTL (default 5 minutes, overridable with
-    `ttl_seconds` or `force: true`). A cold build gets up to 10 minutes and
-    an incremental refresh gets up to 2 minutes. The Manager gives the RPC
-    11 minutes, including time to return the result. Per-repository single-flight
+    `ttl_seconds` or `force: true`). A cold network Git command gets up to
+    10 minutes and an incremental one gets up to 2 minutes within the shared
+    flight deadline. The Manager gives the RPC 11 minutes, including time to
+    return the result. Per-repository single-flight
     locking coalesces concurrent calls. Git runs with empty hooks
     (`core.hooksPath`) and symlink/path guards (`~/.persona/repos` is also
     protected from remote file-browsing APIs in `server/internal/node/pathguard.go`).
