@@ -154,7 +154,8 @@ While the assistant process is restarting or disconnected from hub, **receivers 
    binding falls back to an active binding under the other key. Successful delivery refreshes both known bindings,
    and `/new` clears the conversation's known bindings even if the command carries a single key. A routed
    conversation that is gone or has timed out starts fresh. Up to 500 routing keys are kept per channel in the
-   `channels` setting.
+   `channels` setting. A message keeps its routing keys from admission through delivery, including if Labs changes
+   while it waits.
 6. **Assemble content**: prepend a `<persona-context>` explaining which channel this came from, that the answer goes back there, and the format to use (prompt `prompts/channel/message.md`; the Lark bot keeps its own `bot/message.md`);
    put quoted messages and merged-forward chat records in separate `<persona-context>` blocks; images become attachments; files follow `files_in`. A mention uses `prompts/channel/mention_message.md` instead: its chat, topic and gathered context are data blocks, and the turn is explicitly public. The prompt does not disclose private context from other chats, sessions, mail or health unless the owner's request explicitly asks for the specific information. The internal per-message `public` marker also suppresses the owner's live snapshot for that input only; it never changes the main conversation's origin or later private turns.
 7. **Send**: Persona chats use `session.send` (main chat follows the model selected in Settings), `client_msg_id = <channel>-<message id>`.
@@ -315,7 +316,7 @@ if the assistant is disconnected, return `503 assistant_offline`; fields are unc
 
 ## 7. UI
 
-- **Unified web Settings** (Labs, `integrations_v2`). Open **Integrations & Extensions**, choose **Chat channels**, then open a service. Its account and binding sit beside chat delivery and sync settings. Installed plugin IM and mention channels offer a routing mode and idle timeout. Feishu has one destination picker and its own bot controls. Turning the trial off restores the separate Settings pages and retains saved choices.
+- **Unified web Settings** (`integrations_v2`, on by default). Open **Integrations & Extensions**, choose **Chat channels**, then open a service. Its account and binding sit beside chat delivery and sync settings. Installed plugin IM and mention channels offer a routing mode and idle timeout. Feishu has one destination picker and its own bot controls. Turning off **Unified Integrations & Extensions** in Labs restores the separate Settings pages and legacy routing while retaining saved choices.
 - **Legacy entry point**: Apple (iOS / iPadOS / macOS, #2195), web with the trial off, and Android (#2196) have a separate "Channels" item in Settings, before "Connectors"; the extension page no longer repeats it. Apple shows the connected count, red if any errors; hidden when hub lacks the `channels` feature.
 - **List**: each row has the channel icon (brand mark, `Theme.Brand` / the equivalent token on each client; name initial if no mark), name, bound account (or one sentence of description), and state on the right: Connected (green dot) /
   Not connected (gray) / Error (red, with a reason) / Disabled. Three sections: "Persona" (`app`: iOS, Mac, watch, Android, web, Siri, simply telling users all are available), "Connected", "Available" (market entries open extension market details).

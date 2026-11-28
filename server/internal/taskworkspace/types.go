@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/nwverse/persona/server/internal/nodeproto"
 	repository "github.com/nwverse/persona/server/internal/repositorywire"
@@ -15,6 +16,19 @@ import (
 
 const Capability = nodeproto.TaskWorkspace
 const MethodPrefix = "task.workspace."
+
+// The preparation budgets are the node contract's (nodeproto), which the hub links too.
+const (
+	GitTimeout       = nodeproto.TaskWorkspaceGitSeconds * time.Second
+	ColdFetchTimeout = nodeproto.TaskWorkspaceColdFetchSeconds * time.Second
+	RPCTimeout       = nodeproto.TaskWorkspaceRPCSeconds * time.Second
+)
+
+// PrepareTimeout budgets ref discovery and a cold fetch for each sequential
+// remote source, with time for local setup and the reply.
+func PrepareTimeout(remoteRepos int) time.Duration {
+	return time.Duration(nodeproto.TaskWorkspacePrepareSeconds(remoteRepos)) * time.Second
+}
 
 // Capabilities is the response to the read-only task.workspace.capabilities probe.
 type Capabilities = nodeproto.TaskWorkspaceCapabilities

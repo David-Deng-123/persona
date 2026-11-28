@@ -152,8 +152,14 @@ type Settings struct {
 	// TodosV2DigestWindowMinutes is an optional burst-coalescing window in minutes under todos_v2=true (#16433):
 	// 0 (default, disabled), 30, 60, or 120.
 	TodosV2DigestWindowMinutes *int `json:"todos_v2_digest_window_minutes,omitempty"`
-	// IntegrationsV2 enables the unified experimental Integrations & Extensions experience (#14802, #14805). nil is off (the default).
+	// IntegrationsV2 enables unified Integrations & Extensions (#14802). An unset preference defaults to on.
+	// An explicit false opts out.
 	IntegrationsV2 *bool `json:"integrations_v2,omitempty"`
+	// MemoryExtensionStandingBytes is how many bytes of the memory extension's standing (always-in-context) entries a
+	// standing channel carries when the extension states no budget, and the most it may state above 8192
+	// (memoryExtensionBatch.standingBudget, docs/assistant/health.md "Budgets"): 4096 (4 KB, the default when nil),
+	// 8192 (8 KB) or 16384 (16 KB). Read on every assembly, so a change applies from the next message.
+	MemoryExtensionStandingBytes *int `json:"memory_extension_standing_bytes,omitempty"`
 	// LabsSeen is the set of experiment IDs acknowledged on any client of this assistant.
 	LabsSeen []string `json:"labs_seen,omitempty"`
 	// MeetingAttendanceDefault: the role a meeting recording pre-selects on the phone (off, listener, participant;
@@ -278,6 +284,8 @@ type Settings struct {
 	// AutoSupervisionMessages. The task ledger, the owner's own questions and acceptance, permission cards and approval
 	// answers do not depend on it.
 	AutoSupervisionMode string `json:"auto_supervision_mode,omitempty"`
+	// SupervisionTriage is opt-in: eligible routine signals use the Sorting model before waking a supervisor.
+	SupervisionTriage *bool `json:"supervision_triage,omitempty"`
 	// SupervisionBatchMinutes independently batches routine supervision per final recipient, anchored at its first
 	// routine signal. Nil or 0 preserves the legacy shared gather and spacing. Immediate signals bypass the batch.
 	SupervisionBatchMinutes *int `json:"supervision_batch_minutes,omitempty"`
@@ -433,11 +441,30 @@ var (
 	todosV2PendingReviewSLAOptions = []int{0, 12, 24, 48}
 	todosV2CanWaitSLAOptions       = []int{0, 24, 48, 72}
 	todosV2DigestWindowOptions     = []int{0, 30, 60, 120}
+	// memoryExtensionStandingOptions are the standing budgets the owner may choose, in bytes: 4 KB (the default), 8 KB
+	// and 16 KB.
+	memoryExtensionStandingOptions = []int{memoryExtensionStandingDefault, 8192, memoryExtensionStandingCeiling}
 )
+
+// memoryExtensionStandingBytes is the owner's choice of the memory extension's standing budget (Settings.
+// MemoryExtensionStandingBytes); an unset or unknown value is memoryExtensionStandingDefault.
+func (v Settings) memoryExtensionStandingBytes() int {
+	if v.MemoryExtensionStandingBytes != nil && slices.Contains(memoryExtensionStandingOptions, *v.MemoryExtensionStandingBytes) {
+		return *v.MemoryExtensionStandingBytes
+	}
+	return memoryExtensionStandingDefault
+}
+
+// memoryExtensionStandingBytes is the owner's choice as saved now (settingsLastGood: a failed read keeps the last one
+// read), for each assembly of a standing channel.
+func (s *Service) memoryExtensionStandingBytes(ctx context.Context) int {
+	v, _ := s.settingsLastGood(ctx)
+	return v.memoryExtensionStandingBytes()
+}
 
 func (v Settings) workGuideOn() bool      { return v.WorkGuide != nil && *v.WorkGuide }
 func (v Settings) todosV2On() bool        { return v.TodosV2 != nil && *v.TodosV2 }
-func (v Settings) integrationsV2On() bool { return v.IntegrationsV2 != nil && *v.IntegrationsV2 }
+func (v Settings) integrationsV2On() bool { return v.IntegrationsV2 == nil || *v.IntegrationsV2 }
 
 func (v Settings) todosV2AutoSeenMode() string {
 	if slices.Contains(todosV2AutoSeenModes, v.TodosV2AutoSeen) {
@@ -482,7 +509,7 @@ func (v Settings) todosV2DigestWindowMinutes() int {
 	return todosV2DefaultDigestWindowMinutes
 }
 
-// integrationsV2On reports whether assistant.integrations_v2 is enabled (off by default).
+// integrationsV2On reports whether assistant.integrations_v2 is enabled (on by default).
 // Uses settingsLastGood so hot receive/routing paths never trigger a hub hello RPC.
 func (s *Service) integrationsV2On(ctx context.Context) bool {
 	v, _ := s.settingsLastGood(ctx)
@@ -991,6 +1018,8 @@ type assistantView struct {
 	TodosV2DigestWindowMinutes   int      `json:"todos_v2_digest_window_minutes"`
 	IntegrationsV2               bool     `json:"integrations_v2"`
 	LabsSeen                     []string `json:"labs_seen"`
+	// MemoryExtensionStandingBytes is in effect: 4096, 8192 or 16384.
+	MemoryExtensionStandingBytes int `json:"memory_extension_standing_bytes"`
 	// MeetingAttendanceDefault is in effect (off until changed).
 	MeetingAttendanceDefault      string   `json:"meeting_attendance_default"`
 	MeetingTranscriptionDefault   string   `json:"meeting_transcription_default"`
@@ -1036,6 +1065,7 @@ type assistantView struct {
 	AutoSupervisionMessages bool `json:"auto_supervision_messages"`
 	// AutoSupervisionMode is in effect: all, outcomes or off.
 	AutoSupervisionMode string `json:"auto_supervision_mode"`
+	SupervisionTriage   bool   `json:"supervision_triage"`
 }
 
 // view is GET /api/v1/assistant; withArchived lists archived conversations too (flagged `archived`). It lists the
@@ -1078,6 +1108,7 @@ func (s *Service) view(ctx context.Context, withArchived bool, space ...string) 
 		TodosV2QuietHours:            v.todosV2QuietHours(),
 		TodosV2DigestWindowMinutes:   v.todosV2DigestWindowMinutes(),
 		IntegrationsV2:               v.integrationsV2On(),
+		MemoryExtensionStandingBytes: v.memoryExtensionStandingBytes(),
 		LabsSeen:                     append([]string{}, v.LabsSeen...),
 		RecentTaskChats:              v.RecentTaskChats != nil && *v.RecentTaskChats,
 		DeliveryGate:                 deliveryGateOf(v),
@@ -1102,6 +1133,7 @@ func (s *Service) view(ctx context.Context, withArchived bool, space ...string) 
 		SupervisionBatchMinutes:      supervisionBatchMinutesOf(v),
 		AutoSupervisionMessages:      autoSupervisionOf(v),
 		AutoSupervisionMode:          supervisionModeOf(v),
+		SupervisionTriage:            v.supervisionTriageOn(),
 		NextSuggestions:              v.NextSuggestions != nil && *v.NextSuggestions}
 	if d, ok := s.device(ctx, v.MachineID); ok {
 		out.Cwd = s.spaceCwd(ctx, d, sp)

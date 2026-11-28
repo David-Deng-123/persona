@@ -71,6 +71,7 @@ type PlanTask struct {
 	// at Start, and once more at admission from the folder that actually runs, saved with the admitted Cwd; never what
 	// a tool call or an edit says.
 	Repo              string                 `json:"repo,omitempty"`
+	WriteScope        *planWriteScope        `json:"write_scope,omitempty"` // the structured task_plan declaration, kept through owner approval
 	Workspace         *TaskWorkspace         `json:"workspace,omitempty"`
 	WorkspaceResolved *TaskWorkspaceResolved `json:"workspace_resolved,omitempty"`
 	// Hub-owned identity for the default branch's preview, before a todo exists.
@@ -124,6 +125,10 @@ type PlanTask struct {
 	// and this carries every one of the entry's categories (memory_handoff.go). The hub's: set when the plan is made,
 	// never what a tool call or an edit says.
 	MemoryTopic []string `json:"memory_topic,omitempty"`
+	// ConfirmOutbound records the plan's own exit-policy decision, including an unknown information use that has no
+	// MemoryTopic. Nil means a legacy plan whose decision cannot be reconstructed without calling the tagging model again.
+	// The hub sets it when the plan is made; a tool call or a card edit cannot supply it.
+	ConfirmOutbound *bool `json:"confirm_outbound,omitempty"`
 	// CloseTabOnAccept is set only by the owner's Start request.
 	CloseTabOnAccept   bool               `json:"close_tab_on_accept,omitempty"`
 	TerminalTarget     taskTerminalTarget `json:"terminal_target,omitzero"`
@@ -309,6 +314,9 @@ type TaskPlan struct {
 	// Suggestion: the owner started this kind of task three times; the open plan's card offers to start it directly
 	// from now on (rule_suggest.go, #4929). Filled in where the apps read the plan, never kept with it.
 	Suggestion *proto.RuleSuggestion `json:"suggestion,omitempty"`
+	// Start: why an open plan waits and which tasks have a useful trust rule to remember. Computed where the apps read
+	// the plan, never stored; nil on a started or dismissed plan. Hubs from before #17853 omit it.
+	Start *assistantwire.PlanStartView `json:"start,omitempty"`
 }
 
 const (
@@ -413,8 +421,9 @@ type tasksState struct {
 	// planEdits: a plan's lock, by its id, while one of its started tasks changes (patchPlanTask; kept only while held or
 	// waited on, as a card's). The tasks are one blob that movePlan writes whole, so two tasks changing at once (their
 	// starts failing together) would each write back the other's old fields.
-	planEdits cardLocks
-	reviews   cardLocks
+	planEdits   cardLocks
+	reviews     cardLocks
+	writeScopes map[string]plannedWriteAssignment // by open task ID, guarded by mu
 	// trustMu serializes the read-modify-writes of tasks.trust (trustKinds, forgetTrust), so that two plans
 	// remembered at once, or a forget racing a remember, do not drop each other's kinds.
 	trustMu sync.Mutex
@@ -546,6 +555,10 @@ func (s *Service) movePlan(ctx context.Context, p *TaskPlan, from string) (moved
 	return st.UpdateTaskPlan(ctx, p.ID, from, p.State, raw, p.UpdatedAt)
 }
 
+func (s *Service) publishTaskPlan(ctx context.Context, p *TaskPlan) {
+	s.broadcastEvent(ctx, assistantwire.TaskPlanEvent[*TaskPlan]{Type: assistantwire.TaskPlanChanged, Plan: s.planWithSpace(ctx, p)})
+}
+
 // patchPlanTask changes task i of started plan planID with change, writes the plan back and tells the apps. The plan
 // stays locked from reading it until the apps are told, so what its other tasks record meanwhile stays, and the apps get
 // the plan in the order it was written (they keep the last one they got). Telling them is a one-way broadcast, so the
@@ -569,7 +582,7 @@ func (s *Service) patchPlanTask(ctx context.Context, planID string, i int, chang
 			return errPlanNotFound
 		}
 		if err == nil && row != nil {
-			s.event(ctx, map[string]any{"type": "task_plan", "plan": s.planWithSpace(ctx, planFromRow(*row))})
+			s.publishTaskPlan(ctx, planFromRow(*row))
 		}
 		return err
 	}
@@ -584,7 +597,7 @@ func (s *Service) patchPlanTask(ctx context.Context, planID string, i int, chang
 	if ok, err := s.movePlan(ctx, p, planStarted); err != nil || !ok {
 		return err
 	}
-	s.event(ctx, map[string]any{"type": "task_plan", "plan": s.planWithSpace(ctx, p)})
+	s.publishTaskPlan(ctx, p)
 	return nil
 }
 
@@ -652,7 +665,7 @@ func (s *Service) appendFeedItem(ctx context.Context, id string, once bool, conv
 			return FeedItem{}, false, err
 		}
 	}
-	s.event(ctx, map[string]any{"type": "assistant_feed", "conversation": conversation, "item": it})
+	s.event(ctx, map[string]any{"type": "assistant_feed", "conversation": conversation, "item": s.presentPlanFeed(ctx, it)})
 	if kind == feedReceipt {
 		s.interruptsSoon() // a task went on after being cut off (interruptions.go)
 	}
@@ -660,6 +673,26 @@ func (s *Service) appendFeedItem(ctx context.Context, id string, once bool, conv
 }
 
 const feedPage = 500
+
+// presentPlanFeed refreshes the duplicate plan in a feed body at the same read/event boundary as the plans map. Storage
+// keeps the body without TaskPlan.Start, so a restart or a later trust change cannot resurrect a stale presentation.
+func (s *Service) presentPlanFeed(ctx context.Context, it FeedItem) FeedItem {
+	if it.Kind != feedPlan || len(it.Body) == 0 {
+		return it
+	}
+	var body struct {
+		Plan *TaskPlan `json:"plan"`
+	}
+	if err := json.Unmarshal(it.Body, &body); err != nil || body.Plan == nil {
+		return it
+	}
+	raw, err := json.Marshal(map[string]any{"plan": s.planWithSpace(ctx, body.Plan)})
+	if err != nil {
+		return it
+	}
+	it.Body = raw
+	return it
+}
 
 // feedItems is a conversation's items after since, oldest first (with the message cards sent after since: the client
 // has them, not that they went out), without the plans they name: for readers that look only at the items.
@@ -669,7 +702,7 @@ func (s *Service) feedItems(ctx context.Context, conversation string, since time
 		return nil, err
 	}
 	for i, item := range items {
-		items[i] = readTaskNotice(item)
+		items[i] = s.presentPlanFeed(ctx, readTaskNotice(item))
 	}
 	s.settleCards(ctx, items)
 	s.fileCards(ctx, items)
@@ -1209,7 +1242,7 @@ func (s *Service) taskRoutes() {
 			planErr(w, err)
 			return
 		}
-		apierr.WriteJSON(w, map[string]any{"plan": s.planWithSuggestion(r.Context(), p, s.requestLang(r))})
+		apierr.WriteJSON(w, map[string]any{"plan": s.planWithSpace(r.Context(), s.planWithSuggestion(r.Context(), p, s.requestLang(r)))})
 	})
 	s.handle("POST /api/v1/task-plans/{id}/start", func(w http.ResponseWriter, r *http.Request) {
 		if !fullRole(r) {
@@ -1347,6 +1380,11 @@ func (s *Service) taskRoutes() {
 		var shown func(TaskCard) bool
 		if ext {
 			items, plans, shown = s.extensionFeed(r.Context(), items, plans)
+		}
+		if len(plans) > 0 {
+			// Older plans can still carry the error of a to-do closed since.
+			// Load the live to-dos before projecting those plans for clients.
+			_ = s.ensureTodosLoaded(r.Context())
 		}
 		for id, p := range plans {
 			plans[id] = s.planWithSpace(r.Context(), s.planWithSuggestion(r.Context(), p, s.requestLang(r)))

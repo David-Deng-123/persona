@@ -138,7 +138,12 @@ type Machine struct {
 	reconnectGrace             time.Duration // shown as it was this long after its node disconnected (warm.go; tests: shorter)
 	reloadUntil                time.Time     // a resident announced exec; never extends display/reconnect grace
 	storeWait                  time.Duration // how long a node event waits on the store (nodeStoreWait; tests: shorter)
-	engineMu                   sync.Mutex
+	// stateWriterOnce/stateWriter move state.put Store writes onto one ordered writer goroutine per Machine
+	// (machine_state_writer.go), so a stalled Store cannot hold the node's rpc read loop.
+	stateWriterOnce sync.Once
+	stateWriter     *nodeStateWriter
+	stateWriterMu   sync.Mutex // guards stateWriter for state.load, which reads it off the read loop
+	engineMu        sync.Mutex
 	// eventRetire admits an ordinary event callback or retires its connection; never lets a retired event follow the replacement.
 	eventRetire sync.Mutex
 	link        *mgrLink      // kind link: the link Persona Link keeps open, nil while there is none
@@ -261,6 +266,7 @@ func (m *Machine) snapshot() proto.Machine {
 	}
 	clipboardOn := d.clipboardOn(m.cfg.ID)
 	fileTransferOn := d.fileTransferOn(m.cfg.ID)
+	orcaChats := orcaChatStartsField(choice, d.orcaChatStartsOn(m.cfg.ID))
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	engines := []proto.Engine{} // what the node found: none while offline
@@ -320,10 +326,11 @@ func (m *Machine) snapshot() proto.Machine {
 		Transport: m.via, TailcatPath: m.path, Tailcat: m.cfg.TailcatAddr != "",
 		Engine: engine, Engines: engines, EngineHosts: choice.Hosts, EngineDefault: choice.Default,
 		EngineSuggested: suggested, EngineSetsUnsupported: setsUnsupported, Link: link, System: d.metrics.system(m.cfg.ID),
-		Clipboard:    m.clipboardStateLocked(clipboardOn),
-		FileTransfer: m.fileTransferState(fileTransferOn),
-		ClaudePlugin: m.info.ClaudePlugin,
-		LinkSwitch:   linkSwitch,
+		Clipboard:      m.clipboardStateLocked(clipboardOn),
+		FileTransfer:   m.fileTransferState(fileTransferOn),
+		OrcaChatStarts: orcaChats,
+		ClaudePlugin:   m.info.ClaudePlugin,
+		LinkSwitch:     linkSwitch,
 	}
 }
 
@@ -645,6 +652,17 @@ func (m *Machine) callOnce(ctx context.Context, method string, params any, out a
 			(proto.FasterSpeed(strings.TrimSpace(fields.Speed)) && !nodeHas(info, nodeproto.SessionStartSpeed)) {
 			// An older node would drop the explicit, billable choice and start at the launcher's own speed.
 			return &rpc.Error{Code: proto.CodeNodeOutdated, Message: i18n.T(i18n.From(ctx), "hub-machine.node_no_session_start_speed")}
+		}
+	}
+	if devicewire.IsSessionStart(method) && !nodeHas(info, nodeproto.SessionStartModelAliases) {
+		raw, _ := json.Marshal(params)
+		var fields struct {
+			ModelAliases map[string]string `json:"model_aliases"`
+		}
+		_ = json.Unmarshal(raw, &fields)
+		if len(fields.ModelAliases) != 0 {
+			// An older node would drop the per-start aliases and run the launcher's models.
+			return &rpc.Error{Code: proto.CodeNodeOutdated, Message: i18n.T(i18n.From(ctx), "hub-machine.node_no_model_aliases")}
 		}
 	}
 	if devicewire.IsSessionStart(method) && !nodeHas(info, nodeproto.StartGoal) {
@@ -1068,24 +1086,12 @@ func (m *Machine) onEvent(event string, params json.RawMessage) {
 			devicewire.ShareCreationLog(m.d.logf, "", "manager_persist", "invalid_state")
 			return
 		}
-		received, committed := "received_without_receipt", "committed_without_receipt"
+		received := "received_without_receipt"
 		if p.State.CreationID != "" && p.State.Incarnation != "" {
-			received, committed = "received_with_receipt", "committed_with_receipt"
+			received = "received_with_receipt"
 		}
 		devicewire.ShareCreationLog(m.d.logf, p.SessionID, "manager_persist", received)
-		if s, ok := m.d.opts.Store.(nodeStateStore); ok {
-			// Written here, in order (the latest put of a session wins), but bounded: a store that does not answer must
-			// not hold the node's read loop, and with it every reply and event of the node (nodeStoreWait).
-			ctx, cancel := m.storeCtx()
-			if err := s.PutNodeSession(ctx, m.cfg.ID, p.SessionID, p.State); err != nil {
-				devicewire.ShareCreationLog(m.d.logf, p.SessionID, "manager_persist", "store_error")
-			} else {
-				devicewire.ShareCreationLog(m.d.logf, p.SessionID, "manager_persist", committed)
-			}
-			cancel()
-		} else {
-			devicewire.ShareCreationLog(m.d.logf, p.SessionID, "manager_persist", "store_unavailable")
-		}
+		m.persistNodeState(p.SessionID, p.State)
 		return // the manager's alone
 	case proto.EventModeSet:
 		m.onModeSet(params)
@@ -1095,6 +1101,9 @@ func (m *Machine) onEvent(event string, params json.RawMessage) {
 		return // the manager's alone
 	case "claude.dirs":
 		m.rememberClaudeDirs(params)
+	case proto.EventEnginesChanged: // what the node found of its engines changed since node.info (node/orcaengine.go)
+		m.onEnginesChanged(params)
+		return
 	case "claude.plugin": // the Persona plugin for Claude Code there changed (node/claudeplugin.go)
 		var st proto.ClaudePlugin
 		if json.Unmarshal(params, &st) == nil && st.State != "" {
@@ -1159,6 +1168,7 @@ func (m *Machine) stopped() bool {
 func (m *Machine) onRequest(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	switch method {
 	case "state.load":
+		m.awaitQueuedStates(ctx) // read what the node put before it (machine_state_writer.go, #17974)
 		out := map[string]db.NodeSession{}
 		if s, ok := m.d.opts.Store.(nodeStateStore); ok {
 			var err error

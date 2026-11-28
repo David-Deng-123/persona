@@ -57,8 +57,8 @@ import { closeHelp, useHelpOpen } from "./lib/shortcut-help";
 import { closePalette, openPalette, usePalette } from "./lib/palette";
 import { sidebarRail, sidebarShown, useLayout } from "./lib/layout";
 import { useMacChromeMode } from "./lib/mac-chrome";
-import { useSidebarTransition, type SidebarMode } from "./lib/sidebar-transition";
-import { MacBayTools, MacMainContour, type MacContourDriver } from "./views/MacChrome";
+import { useSidebarTransition, type MacContourDriver, type SidebarMode } from "./lib/sidebar-transition";
+import { MacBayTools, MacMainContour } from "./views/MacChrome";
 import { SIDEBAR_LABEL, useShortcuts } from "./lib/use-shortcuts";
 import { Sidebar, SidebarRail } from "./views/Sidebar";
 import { SidebarResize } from "./views/SidebarResize";
@@ -735,7 +735,7 @@ function Shell() {
             )}
             style={leavingSidebar === "expanded" || (sidebarAnimating && sidebarMode === "expanded") ? { width: "var(--sidebar-w, 284px)" } : undefined}
           >
-            <Sidebar active={narrow ? drawer : sidebarMode === "expanded"} route={route} onSearch={searchFromSidebar} onNewAgent={openNewAgent} onNavigate={close} workspaceActions={workspaceActions} hideCollapse={macWindowed} />
+            <Sidebar active={narrow ? drawer : sidebarMode === "expanded" || leavingSidebar === "expanded"} route={route} onSearch={searchFromSidebar} onNewAgent={openNewAgent} onNavigate={close} workspaceActions={workspaceActions} hideCollapse={macWindowed} />
           </div>
         )}
         {!narrow && (sidebarMode === "rail" || leavingSidebar === "rail") && (

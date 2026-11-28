@@ -44,7 +44,6 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 	}
 	var a struct{ Tasks []PlanTask }
 	var contracts []taskContract
-	var plannedScopes []plannedWriteScopeInput
 	lead := "" // optional initial leader assignment; omission keeps the planning lead or main
 	if scope != nil {
 		tasks, err := scope.workerTasks(args)
@@ -52,7 +51,6 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 			return "", err
 		}
 		a.Tasks = tasks
-		plannedScopes = make([]plannedWriteScopeInput, len(tasks))
 	} else {
 		var in struct {
 			Tasks      []planTaskIn `json:"tasks"`
@@ -65,6 +63,7 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 		if lead, err = s.planSupervisor(ctx, sessionID, in.Supervisor); err != nil {
 			return "", err
 		}
+		todosV2 := s.settings(ctx).todosV2On()
 		for i, t := range in.Tasks {
 			contract, err := t.validatedContract()
 			if err != nil {
@@ -74,12 +73,11 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 			t.PlanTask.ReuseTodo = strings.TrimSpace(t.TodoID)
 			t.PlanTask.Parent = "" // the hub's, set only for a task leader's workers
 			t.PlanTask.Supervisor = lead
+			t.PlanTask.WriteScope = nil
+			if todosV2 && (len(t.WritePrefixes) > 0 || len(t.ChangedFiles) > 0) {
+				t.PlanTask.WriteScope = &planWriteScope{WritePrefixes: t.WritePrefixes, ChangedFiles: t.ChangedFiles, ForceParallel: t.ForceParallel}
+			}
 			a.Tasks = append(a.Tasks, t.PlanTask)
-			plannedScopes = append(plannedScopes, plannedWriteScopeInput{
-				WritePrefixes: t.WritePrefixes,
-				ChangedFiles:  t.ChangedFiles,
-				ForceParallel: t.ForceParallel,
-			})
 		}
 	}
 	if len(a.Tasks) == 0 {
@@ -122,6 +120,7 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 		t.WorkspaceResolved, t.ReservedTodoID, t.WorkspaceInferred = nil, "", false
 		t.OwnerStarted = false // the hub's: only the owner's Start on the card sets it (startPlan)
 		t.MemoryTopic = nil    // the hub's: the plan's own confirmation decision sets it (below)
+		t.ConfirmOutbound = nil
 		t.RequestGate, t.Queue = "", nil
 		t.CloseTabOnAccept, t.TerminalTarget, t.TerminalCleanup = false, taskTerminalTarget{}, ""
 		t.TerminalAuthorized = false
@@ -246,6 +245,9 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 			t.AttachFrom = machine
 		}
 		if t.Machine == "" {
+			if s.autoTaskUsesAssistantWorkspace(ctx, t) {
+				return "", fmt.Errorf("task %d: %w", i+1, i18n.Err("rpc-errors.agent_assistant_workspace"))
+			}
 			if _, err := validateStartSpeed(map[string]any{"speed": t.Speed}); err != nil {
 				return "", fmt.Errorf("task %d: %w", i+1, err)
 			}
@@ -475,6 +477,12 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 				a.Tasks[i].MemoryTopic = slices.Clone(u.Categories)
 			}
 		}
+		// Keep the exact outbound wait, including u.Known=false with no categories. Reads must not invoke the model again
+		// just to decide whether the card's trust offer could remove this gate.
+		confirmOutbound := policy.ConfirmOutbound
+		for i := range a.Tasks {
+			a.Tasks[i].ConfirmOutbound = &confirmOutbound
+		}
 	}
 	var round Task
 	var inRound bool
@@ -504,10 +512,7 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 	// Same-directory active agents the conversation already supervises: surfaced with exact ids even when the titles
 	// are worded too differently for planDuplicates (#13192). A hint, never a refusal.
 	reuse := reuseHintText("task_plan", s.planReuseHints(ctx, sessionID, a.Tasks))
-	for i := range a.Tasks {
-		plannedScopes[i].Task = a.Tasks[i]
-	}
-	conflictHints := s.planWriteScopeConflicts(ctx, plannedScopes)
+	conflictHints := s.planWriteScopeConflicts(ctx, a.Tasks)
 	now := time.Now().UTC()
 	p := &TaskPlan{ID: "plan_" + randomHex(6), Conversation: sessionID, Tasks: a.Tasks, State: planOpen,
 		CreatedAt: now, UpdatedAt: now}
@@ -515,9 +520,12 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 		return "", err
 	}
 	// The plan goes in the item's body too: a client that missed the task_plan event (or raced it) still draws the
-	// card from the conversation itself.
+	// card from the conversation itself. Keep its read-time Start presentation out of storage; presentPlanFeed adds it back.
 	if scope == nil {
-		if _, err := s.appendFeed(ctx, sessionID, feedPlan, p.ID, map[string]any{"plan": s.planWithSpace(ctx, p)}); err != nil {
+		presented := s.planWithSpace(ctx, p)
+		stored := *presented
+		stored.Start = nil
+		if _, err := s.appendFeed(ctx, sessionID, feedPlan, p.ID, map[string]any{"plan": &stored}); err != nil {
 			s.logf("task plan %s: feed: %v", p.ID, err)
 		}
 	}
@@ -528,7 +536,6 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 		if err != nil {
 			return "", err
 		}
-		s.rememberPlannedWriteScopes(ctx, started.Tasks, plannedScopes)
 		var b strings.Builder
 		fmt.Fprintf(&b, "Queued %d worker(s) beneath your task %s for dispatch:\n", len(started.Tasks), scope.task.ID)
 		for _, t := range started.Tasks {
@@ -620,7 +627,6 @@ func (s *Service) taskPlanFrom(ctx context.Context, machine, sessionID string, a
 	if err != nil {
 		return "", err
 	}
-	s.rememberPlannedWriteScopes(ctx, started.Tasks, plannedScopes)
 	var b strings.Builder
 	supervisor := ""
 	fmt.Fprintf(&b, "Queued %d task(s) for dispatch without asking (plan %s):\n", len(started.Tasks), started.ID)

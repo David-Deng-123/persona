@@ -37,6 +37,7 @@ import {
   type TaskPlan,
   type TodayBody,
 } from "../../lib/feed";
+import { parsePlanStartReason } from "../../lib/plan-start-wire";
 import { backgroundWorkLine, type BackgroundWork } from "../../lib/background-work";
 import { acceptedAtRest, awaitsReview, dockAgents, type DockAgent, isRemovable, mostUrgentAgent, openAsk, orphanedLine, personalVerificationAsk, stoppedReason, taskNow, todoStatus, todoSupervisorLabel, TODO_STATUS_INFO, updateTodo, waitingLine, type SessionLookup, type Todo, type TodoStatus } from "../../lib/todos";
 import { hasActiveAgentWork } from "../../lib/todo-triage";
@@ -69,7 +70,7 @@ const NeedsYouPart = lazy(() => import("./TaskDecision"));
 const ruleLine = (of: RuleCard) => (of.suggestion || underCard.made?.has(of.id!)) && <Suspense fallback={null}><NeedsYouPart rule={of} /></Suspense>;
 underCard.line = ruleLine;
 import { SentLine } from "./Sent";
-import { feedWake, HandoffCard, HandoffCards, TASK_LINE_SLACK_MS, taskHandoffs } from "./Handoff";
+import { feedWake, HandoffCard, HandoffCards, itemPlan, planTaskTodo, TASK_LINE_SLACK_MS, taskHandoffs } from "./Handoff";
 import { acceptanceStands, latestReview, parkedLine, progressLine, reviewState } from "../../lib/supervision";
 import { isLegacyCodexRouteNotice } from "../../lib/compatibility";
 import { namedLauncher, providerIdNote, providerTitle, useProviderNames } from "../../lib/provider-names";
@@ -268,6 +269,14 @@ export function rememberScope(tasks: PlanTask[], machines: Machine[]): string {
   return places.length ? t("assistant-tasks.plan_remember", { places: formatList(places) }) : "";
 }
 
+/** A current hub names the uncovered writable tasks; an unknown gate fails closed. No start field means an older hub. */
+function rememberTasks(plan: TaskPlan): PlanTask[] {
+  if (!plan.start) return plan.tasks;
+  if (parsePlanStartReason(plan.start.reason) !== "start_authorization") return [];
+  const offered = new Set(plan.start.remember ?? []);
+  return plan.tasks.filter((_, index) => offered.has(index));
+}
+
 /** The scheduled task whose own run planned this (#8045), named for the card's "Let … start these by itself"; null for
  *  every other plan, which the card draws as before. */
 export function planSchedule(plan: TaskPlan): { id: string; name: string } | null {
@@ -306,9 +315,10 @@ export function PlanCard({ plan }: { plan: TaskPlan }) {
   // opens with it (so a task moved there to a computer that can has it again), and Start sends it, off where it can't
   const ultracode = plan.tasks.map((task, i) => ultraChoice[i] ?? task.ultracode === true);
   const editedPlan = { ...plan, tasks: plan.tasks.map((task, i) => workspaceChoice[i] === undefined ? task : { ...task, workspace: workspaceChoice[i], workspace_resolved: undefined }) };
-  const scope = rememberScope(editedPlan.tasks, machines);
-  // offered where "Start these directly" is: a plan of only read-only tasks starts without asking anyway
-  const schedule = scope ? planSchedule(plan) : null;
+  const scope = rememberScope(rememberTasks(editedPlan), machines);
+  const rememberStart = remember && scope !== "";
+  // A hard start gate withdraws only tasks.trust; the scheduled task's independent grant still covers every writable task.
+  const schedule = rememberScope(editedPlan.tasks, machines) ? planSchedule(plan) : null;
   const grant = Boolean(schedule) && scheduleGrant;
   const startEdits = () => {
     const edits = planUltracodeToSend(plan, ultracode, ultracodeBlockedNow) ?? plan.tasks.map(() => ({}));
@@ -341,7 +351,7 @@ export function PlanCard({ plan }: { plan: TaskPlan }) {
       {/* Start stays in reach (#3822): a card taller than the tray it scrolls in (several tasks, an opened brief) keeps
           its buttons at the tray's bottom edge; a card that fits looks as it did (the padding it takes it gives back) */}
       <div data-plan-actions className="sticky bottom-0 z-[1] -mx-4 -mt-2 -mb-4 flex gap-2 rounded-b-card bg-surface px-4 pt-2 pb-4">
-        <Button tone="accent" busy={busy} onClick={() => run(() => startPlan(plan, remember, startEdits(), grant))} className="flex-1">
+        <Button tone="accent" busy={busy} onClick={() => run(() => startPlan(plan, rememberStart, startEdits(), grant))} className="flex-1">
           {plan.tasks.length > 1 ? t("assistant-tasks.plan_start_n", { count: plan.tasks.length }) : t("assistant-tasks.plan_start")}
         </Button>
         <Button disabled={busy} onClick={() => setEditing(true)}>
@@ -359,7 +369,7 @@ export function PlanCard({ plan }: { plan: TaskPlan }) {
           onClose={() => setEditing(false)}
           onStart={(edits) => {
             setEditing(false);
-            void run(() => startPlan(plan, remember, edits, grant));
+            void run(() => startPlan(plan, rememberStart, edits, grant));
           }}
         />
       </Suspense>}
@@ -462,12 +472,6 @@ function PlanTaskRow({ n, task, numbered, ultra, busy, onUltra }: { n: number; t
 
 // ── the hub's lines ──
 
-/** The plan a `plan` item carries in its body (the hub writes it there with the item), when it is one of this item's. */
-function itemPlan(item: FeedItem): TaskPlan | undefined {
-  const p = item.body?.plan as TaskPlan | undefined;
-  return p && typeof p === "object" && p.id === item.ref && Array.isArray(p.tasks) ? p : undefined;
-}
-
 // Memoized: the chat re-renders on every streamed item and session push, while an item keeps its identity until its body
 // changes (mergeInto); the plan, todo and "Later" it shows come through its own selectors.
 export const FeedLineView = memo(function FeedLineView({ item, simplified = false }: { item: FeedItem; simplified?: boolean }) {
@@ -490,7 +494,7 @@ export const FeedLineView = memo(function FeedLineView({ item, simplified = fals
     if (item.kind === "plan") {
       const shown = plan ?? itemPlan(item);
       if (!shown) return null;
-      return shown.state === "started" ? <PlanHandoffs plan={shown} since={item.at} /> : <PlanCard plan={shown} />;
+      return shown.state === "started" ? <PlanHandoffs plan={shown} since={item.at} groupKey={item.id} /> : <PlanCard plan={shown} />;
     }
     if (item.kind === "task") return planned ? null : <TaskHandoffs item={item} />;
     if (item.kind === "message" && !cardSent(item) && !cardFiled(item)) return null;
@@ -801,7 +805,7 @@ const EMPTY_CARDS: TaskCardMetadata[] = [];
 /** A started plan's tasks in the conversation (#3700, #5096): a hand-off card for each Agent they started (one per task
  *  while its Agent is starting, or says why it did not start), in plan order; live to-do titles over the plan's. `since`:
  *  the plan line's time, so each card keeps the Agents this plan started (#11854). */
-function PlanHandoffs({ plan, since }: { plan: TaskPlan; since?: string }) {
+function PlanHandoffs({ plan, since, groupKey }: { plan: TaskPlan; since?: string; groupKey?: string }) {
   const plans = useFeed((s) => s.plans);
   const handoffs = useStoreRows((s) =>
     plan.tasks.flatMap((task, i) => {
@@ -811,22 +815,7 @@ function PlanHandoffs({ plan, since }: { plan: TaskPlan; since?: string }) {
       return taskHandoffs(id ? s.todos.find((x) => x.id === id) : undefined, { key: `${plan.id}/${i}`, title: task.title, error: task.error, todoId: id, superseded }, task.continues ? "continuation" : "created", plans, s.todosLoaded, since);
     }),
   );
-  return <HandoffCards handoffs={handoffs} />;
-}
-
-/** The to-do plan task i ran on: its todo_id, or, once a later plan continued that to-do and cleared it (#11854), the
- *  one it continued or reused, else the one only this task can have made (the to-do keeps the plan it came from). A
- *  task that failed to start keeps none: its card says why. */
-function planTaskTodo(plan: TaskPlan, i: number, todos: Todo[]): string | undefined {
-  const task = plan.tasks[i];
-  if (!task) return undefined;
-  if (task.todo_id) return task.todo_id;
-  if (task.error || plan.state !== "started") return undefined;
-  if (task.continues || task.reuse_todo) return task.continues || task.reuse_todo;
-  const bare = plan.tasks.filter((x) => !x.todo_id && !x.error && !x.continues && !x.reuse_todo);
-  const held = new Set(plan.tasks.map((x) => x.todo_id || x.continues || x.reuse_todo).filter(Boolean));
-  const made = todos.filter((x) => x.plan_id === plan.id && !held.has(x.id));
-  return bare.length === 1 && made.length === 1 ? made[0]!.id : undefined;
+  return <HandoffCards handoffs={handoffs} groupKey={groupKey ?? plan.id} />;
 }
 
 /** A task the conversation dispatched on its own (agent_start), or one made of an Agent already running
@@ -835,7 +824,7 @@ function TaskHandoffs({ item }: { item: FeedItem }) {
   const plans = useFeed((s) => s.plans);
   const wake = feedWake(field(item, "wake"));
   const handoffs = useStoreRows((s) => (item.ref ? taskHandoffs(s.todos.find((x) => x.id === item.ref), { key: item.id, title: "", todoId: item.ref }, wake, plans, s.todosLoaded, item.at, TASK_LINE_SLACK_MS) : []));
-  return <HandoffCards handoffs={handoffs} />;
+  return <HandoffCards handoffs={handoffs} groupKey={item.id} />;
 }
 
 /** One slot, one row: live task/session state wins over historical feed metadata. `fresh`: a Finished row the owner has

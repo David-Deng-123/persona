@@ -14,6 +14,7 @@ import (
 	"github.com/nwverse/persona/server/internal/extension"
 	"github.com/nwverse/persona/server/internal/extension/host"
 	"github.com/nwverse/persona/server/internal/i18n"
+	"github.com/nwverse/persona/server/internal/modapi"
 )
 
 // The built-in voice extension, `personad voice` (docs/extensions/extensions.md "Built-in voice extension", docs/assistant/voice.md
@@ -31,12 +32,14 @@ const voiceExtensionID = "voice"
 // voiceSecretKey is the secret holding the settings' upstream's key, sent to it as Authorization: Bearer.
 const voiceSecretKey = "key"
 
-// voiceConfig is the settings form: one upstream (models custom/<model>) and how the model talks. ssh, key_file,
-// key_command, an explicit tools and more upstreams are hub.json's only: key_command runs a command on the hub's
-// machine. The form's upstream declares the function tools on its own (the extension's Provider.Tools unset, #1420).
-const voiceConfig = `{
-  "type": "object",
-  "properties": {
+// voiceTTSSecretKey is the optional secret holding the streaming TTS endpoint's key, sent only to tts_url as Authorization: Bearer.
+const voiceTTSSecretKey = "tts_key"
+
+// voiceBaseProperties are the settings form's upstream and archive fields (kept in order before the TTS fields):
+// one upstream (models custom/<model>) and how the model talks. ssh, key_file, key_command, an explicit tools and more
+// upstreams are hub.json's only: key_command runs a command on the hub's machine. The form's upstream declares the
+// function tools on its own (the extension's Provider.Tools unset, #1420).
+const voiceBaseProperties = `
     "url": {"type": "string", "title": "服务地址", "description": "GPT-Live 兼容的会话地址，wss://<主机>/v1/live；ws:// 只用于内网，Key 会明文传输。换了主机，设置的 Key 会被清掉", "pattern": "^wss?://[^/?#\\s]+"},
     "name": {"type": "string", "title": "名字", "description": "有几个服务时显示在模型名后面", "default": "GPT-Live"},
     "dialect": {"type": "string", "title": "协议", "oneOf": [{"const": "live", "title": "GPT-Live"}, {"const": "codex", "title": "Codex（gpt-live-1-codex）"}, {"const": "realtime", "title": "OpenAI Realtime（gpt-realtime）"}], "default": "live"},
@@ -46,9 +49,66 @@ const voiceConfig = `{
     "owner": {"type": "string", "title": "语音里怎么称呼你"},
     "notes": {"type": "string", "title": "给语音助手的补充说明"},
     "archive_machine": {"type": "string", "format": "machine", "title": "通话存档到哪台电脑", "description": "选一台电脑：每通电话挂断后，两边说的话按先后、带时间写成一份 Markdown 存到那台电脑上；hub 不落盘。不选不存"},
-    "archive_dir": {"type": "string", "title": "存档目录", "description": "那台电脑上的目录，~/ 开头或绝对路径；空着是 ~/PersonaCalls", "pattern": "^(~/|/)"}
-  }
-}`
+    "archive_dir": {"type": "string", "title": "存档目录", "description": "那台电脑上的目录，~/ 开头或绝对路径；空着是 ~/PersonaCalls", "pattern": "^(~/|/)"}`
+
+// voiceConfigSchema builds the built-in voice extension's settings form schema, appending the localized TTS endpoint
+// properties in fixed order (#17843).
+func voiceConfigSchema() json.RawMessage {
+	t := func(key string) string { return i18n.T(i18n.En, "hub-voice_extension.manifest_"+key) }
+	type field = map[string]any
+	ttsURL, _ := json.Marshal(field{
+		"type":        "string",
+		"title":       t("tts_url_title"),
+		"description": t("tts_url_description"),
+		"pattern":     `^https?://[^/?#@\s]+(/[^?#\s]*)?$`,
+	})
+	ttsModel, _ := json.Marshal(field{
+		"type":        "string",
+		"title":       t("tts_model_title"),
+		"description": t("tts_model_description"),
+		"maxLength":   128,
+		"pattern":     `^\S+$`,
+	})
+	ttsDefaultVoice, _ := json.Marshal(field{
+		"type":        "string",
+		"title":       t("tts_default_voice_title"),
+		"description": t("tts_default_voice_description"),
+		"pattern":     `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`,
+	})
+	ttsSampleRate, _ := json.Marshal(field{
+		"type":        "integer",
+		"title":       t("tts_sample_rate_title"),
+		"description": t("tts_sample_rate_description"),
+		"minimum":     8000,
+		"maximum":     48000,
+	})
+	return json.RawMessage(`{"type":"object","properties":{` + voiceBaseProperties +
+		`,"tts_url":` + string(ttsURL) +
+		`,"tts_model":` + string(ttsModel) +
+		`,"tts_default_voice":` + string(ttsDefaultVoice) +
+		`,"tts_sample_rate":` + string(ttsSampleRate) + `}}`)
+}
+
+// voiceTranslations translates the localized manifest fields (TTS settings and tts_key) into zh-Hans and ja; English
+// lives in voiceManifest itself.
+func voiceTranslations() extension.Translations {
+	out := extension.Translations{}
+	for _, l := range []i18n.Lang{i18n.ZhHans, i18n.Ja} {
+		t := func(key string) string { return i18n.T(l, "hub-voice_extension.manifest_"+key) }
+		out[l] = &extension.Translation{
+			Configuration: map[string]*extension.FieldText{
+				"tts_url":           {Title: t("tts_url_title"), Description: t("tts_url_description")},
+				"tts_model":         {Title: t("tts_model_title"), Description: t("tts_model_description")},
+				"tts_default_voice": {Title: t("tts_default_voice_title"), Description: t("tts_default_voice_description")},
+				"tts_sample_rate":   {Title: t("tts_sample_rate_title"), Description: t("tts_sample_rate_description")},
+			},
+			Secrets: map[string]*extension.SecretText{
+				voiceTTSSecretKey: {Title: t("tts_key_title"), Description: t("tts_key_description")},
+			},
+		}
+	}
+	return out
+}
 
 // voiceManifest is the built-in voice extension under id, named name (hub.json's entry's, or the Chinese for "Realtime
 // voice").
@@ -60,14 +120,18 @@ func voiceManifest(h *Manager, voice builtinext.Voice, id, name string) *extensi
 	// Meeting transcription on the hub (docs/assistant/meeting-minutes.md "The built-in adapter"), with the same
 	// upstream and key: the manager dials it, never the apps.
 	transcription, _ := json.Marshal([]extension.TranscriptionItem{{ID: voice.TranscriptionContribution, Name: "GPT-Live"}})
+	t := func(key string) string { return i18n.T(i18n.En, "hub-voice_extension.manifest_"+key) }
 	return &extension.Manifest{ManifestVersion: extension.ManifestVersion, ID: id, Name: name, Version: h.version,
 		Description:      "在 App 里和 Persona 实时语音对话，语音来自 GPT-Live 兼容的实时服务。填服务地址和 Key 后打开；manager.json 里写的上游照常可用。",
 		Engines:          extension.Engines{ExtensionProtocol: extension.Protocol},
 		Runtime:          &extension.Runtime{Command: extension.Command{Path: "personad"}, Args: []string{"voice"}, RPC: "none", HTTP: true},
 		ActivationEvents: []string{extension.OnStartup}, Permissions: extension.Permissions{HubAPI: true},
 		Contributes:   map[string]json.RawMessage{"voice": items, transcriptionPoint: transcription},
-		Configuration: json.RawMessage(voiceConfig),
-		Secrets:       []extension.SecretSpec{{Name: voiceSecretKey, Title: "API Key", Description: "作为 Authorization: Bearer 发给服务；只发给上面的服务地址，换了主机要重新填"}}}
+		Configuration: voiceConfigSchema(),
+		Secrets: []extension.SecretSpec{
+			{Name: voiceSecretKey, Title: "API Key", Description: "作为 Authorization: Bearer 发给服务；只发给上面的服务地址，换了主机要重新填"},
+			{Name: voiceTTSSecretKey, Title: t("tts_key_title"), Description: t("tts_key_description")},
+		}}
 }
 
 // takesOverVoice says whether a hub.json entry runs `personad voice`: its first such entry becomes the built-in
@@ -82,8 +146,10 @@ func takesOverVoice(s moduleswitch.Set, c ExtensionConfig) bool {
 // addVoiceExtension registers the built-in voice extension in reg (attachExtensions, before Load): under the id of the
 // hub.json entry it takes over, on unless that entry says disabled (then always off); without one as "voice", off
 // until the user turns it on, unless hub.json has a voice extension of its own (another program) or a package was
-// installed under that id before (it keeps the id). It never yields its id to a package installed later: that one is
-// refused as any of the same id (Preview), so no other program is handed the key set here.
+// installed under that id before (it keeps the id). The form's built-in hands its id over only to the official package
+// the owner upgrades it to (builtinMarketUpgrade, #16264), and comes back on a rollback; any other package of the id
+// is refused as any of the same id (Preview), so no other program is handed the key set here. hub.json's takeover
+// never hands over: its id and upstreams are hub.json's.
 func (h *Manager) addVoiceExtension(ctx context.Context, reg *extension.Registry, store extension.Store) {
 	voice, ok := builtinext.VoiceExtension(h.modules())
 	if !ok { // the module is not in this build
@@ -104,20 +170,22 @@ func (h *Manager) addVoiceExtension(ctx context.Context, reg *extension.Registry
 				return
 			}
 			if slices.ContainsFunc(rows, func(r extension.Record) bool {
-				return r.ID == voiceExtensionID && r.Source == extension.SourceInstalled
+				return r.ID == voiceExtensionID && r.Source == extension.SourceInstalled && !r.BuiltinPredecessor
 			}) {
 				return // the package installed under this id before keeps it (Load)
 			}
 		}
-		if err := reg.AddBuiltin(voiceManifest(h, voice, voiceExtensionID, ""), "", false); err != nil {
+		if err := reg.AddBuiltinTranslated(voiceManifest(h, voice, voiceExtensionID, ""), "", false, voiceTranslations()); err != nil {
 			h.logf("plugin %s: %v", voiceExtensionID, err)
 			return
 		}
+		// Its verified official package may take the same row (and give it back on a rollback), as for volc.
+		reg.AllowBuiltinHandoff(voiceExtensionID)
 		ps.voiceID = voiceExtensionID
 		return
 	}
 	// On without a row (an upgraded hub's entry runs as it did); disabled holds it off without writing that to its row.
-	if err := reg.AddBuiltin(voiceManifest(h, voice, c.ID, c.Name), "", true); err != nil {
+	if err := reg.AddBuiltinTranslated(voiceManifest(h, voice, c.ID, c.Name), "", true, voiceTranslations()); err != nil {
 		h.logf("plugin %s: %v", c.ID, err)
 		ps.mu.Lock()
 		delete(ps.byID, c.ID) // its placeholder from newExtensions: nothing will start it
@@ -133,6 +201,55 @@ func (h *Manager) addVoiceExtension(ctx context.Context, reg *extension.Registry
 // isVoice says whether p is the built-in voice extension.
 func (ps *extensions) isVoice(p *extension.Extension) bool {
 	return p != nil && ps.voiceID != "" && p.Record.ID == ps.voiceID && p.Record.Source == extension.SourceBuiltin
+}
+
+// voiceModule is the module the official voice package supplies (modapi.ExtensionModules).
+func voiceModule() (modapi.ExtensionModule, bool) {
+	for _, m := range modapi.ExtensionModules() {
+		if m.ID == voiceExtensionID {
+			return m, true
+		}
+	}
+	return modapi.ExtensionModule{}, false
+}
+
+// isVoiceProvider says whether p provides the voice extension the host keeps its guarantees for: the built-in, or the
+// official package of its id (approvedModuleProvider), which the owner may have upgraded the built-in to or installed
+// fresh in a build without it. Its key follows its address (voiceKeyFollowsURL) as the built-in's does. A local upload
+// or a private market's package of the id never is. Called by the registry's BoundSecrets and SecretNeeds outside its
+// lock: the markets' lock it may take never waits for the registry's.
+func (ps *extensions) isVoiceProvider(p *extension.Extension) bool {
+	if p == nil {
+		return false
+	}
+	if ps.isVoice(p) {
+		return true
+	}
+	m, ok := voiceModule()
+	return ok && ps.h != nil && p.Record.ID == voiceExtensionID && approvedModuleProvider(m, p.Record, ps.h.marketSpec)
+}
+
+// voiceOfficialPackage says whether p is the official voice package that took the built-in's place
+// (Record.VerifiedBuiltinPredecessor): it alone inherits the built-in's default meeting transcription (""), so
+// installing the package fresh never sends it meeting audio.
+func (ps *extensions) voiceOfficialPackage(p *extension.Extension) bool {
+	return p != nil && p.Record.ID == voiceExtensionID && p.Record.VerifiedBuiltinPredecessor() && ps.isVoiceProvider(p)
+}
+
+// voiceDefaultTranscriber is the extension "" (the default meeting transcription) names: the built-in voice
+// extension, or the official package that took its place. Without one, nothing.
+func (ps *extensions) voiceDefaultTranscriber(p *extension.Extension) bool {
+	return ps.isVoice(p) || ps.voiceOfficialPackage(p)
+}
+
+// voiceArchiveSet says whether p's saved settings name a computer to archive calls on (archive_machine): the official
+// package's first version writes no archive, so such a hub keeps the built-in (builtinMarketUpgrade).
+func voiceArchiveSet(config json.RawMessage) bool {
+	var f struct {
+		ArchiveMachine string `json:"archive_machine"`
+	}
+	_ = json.Unmarshal(config, &f)
+	return strings.TrimSpace(f.ArchiveMachine) != ""
 }
 
 const gatewaySecretKey = "gateway_key"
@@ -225,15 +342,19 @@ func (ps *extensions) voiceHubJSON() json.RawMessage {
 // settings it does not take, merged as the extension merges them. It runs either way; the apps offer voice only once
 // it has an upstream. Only whether the key is set is read: its value stays sealed.
 func (ps *extensions) voiceState(ctx context.Context, p *extension.Extension) (setup string, warnings []string) {
-	key := ""
-	if ps.reg.SecretsSet(ctx, p)[voiceSecretKey] {
+	secretsSet := ps.reg.SecretsSet(ctx, p)
+	key, ttsKey := "", ""
+	if secretsSet[voiceSecretKey] {
 		key = "set"
+	}
+	if secretsSet[voiceTTSSecretKey] {
+		ttsKey = "set"
 	}
 	voice, ok := builtinext.VoiceExtension(ps.modules())
 	if !ok {
 		return "", nil
 	}
-	setup, warnings, err := voice.State(builtinext.VoiceSources{Form: ps.reg.Config(p), Key: key, HubJSON: ps.voiceHubJSON(), Gateway: ps.voiceGatewayState(ctx)})
+	setup, warnings, err := voice.State(builtinext.VoiceSources{Form: ps.reg.Config(p), Key: key, TTSKey: ttsKey, HubJSON: ps.voiceHubJSON(), Gateway: ps.voiceGatewayState(ctx)})
 	if err != nil {
 		return "", nil // the extension does not start and says why itself
 	}
@@ -259,15 +380,22 @@ func (ps *extensions) voiceView(ctx context.Context, p *extension.Extension, v *
 	}
 }
 
-// voiceKeyFollowsURL keeps the settings' key to the address it was set for (the registry's BoundSecrets,
-// docs/assistant/voice.md "Manifest"): a configuration that moves the address to another origin (scheme, host, port) deletes the
-// key before it is saved, whoever saves it, in the same registry operation a key is set in, so the key is never sent
-// as a Bearer to a host it was not given for.
+// voiceKeyFollowsURL keeps each secret bound to the address it was set for (the registry's BoundSecrets,
+// docs/assistant/voice.md "Manifest"): a configuration that moves url or tts_url to another origin (scheme, host, port)
+// deletes its bound key before saving, whoever saves it, in the same registry operation a key is set in, so neither key
+// is ever sent as a Bearer to a host it was not given for.
 func (ps *extensions) voiceKeyFollowsURL(p *extension.Extension, old, next json.RawMessage) []string {
-	if !ps.isVoice(p) || sameOrigin(voiceURL(ps.modules(), old), voiceURL(ps.modules(), next)) {
+	if !ps.isVoiceProvider(p) {
 		return nil
 	}
-	return []string{voiceSecretKey}
+	var cleared []string
+	if !sameOrigin(voiceURL(ps.modules(), old), voiceURL(ps.modules(), next)) {
+		cleared = append(cleared, voiceSecretKey)
+	}
+	if !sameOrigin(voiceTTSURL(ps.modules(), old), voiceTTSURL(ps.modules(), next)) {
+		cleared = append(cleared, voiceTTSSecretKey)
+	}
+	return cleared
 }
 
 // keyNeedsURLError is the refusal of a key while the settings have no address (the route answers needs_url).
@@ -275,22 +403,51 @@ type keyNeedsURLError struct{ error }
 
 func (e keyNeedsURLError) Unwrap() error { return e.error }
 
-// voiceKeyNeedsURL refuses a key for the built-in voice extension while its settings have no address (the registry's
-// SecretNeeds): a key is set for an address (voiceKeyFollowsURL).
+// voiceKeyNeedsURL refuses a key for the voice extension (isVoiceProvider) while its bound address is empty (the
+// registry's SecretNeeds): each key is set for its own address (voiceKeyFollowsURL).
 func (ps *extensions) voiceKeyNeedsURL(p *extension.Extension, name string, config json.RawMessage) error {
-	if name != voiceSecretKey || !ps.isVoice(p) || voiceURL(ps.modules(), config) != "" {
+	if name != voiceSecretKey && name != voiceTTSSecretKey || !ps.isVoiceProvider(p) {
 		return nil
 	}
-	return keyNeedsURLError{i18n.Err("hub-voice_extension.key_needs_url")}
+	switch name {
+	case voiceSecretKey:
+		if voiceURL(ps.modules(), config) != "" {
+			return nil
+		}
+		return keyNeedsURLError{i18n.Err("hub-voice_extension.key_needs_url")}
+	case voiceTTSSecretKey:
+		if voiceTTSURL(ps.modules(), config) != "" {
+			return nil
+		}
+		return keyNeedsURLError{i18n.Err("hub-voice_extension.tts_key_needs_url")}
+	default:
+		return nil
+	}
 }
 
-// voiceURL is the settings' address ("" none).
+// voiceURL is the settings' realtime address ("" none), as the module reads its form; in a build without it, read
+// here, so the official package's key stays with its address too (its settings are the built-in's, url the same key).
 func voiceURL(s moduleswitch.Set, config json.RawMessage) string {
-	voice, ok := builtinext.VoiceExtension(s)
-	if !ok {
-		return ""
+	if voice, ok := builtinext.VoiceExtension(s); ok {
+		return voice.FormURL(config)
 	}
-	return voice.FormURL(config)
+	var f struct {
+		URL string `json:"url"`
+	}
+	_ = json.Unmarshal(config, &f)
+	return strings.TrimSpace(f.URL)
+}
+
+// voiceTTSURL is the settings' streaming TTS endpoint address ("" none), read as voiceURL is (tts_url).
+func voiceTTSURL(s moduleswitch.Set, config json.RawMessage) string {
+	if voice, ok := builtinext.VoiceExtension(s); ok && voice.FormTTSURL != nil {
+		return voice.FormTTSURL(config)
+	}
+	var f struct {
+		TTSURL string `json:"tts_url"`
+	}
+	_ = json.Unmarshal(config, &f)
+	return strings.TrimSpace(f.TTSURL)
 }
 
 // sameOrigin says whether two addresses have the same scheme, host and port (a default port written or not); two

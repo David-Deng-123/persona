@@ -309,6 +309,11 @@ func (it *InboxItem) listed() InboxItem {
 	c.RejectedReplyDrafts = nil
 	c.ArrivedAt = time.Time{}
 	c.Meta, c.Group = nil, nil
+	if c.Connector != nil && c.Connector.OwnerPromise != nil {
+		connector := *c.Connector
+		connector.OwnerPromise = nil // scoped source receipt for server actions, not a client target
+		c.Connector = &connector
+	}
 	c.ExternalPath = slices.Clone(it.ExternalPath)
 	c.ExternalAsked, c.ExternalRouteOf, c.externalMoves, c.externalChecking = "", "", nil, false
 	c.ChainSeq, c.SuggestSeq = 0, 0
@@ -335,7 +340,7 @@ func (it *InboxItem) listed() InboxItem {
 	}
 	if g := currentSuggestion(it); g != nil {
 		g := *g
-		g.Changes, g.Cwd = slices.Clone(g.Changes), ""
+		g.Mentions, g.Changes, g.Cwd = slices.Clone(g.Mentions), slices.Clone(g.Changes), ""
 		g.MailTarget = nil // the reply's internal conflict check, not a client's target to choose
 		g.Owner, g.SourceOf, g.ReplyInstruction = nil, "", ""
 		g.ReplyPublicationFailed = false

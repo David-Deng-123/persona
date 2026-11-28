@@ -1,7 +1,7 @@
 // What the sidebar's files share: the row and menu types, a row's key, the section heading and count (SidebarSection,
 // passed on from here), the badge and dot colors, the pages hook and navigation. It imports none of them (Sidebar,
 // SidebarRows, SidebarTree, SidebarRail).
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../i18n";
 import { foldRows } from "../lib/folded-rows";
 import { resolveTab } from "../lib/herdr-tree";
@@ -20,8 +20,9 @@ import { BUILTIN_PAGE_COLORS, useSidebarIconMode } from "../lib/sidebar-icons";
 import { BADGE_TONE, navIcon, pageRoute } from "./extensions/ExtensionSlots";
 import { href, inWorkView, navigate, parse, type Route } from "../lib/router";
 import { scoped, useScope, useScopedCounts } from "../lib/current-assistant";
-import { useOwnerNeeds } from "../lib/todo-owner-needs";
-import { useStore, type State } from "../lib/store";
+import { useOwnerNeeds, useTodoBoard } from "../lib/todo-owner-needs";
+import { runtimeIdentity } from "../lib/runtime-list";
+import { mountAgentRowSource, useStore, type State } from "../lib/store";
 import { connPhase } from "../lib/connection";
 import { useStarredCount } from "../lib/starred-summary";
 import { useWorkspaceBoardSetting } from "../lib/workspace-board-setting";
@@ -119,10 +120,10 @@ export function useNavPages() {
   const total = useStore((s) => scoped(s.machines, scope).length);
   const assistant = useStore((s) => s.assistant);
   const todosSupported = useStore((s) => s.todosSupported);
-  // The open to-dos that need the owner, not those Agents are on (#11085, lib/todo-triage ownerNeeds); quiet tasks
-  // (#1731) are told about in the main conversation, not counted here. The To-dos page's "Not done" counts every open one,
-  // and the page marks the rows counted here from the same hook (#11838), so the number and the marks agree.
-  const todosBadge = useOwnerNeeds().size;
+  // Use the hub's deduplicated total under the Lab. Standard and older hubs keep the badge's owner marks (#11085, #11838).
+  const todoBoard = useTodoBoard(scope);
+  const legacyNeeds = useOwnerNeeds(!todoBoard);
+  const todosBadge = todoBoard?.counts.needs_you ?? legacyNeeds.size;
   const todosBadgeLabel = todosBadge ? t("sidebar.todos_badge_title", { count: todosBadge }) : undefined;
   const counts = useScopedCounts();
   const inbox = useInboxBadge();
@@ -238,7 +239,22 @@ export type GoFn = (to: Route, open?: () => boolean) => (e: React.MouseEvent) =>
  *  A row's ⋯ lies beside its link, not in it, and gives as `anchor` its parent, the box holding both: the menu
  *  closes on a pointerdown outside its anchor, and a press on the ⋯ has to stay inside it for the click that
  *  follows to toggle. */
-export type RowMenuFn = (s: Session, anchor: HTMLElement, at?: MenuAt) => void;
+export type RowMenuFn = (s: Session, anchor: HTMLElement, at?: MenuAt, readSource?: () => Session | undefined) => void;
+
+/** A filtered list can refresh independently while a menu anchored to its row is open. Each
+ *  mounted identity owns its source so a removed or recycled row cannot run an old command. */
+export function useRowMenuSource(s: Session) {
+  const id = runtimeIdentity(s);
+  const current = useMemo(() => createRef<Session>(), [id]);
+  const read = useCallback(() => current.current ?? undefined, [current]);
+  useLayoutEffect(() => {
+    current.current = s;
+    return () => { current.current = null; };
+  }, [current, s]);
+  useLayoutEffect(() => mountAgentRowSource(id, read), [id, read]);
+  return read;
+}
+
 /** A machine's, a workspace's or a tab's menu (src/lib/node-actions.ts); `toggle`: from its ⋯, which closes it again
  *  (a row's ⋯ anchors it on the box holding the row and the ⋯, as in RowMenuFn). */
 export type NodeMenuFn = (node: MenuNode, at: MenuAt, header?: string, toggle?: boolean) => void;

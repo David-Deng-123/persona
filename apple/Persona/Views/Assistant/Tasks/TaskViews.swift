@@ -185,16 +185,18 @@ struct PlanCard: View {
                             onUltra: { picked.ultra[n] = $0 })
             }
             .disabled(store.busyPlans.contains(plan.id))
-            Button {
-                withAnimation(Theme.Motion.state) { picked.remember.toggle() }
-            } label: {
-                Label("Start These Directly", systemImage: picked.remember ? Theme.Icon.successFilled : Theme.Icon.unchecked)
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(picked.remember ? Theme.accent : .secondary)
-                    .lineLimit(1)
-                    .contentShape(.rect)
+            if plan.startRememberOffered {
+                Button {
+                    withAnimation(Theme.Motion.state) { picked.remember.toggle() }
+                } label: {
+                    Label("Start These Directly", systemImage: picked.remember ? Theme.Icon.successFilled : Theme.Icon.unchecked)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(picked.remember ? Theme.accent : .secondary)
+                        .lineLimit(1)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
             if let title = grantTitle { PlanScheduleGrant(title: title, choices: picked) }
             if !actionsPinned { PlanActions(plan: plan, choices: picked) }
         }
@@ -204,7 +206,7 @@ struct PlanCard: View {
                 picked.editing = false
                 let blocked = Ultracode.blockedMachines(edits)
                 let sent = Ultracode.editsToSend(plan, edits: edits, blocked: { blocked.contains($0) })
-                Task { await store.start(plan, edits: sent, remember: picked.remember, scheduleGrant: picked.grantsSchedule(plan)) }
+                Task { await store.start(plan, edits: sent, remember: plan.rememberStart(picked.remember), scheduleGrant: picked.grantsSchedule(plan)) }
             }
         }
     }
@@ -306,7 +308,7 @@ struct PlanActions: View {
         Button {
             let blocked = Ultracode.blockedMachines(plan.tasks)
             let edits = Ultracode.cardEdits(plan, choices: Ultracode.choices(plan, card: choices.ultra), blocked: { blocked.contains($0) })
-            Task { await store.start(plan, edits: edits, remember: choices.remember, scheduleGrant: choices.grantsSchedule(plan)) }
+            Task { await store.start(plan, edits: edits, remember: plan.rememberStart(choices.remember), scheduleGrant: choices.grantsSchedule(plan)) }
         } label: {
             Text(plan.tasks.count > 1 ? String(localized: "Start \(plan.tasks.count) Tasks") : String(localized: "Start"))
                 .lineLimit(1).fixedSize(horizontal: true, vertical: false)

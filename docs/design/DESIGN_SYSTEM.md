@@ -1582,7 +1582,9 @@ field for these sessions.
 
 ### 3.8 Chips, badges, avatars, marks
 
-`Chip` (look neutral, tint or outline), `CountBadge` (99+ cap), `LinkBadge`, `Monogram`, `ChatAvatar`, `AgentMark`, `BrandMark`, `SessionAvatar`, `ThreadAvatar`. An agent named by its kind reads the same on every client, using the product's own spelling (TRAE CLI, with opencode and pi in lower case): `spec/fixtures/agent-names/names.json`, which the web's `agentName` and the iPhone's `AgentKind(usageAgent:)` are tested against (#10042). Chips are text-only and read as their text. Decorative marks are hidden from VoiceOver when adjacent text names them. Sources are in `apple/Persona/DesignSystem/Components.swift` and neighbors.
+`Chip` (look neutral, tint or outline), `CountBadge` (99+ cap), `LinkBadge`, `Monogram`, `ChatAvatar`, `AgentMark`, `CodingAgentAvatar`, `HostingEngineBadge`, `BrandMark`, `SessionAvatar`, `ThreadAvatar`. An agent named by its kind reads the same on every client, using the product's own spelling (TRAE CLI, with opencode and pi in lower case): `spec/fixtures/agent-names/names.json`, which the web's `agentName` and the iPhone's `AgentKind(usageAgent:)` are tested against (#10042). Chips are text-only and read as their text. Decorative marks are hidden from VoiceOver when adjacent text names them. Sources are in `apple/Persona/DesignSystem/Components.swift` and neighbors.
+
+**Coding Agent contact avatar and hosting-engine badge** (#17797; web `web/src/ui/CodingAgentAvatar.tsx` + `web/src/lib/coding-agent-avatar.ts`, Apple `apple/Persona/DesignSystem/CodingAgentAvatar.swift` + `apple/Shared/Design/EngineBadgeTokens.swift`): audience is people working in **Agents** (list rows and Agent session headers; everyday **Assistant** screens and personal Agent avatars/charge rings from #17065 are unchanged). Each coding Agent draws as an individual contact: a circular disc (`40 px` / `40 pt` in contact-list rows, scaled down proportionally in compact sidebar rows and headers) carrying the model or Agent vendor brand mark (reusing the bundled marks for Claude, OpenAI/Codex, Gemini, Antigravity, Cursor, pi, TRAE, opencode, Grok, Kimi, DeepSeek, Copilot, or a single uppercase letter fallback for unknown agents/models), a compact circular outlined `HostingEngineBadge` at the bottom-right corner for the hosting engine (`orca`, `herdr`, `herdr-core`, `paseo`, `t3code`, `cindy`, `tern`, `rex`, `botmux`, or a single-letter fallback for custom hosts; omitted when unhosted), and any overlaid live status dot (`StatusMark` / `StatusDot`) or remote-computer arc at the top-right corner so the avatar mark, status dot and hosting-engine badge never overlap. Badge fills use high-contrast paired light/dark tokens (`web/src/ui/engines/*.svg` on web — external `?no-inline` assets matching `web/src/ui/brands/` to preserve `FIRST_SCREEN_BUDGET` — and `EngineBadgeTokens` on Apple) ringed in the surrounding surface color; hover tooltips and accessible names read both the model/Agent and the hosting engine (for example, "Claude Code · Orca"). Why a new component: `AgentMark` is an inline 14 px glyph whose lower-right corner holds the `</>` CLI indicator and leaves no contact-sized disc or non-overlapping slot for both live status and hosting-engine badges.
 
 The web has the same `CountBadge` (`web/src/ui/CountBadge.tsx`, #4538) in three tones: `needs` for what waits for the user (for now the web's other Needs-you counts' look, `--attention` on the neutral field as the sidebar's badges; #4653 turns all of them to the Needs-you blue at once), `neutral` for a passive total, `accent` for a selected item or a mention. It shows nothing at zero and "99+" past 99, is 18 px high (16 px `dense`), and its exact number is spoken unless the host control's label already says it (`label={false}`). The Inbox section bar (#9053) uses it first, so it is a module of its own, off the first screen, while only that page draws it; the web's other counts keep their own pills until #4538 moves them.
 
@@ -1904,7 +1906,7 @@ the picker is hidden and an image-less create is never sent. All controls use th
 copy. The assistant manager owns persistence and handoff; the Web client does not invent a temporary upload or a local
 machine path.
 
-`EmptyStateView` (`apple/Persona/DesignSystem/Components.swift:385`): symbol, title, one-sentence message, optional prominent action. Where the page already has its prominent action (a foot toolbar's +) and the empty state's action only leads to another place that holds what this one lacks, the action takes the link look (`actionLook: .link`): the accent's words and ›, one line, a finger's height, never a second filled button (#10465, To-dos' Today: "3 coming up this week ›"; iOS, hubs with `todo_view`, from #10465's switch-on); BeautifulUI draws its own secondary button for either. 92 uses. System `ContentUnavailableView` is used in about 22 other places and looks different (DS-15). Search results may use `ContentUnavailableView.search`. Web has no shared empty state outside admin; Android has `JEmptyState`. An offline current assistant (several assistants) takes the place of a merged list's empty state with its own: the assistant avatar faded with its offline mark, "<name> is offline" and when it last synced (web `OfflineState` in `web/src/views/ManagerParts.tsx`; Android `JAssistantOffline`, a `JEmptyState` whose `leading` slot holds `JManagerAvatar`; `docs/assistant/managers.md` "Clients").
+`EmptyStateView` (`apple/Persona/DesignSystem/Components.swift:488`): symbol, title, one-sentence message, optional prominent action, and an optional `secondaryAction`. When both `action` and `secondaryAction` are given (for example **Retry** alongside **View through the computer** on a direct-preview failure), they are laid out in a `StackingButtonRow` with `.buttonLabelLine()` so labels stay on one line and stack vertically when they do not fit side by side. Where the page already has its prominent action (a foot toolbar's +) and the empty state's action only leads to another place that holds what this one lacks, the action takes the link look (`actionLook: .link`): the accent's words and ›, one line, a finger's height, never a second filled button (#10465, To-dos' Today: "3 coming up this week ›"; iOS, hubs with `todo_view`, from #10465's switch-on); BeautifulUI draws its own secondary button for either. 92 uses. System `ContentUnavailableView` is used in about 22 other places and looks different (DS-15). Search results may use `ContentUnavailableView.search`. Web has no shared empty state outside admin; Android has `JEmptyState`. An offline current assistant (several assistants) takes the place of a merged list's empty state with its own: the assistant avatar faded with its offline mark, "<name> is offline" and when it last synced (web `OfflineState` in `web/src/views/ManagerParts.tsx`; Android `JAssistantOffline`, a `JEmptyState` whose `leading` slot holds `JManagerAvatar`; `docs/assistant/managers.md` "Clients").
 
 ### 3.10 Loading and error states
 
@@ -2417,7 +2419,9 @@ loading/retry states and timestamps as other secondary views, and adds no primar
 
 Links open inside the app in a card that fills the screen. Dragged down to 0.6 it stops blocking the chat. Further down it closes. Speed matters first. Implemented by `apple/Persona/Views/Link/LinkSheet.swift:111`. Header buttons need 44 pt frames (see the audit).
 
-A computer's dev server opened from a chat (a forwarded port, `docs/web/preview.md` "iPhone") keeps the same card and adds a bar under the page: back, forward, the page's address on that computer, a screenshot (Visible Area or Whole Page, into the message box) and Pick an Element. The bar's buttons are `ThemedIcon`s in 44 pt frames (`tapTargetFrame`), the address a `Fill.well` capsule. Why a bar and not header buttons: the header already holds ✕ (first, #9653), Refresh and ⋯, and these are the page's own controls, where Safari puts them. Picking is a mode, not a gesture: a capsule over the page says what a tap does and has Cancel; a tap picks without pressing, the element is outlined in the accent color, and the bar gives way to the line to write about it (Cancel, Add to Message), which becomes an element comment card over the composer. The servers list (`PreviewChooser`) is an inset grouped list in a sheet; Start… asks in a content-height confirmation sheet like Close Agent.
+A computer's dev server opened from a chat (a forwarded port, `docs/web/preview.md` "iPhone") keeps the same card and adds a bar under the page: back, forward, the page's address on that computer, a keyboard toggle when viewing through the computer, a screenshot (Visible Area or Whole Page, into the message box) and Pick an Element. The bar's buttons are `ThemedIcon`s in 44 pt frames (`tapTargetFrame`), the address a `Fill.well` capsule. Why a bar and not header buttons: the header already holds ✕ (first, #9653), Refresh and ⋯, and these are the page's own controls, where Safari puts them. Picking is a mode, not a gesture: a capsule over the page says what a tap does and has Cancel; a tap picks without pressing, the element is outlined in the accent color, and the bar gives way to the line to write about it (Cancel, Add to Message), which becomes an element comment card over the composer. The servers list (`PreviewChooser`) is an inset grouped list in a sheet; Start… asks in a content-height confirmation sheet like Close Agent.
+
+**iPhone "View through the computer" preview stream (#17913)**: when the user switches from the card header's `⋯` menu (or from the direct-mode error overlay's secondary button) or when direct loopback forwarding falls back automatically (declined self-signed certificate, untrusted TLS, load timeout, listener failure, or repeated recoverable errors), `PreviewStreamView` (`apple/Persona/Views/Link/PreviewStreamView.swift`) replaces `WKWebView` inside the same card and keeps the current mode for the lifetime of the card. Automatic fallback shows a dismissible neutral `NoticeBanner` (`Theme.Icon.screen`) above the canvas; JS dialogs use native `.alert` modifiers; and remote `<select>` popups (`select_open`) present `PreviewSelectSheet` — an inset-grouped `List` in a `.medium`/`.large` sheet with `SheetClose`, section headers for `<optgroup>`, disabled rows in secondary ink, and `Theme.Icon.done` in `Theme.accent` on the selected option. Reuses existing `Theme` tokens, `EmptyStateView`, `StackingButtonRow`, `NoticeBanner`, `ThemedIcon`, and `SheetClose` with no new tokens.
 
 ### 4.7 Tool execution collapsed (super rule 2)
 
@@ -2651,8 +2655,8 @@ Kinds: questions, plan approvals, tool approvals, secret entry, MCP forms, and w
   count three things and say so: "N pending" the conversation's own cards in the stack, "N more" the tasks' other
   questions, and Needs you its rows (one for each task or Agent that asks, plus the conversation's own cards, plans and
   drafts). An open plan is also a card among the conversation's lines (iOS `FeedLine`, web `FeedLineView` #8193, Android on Glass `GlassPlanCard`), at the
-  end of the exchange it happened in: its tasks, where each would run, "Start these directly", then Start, Edit and Don't start;
-  once started the hand-off cards take its place, and a dismissed one reads "Not started · N tasks". A task's or an Agent's row in the tray opens that task's or Agent's detail, as iOS's rows do, where its page
+  end of the exchange it happened in: its tasks, where each would run, then Start, Edit and Don't start. On iOS and web, "Start these directly" appears before those actions only when the hub's `start` presentation says at least one task has a useful uncovered trust rule to remember. A hard gate, an unknown future reason or existing trust coverage hides that checkbox; if a refreshed plan withdraws the offer, Start does not submit the stale local tick. A legacy plan whose original outbound decision was not recorded keeps the previous presentation rather than making the hub run a model while it is read. The plan still waits for Start; Start, Edit and Don't start keep their place.
+  Once started the hand-off cards take its place, and a dismissed one reads "Not started · N tasks". A task's or an Agent's row in the tray opens that task's or Agent's detail, as iOS's rows do, where its page
   and its cards are. In the former native layout the two places of cards shared the footer room above the composer.
   Each had half the room when both were open. A shorter card left its unused space to the other (#9392, #12306).
   **Card height by hand** (iOS and iPadOS, #12306): with the keyboard down, a lone question card over the composer (the
@@ -2756,6 +2760,7 @@ Kinds: questions, plan approvals, tool approvals, secret entry, MCP forms, and w
   card is the terminal's question as before); the rules in `apple/Shared/CommandAsk.swift`, `web/src/lib/command-ask.ts`
   and `web/src/lib/command-ask-lines.ts`.
 - **Buttons**: for a tool approval, in this order: Deny, Always Allow for This Session, Allow Once (primary). High-risk actions offer no "always" and ask twice.
+  On web tool permission cards (#8166), a line above the controls explains a code push, publication or message on the user's behalf. An unclear effect also asks twice. Terminal text reconstructed from screen rows and file edits with incomplete destinations cannot establish that an operation stays on this computer. Allow opens a separate Confirm approval choice with Cancel. Deny answers immediately. Overview and browser notifications open the request for review. Settings › Advanced › Approvals can turn this check off and back on for this browser.
 - **Password-card environment delivery (#11945)**: the default password card stays unchanged and delivers only to `sudo -S` stdin. An explicit `delivery: "env"` card adds the existing caution notice after its verbatim commands, saying every listed command receives the typed password as `PERSONA_SECRET` and encoded output may evade redaction. Apple uses `NoticeBanner`, Android `JNotice`, and the web the terminal command card's warning line; Watch and generic fallback views carry the same warning in the hub summary. The card's own Run declares `secret_run_env` on that request only. Older specialized clients that suppress the summary cannot show the warning and get 403 instead of running it; quick approvals and Watch never get the feature, so every env run needs a freshly typed password and Run on this card, and Watch still offers only Decline.
 - **Secret hand-off (#3962)**: the card that hands a provider's secret values to one Agent run is a permission card with the tool
   approval's title ("Waiting for your approval") and buttons (Deny, Always allow, Allow); its body names each variable with the
@@ -3710,7 +3715,9 @@ recording.
     below another, so a breath doesn't flicker);
   - **You're speaking** instead when the microphone is a headset's, which hears little but its wearer;
   - **Quiet** otherwise, **Paused** while paused.
-  - No numbered speakers: the phone can't tell people apart.
+  - No numbered speakers on in-meeting screens: while a meeting runs the phone can't tell people apart (after a
+    hub-transcribed meeting ends, hub speaker separation may label lines and disagreements with numbered speakers until
+    the owner names them; see "Web: speakers in the transcript and the minutes (#17675)" below).
 - **Interaction:**
   - a tap brings the room back (`MeetingRecorder.openRecordings`);
   - dragged, it settles on the nearer side at that height, inside a band clear of the top bar and the bottom's composer
@@ -4427,6 +4434,74 @@ the flat Key points / Decisions lists made them read every line (principle 2).
   speaker name, with every topic card, disagreement card and line checked for running past its box; and the legacy
   no-disagreement baseline).
 
+### Web: speakers in the transcript and the minutes (#17675)
+
+Who it serves: everyday people reading a hub-transcribed meeting in the browser and naming the speakers once
+(contract: `docs/assistant/meeting-minutes.md` "Speakers (#17674)"). A recording without a `speakers` block (or with
+`state: "cleared"`, or an unknown state or failure reason) looks pixel for pixel identical to before. Nothing about
+speakers appears while a meeting is live (`RecordingLiveView.tsx` and partial transcripts stay unchanged).
+
+- **No colour per speaker.** Every speaker avatar (`SpeakerAvatar`) is neutral (`bg-field text-ink-2`, circular,
+  showing the name's first character or the speaker number) and hidden from screen readers (`aria-hidden="true"`).
+  People are told apart by number and name, never by per-speaker hues; state and certainty never rest on colour alone.
+- **Where.**
+  - `web/src/lib/recording-speakers.ts` holds closed speaker types, defensive `decodeSpeakers`, `speakerLabel`,
+    `speakerAvatarGlyph`, `waitingSpeakerMinutes` and `groupLinesBySpeaker` — kept outside `web/src/lib/kb.ts` so
+    nothing enters the first screen (`FIRST_SCREEN_BUDGET`) and outside `web/src/modules/recording/` so
+    `web/src/views/knowledge/RecordingReadOnlyDetail.tsx` shares the exact decoding without importing the recording
+    module.
+  - `web/src/modules/recording/speakers.ts` implements the pure display-name and roster edit rules verified directly
+    against `spec/fixtures/speakers-names/cases.json` (`resolvePositionDisplays`, `applySpeakerEdit`,
+    `applyOptimisticSpeakerEdit`, candidate names, sample lines and attributed positions).
+  - `web/src/modules/recording/RecordingSpeakersDialog.tsx` owns `useRecordingSpeakers` (local-first optimistic edits
+    reconciled with `POST /api/v1/recordings/{id}/speakers`, `meeting_live` `"speakers"` reloads, 5 s visible polling
+    while `waiting`, rollback on failure and inline Undo), `RecordingSpeakersBar`, `RecordingSpeakersDialog` and
+    `DeleteSpeakersConfirmDialog`.
+  - Avatar sizing (`.speaker-avatar`, `.speaker-avatar-lg`, in `em` so they scale with `--text-scale`) lives in
+    `web/src/modules/recording/minutes-overview.css` alongside the lazy minutes tokens.
+- **Transcript groups.** In `RecordingTranscript.tsx`, consecutive spoken lines that share the same canonical speaker
+  and certainty state form one group headed by the neutral avatar and the display name (`Speaker N` / `发言人 N` /
+  `話者 N` until named). Every line keeps its own `<li id="recording-line-…">` anchor so minutes timestamps and sample
+  jumps land on the exact line. An unsure line — or every line when `quality` is `"low"` — shows `?` after the name
+  with `role="img"` and `aria-label` set to the localized word for "possibly" (`possibly` / `可能是` / `おそらく`).
+- **Speakers row and states.** Directly above the transcript inside the transcript `Card`, `RecordingSpeakersBar` shows
+  the current state in plain text (never a model or engine name, and no "try again" action):
+  - `waiting`: spinner and "Telling speakers apart…" (with minutes done/total when `done` is present).
+  - `ready` (`quality: "ok"`): single row ("Speakers", summary of named speakers or speaker count, chevron) opening the
+    naming dialog.
+  - `ready` (`quality: "low"`): the same row plus a calm neutral notice ("Speakers may not be reliable in this
+    meeting.") above the transcript and at the top of the naming dialog; every speaker carries `?` and disagreement
+    positions show no speaker attribution.
+  - `failed`: reason-specific plain message (`too_long`, `timeout`, `engine_unavailable`, `no_audio`, or general failure
+    for `gave_up` / `audio_gone` / `error`) with a single-line **Delete** button (no retry).
+  - `trimmed`: the naming row stays available after the transcript expires; the naming dialog shows names, speaking
+    statistics and attributed disagreement stances (without sample lines) and still allows naming, merging, unmerging
+    and deleting.
+- **Naming page.** One shared `Dialog` (`RecordingSpeakersDialog`) showing one inset card per unmerged main speaker:
+  neutral avatar, display name (plus `Me` pill when marked), speaking stats ("spoke 12 min · 34 lines"), single-line
+  text input (max 100 characters, Enter saves, Clear button when named), one-tap candidate chips (`Me` plus hub
+  `candidates` and other speakers' names for one-tap merge, single-line pill buttons on `bg-surface` with
+  `shadow-hairline`), two or three clickable sample lines that jump to the transcript and close the dialog, and the
+  disagreement stances attributed to that speaker.
+  - `minor` speakers are folded in a collapsed **Rarely spoke** section (`Collapse`, `aria-expanded`).
+  - Merged speakers appear at the bottom with a single-line **Unmerge** button (returning the speaker unnamed).
+  - Giving two speakers the same name automatically merges the shorter-speaking one into the longer-speaking one; every
+    name, merge or unmerge updates the transcript, minutes and dialog on the same frame before the hub responds, shows
+    an inline Undo bar backed by the hub's `undo` payload, and reverts with an alert if the hub rejects the write.
+  - The footer overflow menu (`IconButton` + `Menu`) holds **Delete this meeting’s speakers**, opening a single
+    confirmation `Dialog` (`DeleteSpeakersConfirmDialog`); confirming clears the timeline and returns the page to the
+    exact no-speakers state. All controls work by keyboard alone (Tab through every control, Enter to name, Esc to close).
+- **Disagreements attribution.** `MinutesDebatesSection` (`web/src/modules/recording/MinutesOverview.tsx`) resolves
+  each position's display name through `resolvePositionDisplays` (named sure speaker -> `Speaker N` -> transcript
+  `who` -> none, joining `also` supporters and suppressing speaker attribution on `quality: "low"`).
+- **Module off.** `RecordingReadOnlyDetail.tsx` displays the read-only speakers summary/status and grouped transcript
+  lines (neutral avatar, name, `?` with `aria-label`) using `knowledge-kbdetail` strings and zero edit controls.
+- Checks: `web/src/modules/recording/speakers.test.ts` (directly running every case of
+  `spec/fixtures/speakers-names/cases.json`), `web/src/modules/recording/RecordingSpeakers.test.tsx`,
+  `web/src/modules/recording/minutes-debates.test.ts`, `web/src/views/knowledge/RecordingReadOnlyDetail.test.tsx`, and
+  `web/e2e/recording-speakers.mjs` (en, zh-Hans and ja, 1440 and 390, light and dark, Large text, keyboard-only,
+  screen-reader labels, all states, trimmed, low quality, read-only detail, and pixel-identical no-speakers baseline).
+
 ### The summary card (#6563)
 
 Minutes that carry an overview (`docs/assistant/meeting-minutes.md`, "Summary card (#6563)") show it in the Summary
@@ -4795,6 +4870,20 @@ through Configure runners, and saving an empty list disables polling.
 
 Center the Persona mark and title above the primary control. A phone opens its scanner. A browser takes a pairing link and submits it with the arrow inside the field group. Place the secondary actions in one centered row of icons with short labels. Keep the action and its label in a single tap target. Allow wrapping or stacking at larger text sizes. Help explains where to get a code or link. A warning about replacing an existing pairing stays beside the action.
 
+## Preview native `<select>` overlay (#17849)
+
+Audience: people previewing local dev servers inside an Agent session on the web (the Agents workspace). Because headless Chromium does not composite native `<select>` OS popups into the screencast canvas, `SelectListbox` (`web/src/ui/SelectListbox.tsx`, logic in `web/src/lib/preview.ts`) renders the bridged option list directly above the preview `<canvas>`.
+
+- **Reused tokens and grammar**: draws the same surface, elevation, corners, gliding active highlight, edge scroll fades (`data-menu-more`), motion (`EASE`, `pop-in`, reduced-motion aware), check icon (`Icon` `check` in `--accent-ink`), semantic colors (`bg-surface`, `bg-hover`, `text-ink`, `text-ink-3`, `border-line`), named type roles (`text-meta`, `text-label`, `text-submeta`), and 44 px coarse-pointer row target (`pointer-coarse:min-h-11`) as `Menu`. Adds no new color, font-size, radius, or motion tokens, and no settings.
+- **Why not `Menu` directly**: a bridged `<select>` popup requires `role="listbox"` / `role="option"` with `aria-selected`, `aria-disabled`, and `aria-activedescendant`; selection on `Space` as well as `Enter`; initial highlight and scroll to the selected option; as-written `optgroup` headings; canvas-scaled positioning with non-passthrough outside-click dismissal; and staying inside the lazy preview chunk off the first screen.
+
+## Direct dev server preview and mode fallback (#17899)
+
+Audience: people previewing local dev servers inside an Agent session on the web (the Agents workspace). When the hub advertises `preview_origin`, `PreviewPanel` (`web/src/views/session/PreviewPanel.tsx`) renders the dev server directly in an isolated-origin `<iframe>` by default without asking the user to pick a mode, and falls back automatically to the computer-browser stream when direct rendering fails or times out.
+
+- **Reused components and tokens**: reuses `IconButton` (`more`, `retry`, `monitor`, `phone`, `target`, `image`, `x`), `Menu`, `Spinner`, `PreviewBar` notice strip (`bg-surface`, `border-line`, `text-ink-2`, `text-ink-3`, `text-orange`, `line-clamp-2`), Phone frame styling (`rounded-[18px] shadow-overlay`), and named type role `text-label`. Adds no new tokens, settings, or first-screen bytes.
+- **Progressive disclosure & controls**: the manual switch (**View through the computer** / **View directly**) appears only when `preview_origin` is advertised, inside the preview toolbar's trailing `⋯` `Menu` rather than as a top-level button. Back and Forward buttons are omitted in direct mode because cross-origin iframe history cannot be observed or controlled safely. Triggering Pick an element or Screenshot in direct mode switches smoothly to viewing through the computer with a quiet info notice and completes the action once the stream is ready. Automatic fallback displays a dismissible notice strip and is remembered per `(machine, port)` within the panel session until the user chooses **View directly**.
+
 ## Removable chips (#13500)
 
 A chip the user may take away (a space conversation's categories on iOS) is a `Chip` with the close mark whose tap opens
@@ -4907,10 +4996,14 @@ VoiceOver drop hint on Apple).
 
 ## Integrations & Extensions in web Settings
 
-People connecting a service can find its account, delivery and sync settings under one name. With
-the selected assistant’s Integrations experiment on, each service appears once. The capability chips
+People connecting a service can find its account, delivery and sync settings under one name. The selected
+assistant shows each service once by default. Turning off **Unified Integrations & Extensions** in
+**Settings › Labs** brings back the separate Connectors, Channels, Inbox Sources and Extensions pages
+and the previous channel routing. Saved data and preferences carry over. The capability chips
 (All, Chat channels, Data sources, Tools & appearance) filter those rows. A service can match more
 than one chip. Each chip exposes its selection with `aria-pressed` and shows its matching count.
+When the assistant supplies the Integrations projection, the chips show its counts. A failed
+catalog or section read uses a `SettingsHint` alert and Retry in a `Group`. Sections that loaded remain usable.
 
 Opening a detail uses a single column on phones and narrow Settings hosts. On desktop the split
 starts at **740 CSS pixels of Settings content width**, measured after both sidebars. The
@@ -4923,3 +5016,41 @@ catalog or a full-width view of where data goes. A `SubscriptionAlertBadge` belo
 owns the subscription. A single alert names its state, multiple alerts show their count. The most
 severe state supplies the detail and tone (failure red, missing recipe, rate limit or disconnected
 source orange). Standalone push sources have their own rows. See [web Settings](../web/web.md#labs).
+
+Settings keeps the visited parent route, including its assistant and filter, for the phone header,
+narrow desktop Back, and split-pane drill-downs. Back from an upgrade returns to its extension.
+Back from a source returns to the list, detail, or Data Flow page that opened it. A bookmarked
+detail without a visited parent returns to the same assistant's directory. Conflicting assistant
+names in a link show an unavailable page with Back. Browsing a linked assistant keeps the sidebar
+selection. The explicit switch action changes it.
+
+All integration kinds — built-in services, standalone channels and connectors, extensions, and
+standalone push or subscription sources — share one capability-composed detail shell mounted by
+`(manager, kind, id)` so crossing the 740 px split breakpoint changes only layout, scroll container,
+and Back placement without losing drafts. Capability sections mount in one canonical order:
+Account & connection, Chat & delivery, Inbox & sync, External sources, Extension settings,
+Information access, and Extension management. Single-pane standalone source details provide a
+same-assistant **Data flow** row when the split-pane view switcher is not visible.
+
+## Searchable single-select for long extension enums (web, #17982)
+
+In Web Settings (`web/src/views/settings/Extensions.tsx`, shared by classic Extensions and unified
+`IntegrationDetail`), extension configuration fields with `enum` / `oneOf` keep the lightweight native `<select>`
+when there are **8 or fewer** options so short choices add zero friction. When a field has **more than 8** options,
+it automatically upgrades to the reusable `SearchableSelect` (`web/src/ui/SearchableSelect.tsx`):
+
+- **Trigger**: matches the existing settings field geometry (`h-8`, `rounded-control`, `bg-field`, `max-w-[320px]`,
+  `shadow-inset-field` or red validation ring), displays the selected label or muted placeholder (`text-ink-3`), and
+  exposes `id`, `aria-haspopup="listbox"`, `aria-expanded`, and `aria-invalid`.
+- **Adaptive surface**: desktop opens a viewport-safe portal popover (`bg-surface`, `shadow-overlay`, positioned with
+  `placeMenu`) that is never clipped by scrollable settings panels; phone widths (`max-sm`) open in the shared `Dialog`
+  bottom sheet. Rows keep a bounded scrolling listbox (`max-h-[50vh]`) and touch-friendly heights (`min-h-9`,
+  `pointer-coarse:min-h-11`).
+- **Search, ranking & clearable default**: reuses `SearchField`'s focus token (`SEARCH_FOCUS`) and clear affordance
+  (auto-focused on desktop open, with a one-click clear button) to match both display labels and raw option values
+  case-insensitively with whitespace-separated AND tokens, ranked predictably (exact value > exact label > prefix >
+  substring, preserving declaration order on ties). When the query is empty, the placeholder/default option stays
+  selectable at the top to clear back to `undefined`.
+- **Keyboard & feedback**: supports `ArrowDown` / `ArrowUp` navigation, `Enter` to select and restore focus to the
+  trigger, `Escape` or outside pointer interaction to dismiss without mutating the value, `bg-accent-tint` /
+  `text-accent-ink` + check mark on the active selection, and a localized empty state when nothing matches.

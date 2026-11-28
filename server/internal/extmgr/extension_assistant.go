@@ -9,8 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nwverse/persona/server/internal/buswire"
 	"github.com/nwverse/persona/server/internal/connector"
 	"github.com/nwverse/persona/server/internal/extension"
+	"github.com/nwverse/persona/server/internal/extwire"
 	"github.com/nwverse/persona/server/internal/proto"
 )
 
@@ -224,11 +226,10 @@ func (ps *extensions) assistantCredentials(ctx context.Context, id, contribution
 	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	params, _ := extension.Targeted(struct{}{}, contribution)
-	var res struct {
-		Env map[string]string `json:"env"`
-	}
-	if err := hp.proc.Call(cctx, "assistant.credentials", params, &res); err != nil {
+	res, err := buswire.Call(cctx, hp.proc, extwire.AssistantCredentialsMethod, extwire.AssistantCredentialsParams{
+		Contribution: contribution,
+	})
+	if err != nil {
 		ps.logf("plugin %s: assistant.credentials: %v", id, err) // never the values
 		return nil
 	}
@@ -268,11 +269,10 @@ func (ps *extensions) assistantSummary(ctx context.Context, title, summary strin
 				return summary, false
 			}
 			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			params, _ := extension.Targeted(map[string]any{"summary": summary}, a.ID)
-			var res struct {
-				Summary string `json:"summary"`
-			}
-			err = hp.proc.Call(cctx, "assistant.summary", params, &res)
+			res, err := buswire.Call(cctx, hp.proc, extwire.AssistantSummaryMethod, extwire.AssistantSummaryParams{
+				Contribution: a.ID,
+				Summary:      summary,
+			})
 			cancel()
 			if err != nil || strings.TrimSpace(res.Summary) == "" {
 				return summary, true

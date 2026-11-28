@@ -63,7 +63,7 @@ def features():
                 (["sessions_list", "sessions_lookup"] + (["sessions_hierarchy"] if NET["hierarchy"] else []) + ["sessions_todo", "sessions_quick_filters", "sessions_just_finished", "sessions_agents_only"]) if os.environ.get("MOCK_SESSIONS_LIST") == "1" else []) + (
                 ["sessions_catalog"] if CATALOG else []) + (
                 ["sessions_side_fold"] if SIDE_FOLD else []) + (
-                ["preview"] if os.environ.get("MOCK_PREVIEW") else []) + (
+                mock_preview.features() if globals().get("preview_route") else (["preview"] if os.environ.get("MOCK_PREVIEW") else [])) + (
                 ["task_cron"] if os.environ.get("MOCK_CRON") == "1" else []) + (
                 [] if os.environ.get("MOCK_TODO_SEEN") == "off" else ["todo_seen"]) + (
                 ([] if os.environ.get("MOCK_LOOK_UPLOADS") == "off" else
@@ -2213,7 +2213,10 @@ LN = {"on": bool(os.environ.get("MOCK_LN"))}
 SESSION_DELETED = []
 PINS = {"spaces": ["macbook/weather"], "sessions": []}  # GET / PUT /api/v1/pins: what the Agents list keeps on top
 # GET / PUT /api/v1/agents/display-settings (server/internal/assistant/agents_display.go): both new switches are off by default
-AGENTS_DISPLAY = {"show_botmux": True, "configured": False, "use_herdr_tab_name": False, "sort_by_activity": False, "show_filter": False}
+AGENTS_DISPLAY = {"show_botmux": True, "configured": False, "use_herdr_tab_name": False, "sort_by_activity": False, "show_filter": False,
+                  "botmux_owner_union_id": ""}
+# GET /api/v1/agents/botmux-owner-candidates (server/internal/assistant/agents_botmux_owner.go): made-up union_ids only
+BOTMUX_OWNER_CANDIDATES = [{"union_id": "on_0123456789abcdef0123456789abcdef", "bots": 3, "sole": 3, "machines": 1}]
 
 
 def mark_seen(sid):
@@ -2833,7 +2836,7 @@ def assistant_state(space="", archived=False):
            "conversations": [s for s in ASSISTANT if s["machine_id"] == cfg["machine_id"] and s.get("space", "") == space
                              and (archived or not s.get("archived"))]}
     if not os.environ.get("MOCK_LEGACY_HUB"):
-        out["integrations_v2"] = MANAGER_INTEGRATIONS_V2.get(MANAGERS["default"], False)
+        out["integrations_v2"] = MANAGER_INTEGRATIONS_V2.get(MANAGERS["default"], INTEGRATIONS_V2_DEFAULT)
         out.update(work_guide=MANAGER_WORK_GUIDES.get(MANAGERS["default"], False), agent_tasks=cfg["agent_tasks"], task_lessons=cfg["task_lessons"], close_ended_terminals=cfg["close_ended_terminals"], inbox_signals=cfg["inbox_signals"], archive_closed_days=cfg["archive_closed_days"],
                    idle_close_hours=cfg["idle_close_hours"], kb_topics=cfg["kb_topics"],
                    main_supervises_own_tasks=cfg["main_supervises_own_tasks"], next_suggestions=cfg["next_suggestions"],
@@ -3674,9 +3677,22 @@ def rule_suggestion(card):
 
 
 def suggested_plan(plan):
-    """A plan as the apps read it: an open one with the rule suggested for it, never kept with the plan."""
-    sg = rule_suggestion(plan["id"]) if plan.get("state") == "open" else None
-    return dict(plan, suggestion=sg) if sg else plan
+    """A plan as the apps read it: its start presentation and rule suggestion, never kept with the plan."""
+    p = dict(plan)
+    if p.get("state") == "open":
+        # MOCK_PLAN_START_REASON=<reason>|legacy: a gate (or a future raw reason), or an older hub without the field.
+        reason = os.environ.get("MOCK_PLAN_START_REASON", "start_authorization")
+        if reason != "legacy":
+            start = {"reason": reason}
+            if reason == "start_authorization":
+                remember = [i for i, task in enumerate(p["tasks"]) if not task.get("readonly")]
+                if remember:
+                    start["remember"] = remember
+            p["start"] = start
+    sg = rule_suggestion(p["id"]) if p.get("state") == "open" else None
+    if sg:
+        p["suggestion"] = sg
+    return p
 
 
 def rule_suggestions_area(h, method, p):
@@ -4876,15 +4892,17 @@ def assistant_for_manager(h):
                                                            "meeting_transcription_default", "meeting_glossary", "meeting_transcription_extension", "meeting_transcription_ready")}
     if "work_guide" in st:
         st["work_guide"] = MANAGER_WORK_GUIDES.get(mid, False)
-        st["integrations_v2"] = MANAGER_INTEGRATIONS_V2.get(mid, False)
+        st["integrations_v2"] = MANAGER_INTEGRATIONS_V2.get(mid, INTEGRATIONS_V2_DEFAULT)
     return (dict(st, manager=mid, conversations=[], tasks=[], notes=notes, notes_effective=notes), 200)
 
 
 def update_labs(h, body):
     if os.environ.get("MOCK_LEGACY_HUB"):
         return None
-    labs = {key: state for key, state in (("work_guide", MANAGER_WORK_GUIDES), ("integrations_v2", MANAGER_INTEGRATIONS_V2))
-            if body.get(key) is not None}
+    labs = [(key, state, default) for key, state, default in (
+        ("work_guide", MANAGER_WORK_GUIDES, False),
+        ("integrations_v2", MANAGER_INTEGRATIONS_V2, INTEGRATIONS_V2_DEFAULT),
+    ) if body.get(key) is not None]
     if labs:
         header = h.headers.get("X-Persona-Manager")
         query = (parse_qs(urlparse(h.path).query).get("manager") or [None])[0]
@@ -4893,13 +4911,13 @@ def update_labs(h, body):
             return ({"code": "bad_request"}, 400)
         if is_read_only(h): return ({"code": "forbidden"}, 403)
         with MANAGER_LABS_LOCK:
-            for key, state in labs.items():
+            for key, state, default in labs:
                 expected = body.get("expected_" + key)
                 if type(body[key]) is not bool or (expected is not None and type(expected) is not bool):
                     return ({"code": "bad_request"}, 400)
-                if expected is not None and expected != state.get(mid, False):
+                if expected is not None and expected != state.get(mid, default):
                     return ({"code": "configuration_conflict"}, 409)
-            for key, state in labs.items():
+            for key, state, _ in labs:
                 state[mid] = body[key]
     return None
 
@@ -4919,6 +4937,7 @@ def other_manager(h):
 # Each other manager's own 说明 (设置 › 助手 with its X-Persona-Manager): a whole assistant has its own.
 MANAGER_WORK_GUIDES = {}
 MANAGER_INTEGRATIONS_V2 = {}
+INTEGRATIONS_V2_DEFAULT = True
 MANAGER_LABS_LOCK = threading.Lock()
 MANAGER_NOTES = {"m-3fa21c": "这是「工作」管理者：只管工作电脑上的事和工作邮箱。"}
 
@@ -8800,6 +8819,7 @@ START_REMEDY_LOG = []
 START_QUESTION_SESSION = "a1f3c2d4-0000-4000-8000-000000000104"
 TASK_PLANS = {}
 TASK_FEED = {}
+PLAN_START_LOG = []
 if MOCK_TASKS:
     def _task_todo(tid, title, notes, mid, sid, cwd, minutes, plan):
         return {"id": tid, "title": title, "notes": notes, "done_at": None, "created_at": ago(minutes=minutes),
@@ -9937,6 +9957,9 @@ def tasks_area(h, method, p, raw):
     if START_REMEDIES and method == "GET" and p == "/mock/start-remedies":
         h.send_json({"requests": START_REMEDY_LOG})
         return True
+    if method == "GET" and p == "/mock/plan-starts":
+        h.send_json({"requests": PLAN_START_LOG})
+        return True
     if START_REMEDIES and method == "POST":
         m = re.fullmatch(r"/api/v1/todos/([^/]+)/start/answer", p)
         if m:
@@ -9978,6 +10001,8 @@ def tasks_area(h, method, p, raw):
         if plan["state"] != "open":
             h.send_json({"error": "this plan was already started or dismissed"}, 409)
             return True
+        if p.endswith("/start"):
+            PLAN_START_LOG.append(json.loads(raw or b"{}"))
         plan["state"] = "dismissed" if p.endswith("/dismiss") else "started"
         h.send_json({"plan": plan})
         return True
@@ -18643,8 +18668,15 @@ if os.environ.get("MOCK_REPLY_BLOCKS") == "1":
 # another port (PortForwardTests). GET /mock/ports lists the connects.
 LANDING = "a1f3c2d4-0000-4000-8000-00000000000d"
 PORT_LOG = []
+MOCK_PORT_INFO = {}
+MOCK_FAIL_PORTS = set()
 if os.environ.get("MOCK_PORTS") == "1":
+    import atexit
+    import shutil
     import socket
+    import ssl
+    import subprocess
+    import tempfile
     from http.server import SimpleHTTPRequestHandler
 
     _page = """<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>天气 · 落地页</title>
@@ -18674,14 +18706,137 @@ header{padding:56px 24px 24px}h1{font-size:34px;margin:0 0 8px}p{color:var(--mut
     _dev = ThreadingHTTPServer(("127.0.0.1", 0), _Dev)
     threading.Thread(target=_dev.serve_forever, daemon=True).start()
     DEV_PORT = _dev.server_address[1]
+
+    # Multi-module SPA dev server: 12 external ES modules/CSS + 1 HMR WebSocket over HTTP/1.1 keep-alive.
+    # Reproduces URLSession's 4-connection-per-host blank screen when PortForwarder does not raise the pool limit.
+    _spa_html = """<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>天气 · 多模块 SPA</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/style1.css"><link rel="stylesheet" href="/style2.css">
+</head><body><main id="root"></main>
+<script>
+window.__hmr = new Promise((resolve) => {
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/hmr");
+  window.__hmrWS = ws;
+  ws.onmessage = (ev) => { if (ev.data === "hmr-ok") resolve("open"); };
+});
+</script>
+<script type="module" src="/main.js"></script>
+</body></html>""".encode()
+    _spa_main = (
+        "\n".join("import { v as v%d } from '/mod%d.js';" % (i, i) for i in range(1, 11))
+        + "\nconst checksum = " + " + ".join("v%d" % i for i in range(1, 11)) + ";\n"
+        + "const total = 10 + document.styleSheets.length;\n"
+        + "window.__hmr.then((s) => {\n"
+        + "  if (s === 'open' && checksum === 55) {\n"
+        + "    document.getElementById('root').innerHTML = '<h1>SPA 已挂载</h1><p id=\"status\">modules=' + total + ' hmr=' + s + '</p>';\n"
+        + "  }\n"
+        + "});\n"
+    ).encode()
+    _spa_css1 = b":root{color-scheme:light dark}body{margin:0;padding:24px;font:17px -apple-system,system-ui}"
+    _spa_css2 = b"h1{font-size:28px;margin:0 0 8px}#status{color:#555}"
+
+    class _SPADev(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/hmr" and self.headers.get("Sec-WebSocket-Key"):
+                key = self.headers["Sec-WebSocket-Key"]
+                accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+                self.send_response(101, "Switching Protocols")
+                self.send_header("Upgrade", "websocket"); self.send_header("Connection", "Upgrade")
+                self.send_header("Sec-WebSocket-Accept", accept); self.end_headers(); self.wfile.flush()
+                payload = b"hmr-ok"
+                try:
+                    self.wfile.write(bytes([0x81, len(payload)]) + payload); self.wfile.flush()
+                    while self.rfile.read(1):
+                        pass
+                except OSError:
+                    pass
+                self.close_connection = True
+                return
+            if path == "/":
+                body, ctype, delay = _spa_html, "text/html; charset=utf-8", 0.0
+            elif path == "/style1.css":
+                body, ctype, delay = _spa_css1, "text/css; charset=utf-8", 0.10
+            elif path == "/style2.css":
+                body, ctype, delay = _spa_css2, "text/css; charset=utf-8", 0.10
+            elif path == "/main.js":
+                body, ctype, delay = _spa_main, "application/javascript; charset=utf-8", 0.05
+            elif path.startswith("/mod") and path.endswith(".js") and path[4:-3].isdigit() and 1 <= int(path[4:-3]) <= 10:
+                n = int(path[4:-3])
+                body, ctype, delay = ("export const v = %d;\n" % n).encode(), "application/javascript; charset=utf-8", 0.12
+            else:
+                body, ctype, delay = b"not found", "text/plain", 0.0
+                self.send_response(404); self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "keep-alive")
+                self.end_headers(); self.wfile.write(body); return
+            if delay > 0:
+                time.sleep(delay)
+            self.send_response(200); self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "keep-alive")
+            self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(body)
+
+        def log_message(self, *a): pass
+
+    _spa = ThreadingHTTPServer(("127.0.0.1", 0), _SPADev)
+    threading.Thread(target=_spa.serve_forever, daemon=True).start()
+    SPA_PORT = _spa.server_address[1]
+
+    # Self-signed HTTPS dev server for loopback TLS trust prompt tests and screenshots.
+    _tls_page = """<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>本地 HTTPS 服务</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><style>
+:root{color-scheme:light dark}body{margin:0;padding:24px;font:17px -apple-system,system-ui}
+</style></head><body><h1>本地 HTTPS 服务已连接</h1><p>已信任本次会话的自签证书。</p></body></html>""".encode()
+
+    class _TLSDev(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(_tls_page))); self.end_headers(); self.wfile.write(_tls_page)
+
+        def log_message(self, *a): pass
+
+    TLS_PORT = 0
+    _tls_dir = tempfile.mkdtemp(prefix="persona-mock-tls-")
+    atexit.register(lambda d=_tls_dir: shutil.rmtree(d, ignore_errors=True))
+    _cert_file, _key_file = os.path.join(_tls_dir, "cert.pem"), os.path.join(_tls_dir, "key.pem")
+    if subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", _key_file, "-out", _cert_file,
+         "-days", "1", "-nodes", "-subj", "/CN=localhost",
+         "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    ).returncode == 0:
+        _tls_srv = ThreadingHTTPServer(("127.0.0.1", 0), _TLSDev)
+        _tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        _tls_ctx.load_cert_chain(_cert_file, _key_file)
+        _tls_srv.socket = _tls_ctx.wrap_socket(_tls_srv.socket, server_side=True)
+        threading.Thread(target=_tls_srv.serve_forever, daemon=True).start()
+        TLS_PORT = _tls_srv.server_address[1]
+
     _s = socket.socket(); _s.bind(("127.0.0.1", 0)); GONE_PORT = _s.getsockname()[1]; _s.close()
+    _s2 = socket.socket(); _s2.bind(("127.0.0.1", 0)); FAIL_PORT = _s2.getsockname()[1]; _s2.close()
+    # Keep stopped/failing ports explicitly unreachable even when the iOS simulator shares this Mac's loopback.
+    MOCK_FAIL_PORTS.update((GONE_PORT, FAIL_PORT))
+    MOCK_PORT_INFO.update(dev_port=DEV_PORT, spa_port=SPA_PORT, fail_port=FAIL_PORT, gone_port=GONE_PORT, tls_port=TLS_PORT)
+
+    _listed_ports = [
+        {"port": DEV_PORT, "addr": "127.0.0.1", "pid": 4242, "process": "node", "title": "天气 · 落地页"},
+        {"port": SPA_PORT, "addr": "127.0.0.1", "pid": 4243, "process": "vite", "title": "天气 · 多模块 SPA"},
+        {"port": FAIL_PORT, "addr": "127.0.0.1", "pid": 4244, "process": "node", "title": "已断开的预览"},
+    ]
+    if TLS_PORT:
+        _listed_ports.append({"port": TLS_PORT, "addr": "127.0.0.1", "pid": 4245, "process": "vite", "title": "本地 HTTPS 服务"})
     SESSIONS.insert(0, sess("macbook", LANDING, "天气 App 的落地页", "/Users/me/code/weather-site", "idle", "unread", "weather", 1,
                             "site", 6, 1, "落地页起好了，在 :%d。" % DEV_PORT,
-                            ports=[{"port": DEV_PORT, "addr": "127.0.0.1", "pid": 4242, "process": "node", "title": "天气 · 落地页"}]))
+                            ports=_listed_ports))
+    _extra_links = "多模块 SPA：http://localhost:%d/ · 失效预览：http://localhost:%d/" % (SPA_PORT, FAIL_PORT)
+    if TLS_PORT:
+        _extra_links += " · HTTPS：https://localhost:%d/" % TLS_PORT
     ITEMS[LANDING] = [it("user", "text", 6, text="把落地页跑起来给我看看"),
                       it("assistant", "text", 1, text=(
                           "落地页起好了：http://localhost:%d/ ，改动会热更新。\n\n"
-                          "之前那版预览（http://127.0.0.1:%d/preview）已经停掉了。" % (DEV_PORT, GONE_PORT)))]
+                          "之前那版预览（http://127.0.0.1:%d/preview）已经停掉了。\n\n"
+                          "%s" % (DEV_PORT, GONE_PORT, _extra_links)))]
 
 # MOCK_HUB_LINKS=1: an agent's reply linking this hub's own pages (#2696): another agent's chat at one of its early
 # messages, a task, and an outside page. The app opens the first two natively (HubPageLinkTests), the third as a web page.
@@ -18710,6 +18865,8 @@ if os.environ.get("MOCK_HUB_LINKS") == "1":
 
 
 def port_listening(port):
+    if port in MOCK_FAIL_PORTS:
+        return False
     import socket
     try:
         socket.create_connection(("127.0.0.1", port), timeout=1).close()
@@ -27297,7 +27454,7 @@ class H(BaseHTTPRequestHandler):
         if pins_route(self, p): return
         if chat_pins_route(self, p, parse_qs(urlparse(self.path).query)): return
         if history_route(self, p, parse_qs(urlparse(self.path).query)): return
-        if p == "/mock/ports": return self.send_json({"connects": PORT_LOG})
+        if p == "/mock/ports": return self.send_json({"connects": PORT_LOG, **MOCK_PORT_INFO})
         if p == "/mock/lark/uploads": return self.send_json(LARK_UPLOAD_REPLIES)  # #1035: what each attachment quoted
         if MOCK_WEB and (p.startswith("/screen/") or p.startswith("/assets/")): return self.web_file(p)
         if p == "/mock/screen-video": return screen_video_control(self, parse_qs(urlparse(self.path).query))
@@ -27544,7 +27701,7 @@ class H(BaseHTTPRequestHandler):
             # MOCK_CANT_ANSWER: the Codex thread a test attached is not joined again (#6868).
             SESSIONS[:] = [copy.deepcopy(CANT_ANSWER_START[x["session_id"]]) if x["session_id"] in CANT_ANSWER_START else x
                            for x in SESSIONS]
-            del RECONNECTS[:], STARTED[:], SEEN[:]
+            del RECONNECTS[:], STARTED[:], SEEN[:], PLAN_START_LOG[:]
             INTERACTIONS.extend(SESSION_CLOSE["interactions"])
             SESSION_CLOSE.update(fail=False, attempts=[], closed=[], interactions=[])
             SESSIONS.extend(SESSION_DELETED); del SESSION_DELETED[:]
@@ -27662,6 +27819,7 @@ class H(BaseHTTPRequestHandler):
             return self.send_json(PREFS)
         if p == "/api/v1/pins": return self.send_json(PINS)
         if p == "/api/v1/agents/display-settings": return self.send_json(AGENTS_DISPLAY)
+        if p == "/api/v1/agents/botmux-owner-candidates": return self.send_json({"candidates": BOTMUX_OWNER_CANDIDATES})
         if p == "/api/v1/mutes": return self.send_json({"spaces": [], "sessions": TREE_MUTED, "allowed": []})
         if p.startswith("/api/v1/assistant") and (other := assistant_for_manager(self)) is not None:
             if p == "/api/v1/assistant" or other[1] != 200: return self.send_json(*other)
@@ -29706,7 +29864,14 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/v1/agents/display-settings" and self.command == "PUT":  # exactly one boolean per request
             body = json.loads(self.last_body or b"{}")
             sent = [k for k in ("show_botmux", "use_herdr_tab_name", "sort_by_activity", "show_filter") if isinstance(body.get(k), bool)]
+            if isinstance(body.get("botmux_owner_union_id"), str): sent.append("botmux_owner_union_id")
             if len(sent) != 1: return self.send_json({"error": "send exactly one switch"}, 400)
+            if sent[0] == "botmux_owner_union_id":
+                owner = body["botmux_owner_union_id"].strip()
+                if owner and not re.fullmatch(r"on_[A-Za-z0-9_-]{1,125}", owner):
+                    return self.send_json({"error": "botmux_owner_union_id must be a Feishu union_id (on_…) or empty"}, 400)
+                AGENTS_DISPLAY["botmux_owner_union_id"] = owner
+                return self.send_json(AGENTS_DISPLAY)
             AGENTS_DISPLAY[sent[0]] = body[sent[0]]
             if sent[0] == "show_botmux": AGENTS_DISPLAY["configured"] = True
             return self.send_json(AGENTS_DISPLAY)
@@ -30212,9 +30377,14 @@ class H(BaseHTTPRequestHandler):
         machine = next((m for m in MACHINES if m["id"] == mid), {})
         listed = listed or (port == 5900 and (machine.get("computer", {}).get("enabled") or machine.get("browser", {}).get("enabled")))  # cua or ego (#1507)
         # MOCK_PREVIEW: a preview's running port is the made-up app's page server (scripts/mock/mock_preview.py).
+        preview_err = mock_preview.forward_error(port) if preview_route and hasattr(mock_preview, "forward_error") else None
+        if preview_err is not None:
+            return self.send_json({"error": preview_err[1]}, preview_err[0])
         preview_to = mock_preview.forward(port) if preview_route else None
         listed = listed or preview_to is not None
         if not listed: return self.send_json({"error": "port %d is not an agent's and was not opened" % port}, 403)
+        if port in MOCK_FAIL_PORTS:
+            return self.send_json({"error": "nothing is listening on port %d" % port}, 404)
         try:
             to = preview_to or (FAKE_SCREEN["port"] if port == 5900 and FAKE_SCREEN["port"] else port)
             tcp = socket.create_connection(("127.0.0.1", to), timeout=3)
@@ -30749,7 +30919,7 @@ def _channel_view(c, manager):
     if os.environ.get("MOCK_LEGACY_HUB") or c["source"] != "plugin" or not c["installed"] or c["kind"] not in ("im", "mention"):
         return c
     prefs = CHANNEL_ROUTING.get((manager, c["id"]), {})
-    inherit_topics = MANAGER_INTEGRATIONS_V2.get(manager) and c["capabilities"].get("threads")
+    inherit_topics = MANAGER_INTEGRATIONS_V2.get(manager, INTEGRATIONS_V2_DEFAULT) and c["capabilities"].get("threads")
     return dict(c, thread_mode=prefs.get("thread_mode", "per_topic" if inherit_topics else "channel_default"),
                 **({"thread_idle_hours": prefs["thread_idle_hours"]} if prefs.get("thread_idle_hours") else {}))
 
@@ -30757,7 +30927,7 @@ def _channel_view(c, manager):
 def _channel_detail(c, manager):
     d = dict(_channel_view(c, manager))
     override = {"per_topic": "topics", "per_group_and_topic": "groups_and_topics"}.get(d.get("thread_mode"))
-    if override and MANAGER_INTEGRATIONS_V2.get(manager):
+    if override and MANAGER_INTEGRATIONS_V2.get(manager, INTEGRATIONS_V2_DEFAULT):
         d["target_override"] = {"mode": override}
     d["waiting"] = {"answers": 1 if c["id"] == "wechat" else 0, "asks": 0}
     if c["id"] in ("wechat", "feishu"):
@@ -32782,7 +32952,7 @@ def ultracode_route(handler, p, body):
             for m in MACHINES: push_machine(m["id"])
             if MOCK_TASKS:  # an open page draws the plan open again without a reload
                 for send, _ in list(LIVE):
-                    try: send(from_default({"type": "task_plan", "plan": TASK_PLANS["plan_mock_3"]}))
+                    try: send(from_default({"type": "task_plan", "plan": suggested_plan(TASK_PLANS["plan_mock_3"])}))
                     except Exception: pass
         handler.send_json({"requests": ULTRACODE_LOG, "started": [b for b in STARTED if "ultracode" in b], "plan_starts": ULTRACODE_PLAN_STARTS,
                            "sends": ULTRACODE_SENDS})
@@ -33251,6 +33421,7 @@ def features():
 MOCK_HELP.append("MOCK_START_REMEDIES=1  配合 MOCK_TASKS=1（#10365）：features 带 task_retry_launcher / start_continue / todo_start_answer；"
                  "末尾三个失败任务分别是 launcher_missing + retry_with、无 plan_id 的 worktree_path_taken、todo_start_answer 的 shell_waiting；"
                  "另有一个 start_continue 的 Agent 会话。Retry 记录空 body 或 launcher，回答两个 start 路由；GET /mock/start-remedies 看请求")
+MOCK_HELP.append("MOCK_PLAN_START_REASON=<reason>|legacy  With MOCK_TASKS=1: an open plan's start projection uses this reason (start_authorization by default); legacy omits the field like an older hub (#17853)")
 MOCK_HELP.append("MOCK_TOOL_SEARCH=1  普通主对话的 tool_search_unsupported 原始 400 turn error，看专用 Retry 卡（#10365）")
 
 

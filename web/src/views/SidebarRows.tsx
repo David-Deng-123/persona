@@ -32,7 +32,8 @@ import { contextMenuProps } from "../ui/context-menu";
 import type { MenuAt } from "../ui/menu-model";
 import { rowDetail, useAgentDetails } from "../lib/context-usage";
 import { ContextUsageBar } from "../ui/ContextUsageBar";
-import { AgentMark, SessionMark } from "../ui/AgentMark";
+import { AgentMark } from "../ui/AgentMark";
+import { CodingAgentAvatar } from "../ui/CodingAgentAvatar";
 import { AgentAvatar } from "./agents/AgentAvatar";
 import { useFolded } from "../lib/use-folded";
 import { ariaKeyshortcuts, formatChord } from "../lib/shortcuts";
@@ -51,7 +52,7 @@ import { askOverviewSubagents } from "../lib/subagent-link";
 import { backgroundStall } from "../lib/background-work";
 import { SESSIONS_LIST_FEATURE } from "../lib/session-list";
 import { personalHideDeps, personalOrder, personalSessions, removeAgentSession, useGoingIds } from "../lib/agents";
-import { BADGE_CLASS, CURRENT_ROW, type GoFn, GroupCount, pageIconStyle, type RegFn, ROW_TITLE_MIN, type RowMenuFn, Section } from "./SidebarParts";
+import { BADGE_CLASS, CURRENT_ROW, type GoFn, GroupCount, pageIconStyle, type RegFn, ROW_TITLE_MIN, type RowMenuFn, Section, useRowMenuSource } from "./SidebarParts";
 import { sidebarRowHover } from "./SidebarRowHover";
 import { requestDirectWaiting } from "../lib/direct-waiting";
 import { needsYouAutoOpen } from "../lib/needs-you-auto-open";
@@ -246,11 +247,11 @@ export const ShellRow = memo(function ShellRow({ k, reg, hover, active, to, go, 
         aria-hidden
         data-shell-mark
         className={cx(
-          "inline-flex size-3.5 shrink-0 items-center justify-center rounded-[3px] border border-line bg-inset",
+          "inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-line bg-inset",
           active ? "text-ink" : "text-ink-3",
         )}
       >
-        <Icon name="terminal" size={10} stroke={2} />
+        <Icon name="terminal" size={12} stroke={2} />
       </span>
       <span aria-hidden data-shell-status className="flex size-3.5 shrink-0 items-center justify-center">
         <span className="size-1.5 rounded-full bg-ink-3/50" />
@@ -430,6 +431,7 @@ export const SessionRow = memo(function SessionRow({ s: row, k, reg, hover, acti
   // the page's own mark on the parent clears its own part only: a side session's unread reply keeps it Unread, and its
   // line below says which (#13299). `own`: the row in its own state, as the hub sent it.
   const ownSeen = heldSeen(ownRow(row), seenMark, nowHandoff);
+  const readSource = useRowMenuSource(ownSeen);
   const marked = heldSeen(answeredSession(given, Boolean(ix), justAnswered, pending), seenMark, nowHandoff);
   const keptBySide = marked.state !== given.state && activityOf(given) === "unread" && foldedStateWith(ownSeen, sides && countSides(sides)) === "unread";
   const base = heldLaunchWorking(keptBySide ? { ...marked, state: "unread" } : marked, launch, nowHandoff);
@@ -546,7 +548,7 @@ export const SessionRow = memo(function SessionRow({ s: row, k, reg, hover, acti
       ref={regRow}
       {...destination}
       // right click (at the pointer), the menu key and Shift+F10 (beside the row): the row's menu, the same as its ⋯
-      {...(onMenu ? contextMenuProps((at, el) => onMenu(s, el, at)) : {})}
+      {...(onMenu ? contextMenuProps((at, el) => onMenu(s, el, at, readSource)) : {})}
       {...sidebarRowHover(() => ({
         title: displayTitle, session: s, titleDetail: displayTitle !== title ? title : sessionTitleDetail(s, preferTab),
         draft, working: leadActive, tab: associatedTab || structuralTabHint,
@@ -563,8 +565,8 @@ export const SessionRow = memo(function SessionRow({ s: row, k, reg, hover, acti
           ? "pr-1 [@media(hover:none)]:pr-1"
           : cx(onMenu && (active ? "pr-8" : "group-hover/row:pr-8"), onMenu && "[@media(hover:none)]:pr-11"))}
     >
-      {/* the agent's mark before its state (#6390): what runs there, then how it is doing */}
-      {showState && !s.assistant && <SessionMark s={s} size={14} />}
+      {/* the coding Agent's circular contact avatar + bottom-right hosting engine badge, before its state */}
+      {showState && !s.assistant && <CodingAgentAvatar session={s} size={24} markSize={14} ring="canvas" />}
       <span className="flex size-3.5 shrink-0 items-center justify-center">{showState || st === "working" || unseen || leadActive ? <StatusMark state={leadActive ? "working" : phase === "error" ? "error" : usageLimitLabel(s) && st === "unread" ? "idle" : st} awaiting={awaiting} finished={finished} waiting={backgroundWaiting(s)} /> : <Icon name={icon} size={12} className="text-ink-3" />}</span>
       {prefix && <span className={prefixClass}>{prefix}</span>}
       {/* with the mark, the title sits in the column whether a second line shows or not: the same element through a
@@ -687,7 +689,7 @@ export const SessionRow = memo(function SessionRow({ s: row, k, reg, hover, acti
       aria-haspopup="menu"
       title={t("sidebar.more")}
       tabIndex={-1}
-      onClick={(e) => onMenu(s, e.currentTarget.parentElement ?? e.currentTarget)}
+      onClick={(e) => onMenu(s, e.currentTarget.parentElement ?? e.currentTarget, undefined, readSource)}
       className={inFlow
         ? cx("relative z-20 my-1 flex size-6 shrink-0 items-center justify-center self-center rounded-[6px] text-ink-3 transition-opacity hover:bg-hover hover:text-ink [@media(hover:none)]:size-11",
           active ? "opacity-100" : "opacity-0 group-hover/row:opacity-100 [@media(hover:none)]:opacity-100")

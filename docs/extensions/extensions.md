@@ -125,7 +125,7 @@ What an extension contributes where is written in the manifest's `contributes`: 
 | `browser` (version 1) | — | `id`, `name?` | — | The assistant's browser tools (`browser_run` / `browser_look`) and **Browser** on the machine page (only the built-in `ego`), see [plan-ego-browser.md](../plans/plan-ego-browser.md) |
 | `iphone` (version 1) | — | `id`, `name?` | — | The assistant's phone-control tools (`iphone_status` / `iphone_look` / `iphone_do`), **Phone Control** on a computer's page and **Control of This iPhone** on the iPhone (only the built-in `iphone`), see [iphone.md](iphone.md) |
 | `quota` (version 1) | `quota.` | `id`, `name`, `hosts?` (gateway host names, may start with `*.`) | Process speaks the protocol, permission `launcher_keys` | **Quota** on the launcher page, see "Quota" below |
-| `usage` (version 1, #12402) | `usage.` | `id`, `name`, `hosts?` (gateway host names, may start with `*.`) | Process speaks the protocol, permission `launcher_keys` | Rows of the **subscription usage bars** from a gateway whose usage answer has its own shape, see "Usage extensions" below |
+| `usage` (version 2, #12402) | `usage.` | `id`, `name`, `hosts?` (gateway host names, may start with `*.`), `direct?` (discover without a launcher), `remote_address?`, `remote_key?` | Process speaks the protocol; launcher-backed items need permission `launcher_keys` | Rows of the **subscription usage bars** from a gateway or direct source whose usage answer has its own shape, see "Usage extensions" below |
 | `providers` (version 1) | `provider.` | `id`, `name`, `description?`, `kind?` (`launcher` / `api`), `api?` (`messages` / `responses`), `base_url`, `model?`, `small_model?`, `models?: [{id, name?}]`, `dynamic_models?`, `key_hint?` | Declarative is enough; `dynamic_models` needs the process to speak the protocol | **From Extension** in **Settings › Model Providers**, see "Model providers" below |
 | `api` (version 1) | `api.` | `id`, `prefix` (one path segment), `features?`, `events?`, `receipts?` (`[{method, path, kind}]`: writes that need send receipts) | `runtime.http`, `on_startup`; with `events`, the process must speak the protocol | A block of App-facing API `/api/v1/<prefix>/…`, see "App API" below |
 | `assistant` (version 1) | `assistant.` | `id`, `title?` (≤ 40 characters, for the contribution switch), `skills?` (directories in the package, each with `SKILL.md`), `instructions?` (an `.md` in the package), `gate?` (a `.json` in the package: the gate for one command in a skill) | These files exist in the package; `gate` requires `skills`, and when credentials are needed the process speaks the protocol | The assistant's skills, instructions and command gates, see "Assistant" below |
@@ -515,7 +515,7 @@ To call the hub's HTTP API, an extension lists the scopes it uses in `permission
 | `kb.write` | Change entries in the knowledge base | `PUT /api/v1/kb/{kind}/{id}`, not with terminal control characters (see below) |
 | `inbox.read` | Read the Inbox | `GET /api/v1/inbox`, `/inbox/{id}`, `/inbox/mutes`, `/inbox/policies` |
 | `inbox.write` | Handle the Inbox | Mark as handled, draft, reply (text only: replies with `changes` or `/agent` still require full access), document status, mute, set policies, refresh |
-| `agents.read` | See the Agents and chats on your computers | `GET /api/v1/sessions…` (list, info, items, images, screen), `/interactions`, `/interactions/history` (paged by time, see "Question history"), `/agents…` (personal Agents), `/workspaces`, `/workspace-board`; never the health space's chats or a private card (see "Never shown to extensions") |
+| `agents.read` | See the Agents and chats on your computers | `GET /api/v1/sessions…` (list, info, items, images, screen), `/interactions`, `/interactions/history` (paged by time, see "Question history"), `/agents…` (personal Agents), `/workspaces`, `/workspace-board`, `GET /api/v1/agents/triage` (the triage's switches, read-only: the PUT stays with full credentials, and a scoped device's `agents.read` does not open it); never the health space's chats or a private card (see "Never shown to extensions") |
 | `agents.control` | Drive Agents | `POST /api/v1/sessions` (create), a chat's `messages` / `interrupt` / `queue` / `queue/send-now` / `seen` / `rename`, `POST /api/v1/interactions/{id}/resolve` (approving a plan, or answering a terminal card with anything but a bare `dismiss`, also needs `agents.permission_mode`), `/choose` and `/reanswer`, sending messages to and marking read for personal Agents; with no terminal control characters in the text it sends (messages, prompts, notes, titles, answers; see below) |
 | `agents.permission_mode` | Change the permission mode of the chats it started itself | A chat's `modes` with `permission_mode` only, `POST /api/v1/sessions` resuming a chat with a `permission_mode`, approving a plan (`POST /api/v1/interactions/{id}/resolve` with `approve: true`, which sets the chat's mode) and answering a terminal card (`kind: "screen"`, whose keys can change it): only of a chat its extension opened (see below) |
 | `machines.read` | See your computers | `GET /api/v1/machines`, `/machines/{id}/metrics`, `/machines/{mid}/stat`, `GET /api/v1/assistant/machine-resources` (read-only per-machine resource summary including disk, OS/arch, failing launcher names and `is_hub`, excluding space sessions from `working_agents` and omitting connection errors and session details) |
@@ -553,6 +553,17 @@ Scopes cover what an extension calls with its token. The owner's own answers tha
   A domain gives its routes their scopes from its own file, `server/internal/extwire/<domain>_scopes.go`, through `addRouteScopes` (the Inbox's are in `inbox_scopes.go`); the literal in `extwire/scopes.go` takes no new key (`docs/server/architecture.md` "Registering a domain's entries").
   All hub routes and the decision for each are listed in `server/internal/hub/testdata/route_scopes.txt` (`-` means full credentials only), guarded by `TestRouteScopes`: adding a route makes the test fail,
   so first decide whether extensions may call it (if so, give it its scope in its domain's `extwire/<domain>_scopes.go`), then run `PERSONA_UPDATE_ROUTE_SCOPES=1 go test ./internal/hub -run TestRouteScopes` and review the diff carefully.
+- **Adding a route to a scope the user already granted** asks nobody again: the consent covers the manifest's permissions, not the route list. So a route joins an existing scope only when all three hold (#17851):
+  what it returns is within what the scope's install wording promises; a scope named `*.read` opens `GET` routes only (`TestReadScopesOnlyGet` in `server/internal/extwire`); and it shows an extension the same sessions and cards
+  as the scope's other routes do ("Never shown to extensions"). Anything that changes, sends or spends takes a scope of its own.
+- **Never opened by any scope** (`TestRoutesClosedToExtensionTokens` in `server/internal/hub`): the apps' socket `GET /api/v1/ws`, whose connection is served as the owner's unless it is a scoped or read-only device's (to hear of changes, an extension
+  subscribes to "Events"); a computer's files and folders, every route at or under `/api/v1/machines/{mid}/files`, `/file`, `/fs`, `/dirs` and `/file-transfer` whatever its method (the Files browser lists, reads and changes anything in the home; the test finds them by path, so a route added there later is closed too); a meeting's live route `/api/v1/recordings/{id}/live` (a meeting's room is told by its session row: `origin` `meeting`, `origin_ref` the
+  recording); and the triage's `PUT`.
+- **The voice package's routes** (#16264: the voice program as a marketplace package) need `kb.read`, `agents.read`, `agents.control`, `machines.read` and `assistant.ask` and nothing else: twelve hub routes, kept by `TestVoiceRoutesNeedOnlyTheVoiceScopes`.
+  `TestVoiceProgramOnAnExtensionsToken` keeps what a token of those scopes gets: every one of the twelve, no conversation of a space, no private card, and a message that is not relayed as the owner's own input (`human`, `reply_input` in `docs/protocol/protocol.md`'s `assistant.send_params`), so it does not count for recovering a reply that went missing.
+  This is the package's list, not the built-in's. The built-in in this tree (`server/internal/modules/voice`) runs on the hub's own token and calls four more kinds of route, which stay closed to every scope on purpose and which the package does without (#17851, #16264):
+  `GET /api/v1/ws`, its wake-up (the package is told of changes by an extension event instead, `agent.changed`, the other part of #17851); `GET /api/v1/recordings/{id}/live` (the package tells a meeting's room by its session row, `origin` `meeting` and `origin_ref` the recording);
+  `GET /api/v1/channels` (the package names the built-in channels itself); and `POST /api/v1/machines/{mid}/files/mkdir` and `…/files/write`, a call's archive (the first package version writes none, and a hub with an archive computer set keeps the built-in).
 - **Token**: starts with `pext_`. Each time the hub starts an extension's program it signs a new one (revoking the old one at the same time) and gives it via the env vars `PERSONA_HUB_URL` / `PERSONA_HUB_TOKEN` (old names `PERSONA_*` given too)
   and `initialize`'s `hub.url` / `hub.token` / `hub.scopes` (extensions running elsewhere get only `initialize`). It is revoked when the extension is disabled, upgraded, reconfigured or uninstalled, or when the start it was signed for does not come up (its `initialize` refused or failed), and a new one is signed at the next start.
   Whenever the manager drops a token (revoked, or replaced by the next one) it tells the hub (`extensions.token_revoked`, the token's SHA-256), and the hub ends at once what that token has open over the relay streams to the manager, such as WebSockets and streams, as when a device is revoked. A request the hub forwards to the manager as a single bus call is not ended: one already under way completes. A request let in just before is ended as it starts. If telling the hub fails (a timeout, a dropped connection, a moment off the bus while the manager reconnects), the manager tries again a few times, for up to about a minute. A manager off the hub's bus cannot tell it, so when a manager's connection to the bus ends the hub ends, the same way, what all of its extensions' tokens have open; the token opens nothing new meanwhile, since the hub asks the manager whose a token is.
@@ -977,8 +988,9 @@ Each entry (`MemoryEntry`):
   field means nothing is known: each entry is in no track and taken for sensitive everywhere, so no assembly carries it.
 - **`standing_bytes`** (#15312) is the bytes of standing entries' text the extension wants a standing channel to carry,
   say its own setting for how much it keeps resident. The hub keeps this budget apart from its own memory ledger's
-  (neither spends the other's), takes the largest any page or source states, and caps it at 8192; left out or 0 means
-  4096. A negative value, or one that is not an integer, fails the page like the other page fields. Past the budget the
+  (neither spends the other's), takes the largest any page or source states, and caps it at 8192, or at the owner's
+  choice when that is larger (`assistant.memory_extension_standing_bytes`: 4096 by default, 8192 or 16384); left out or
+  0 means that choice, 4096 by default. A negative value, or one that is not an integer, fails the page like the other page fields. Past the budget the
   usual rule holds: the most important entries first, one that does not fit is left out and a smaller one after it may
   still go (`docs/assistant/health.md` "Memory by scene", "Budgets").
 - **Not filtered by scene**: answer every entry the extension would otherwise put in its text outlets. Grading by scene
@@ -1433,18 +1445,22 @@ The hub has an **egress proxy** (`server/internal/extension/egress`), started th
   (`dialRace` in `extension/egress/race.go`, after RFC 8305 Happy Eyeballs v2): IPv4 and IPv6 alternate starting with the resolver's first family, the next address starts 250 ms after
   the previous one or at once when one fails, at most four attempts are open at once (with four open and addresses waiting, the oldest is canceled after 10 s and its address goes once
   more to the back of the line, with 20 s that time, so making room never removes the only address that answers slowly), the first connection wins and every other attempt is canceled
-  or closed. When the request's deadline passes, the error is the deadline (with each address's cause), even when the attempts' own timeouts come first. Nothing is resolved again, so the address dialed is always one that was checked. The fetch broker of source runtimes pins the address
-  even through the hub's upstream proxy, so there each attempt is its own CONNECT to one checked address and is raced the same way. Process extensions race the addresses the proxy
-  resolves itself (allowed names and settings addresses); when the hub has an upstream proxy for them, the CONNECT carries the name and the upstream proxy picks the address, so there is
-  one attempt. The request budgets and the broker's admission limits are unchanged.
+  or closed. When the request's deadline passes, the error is the deadline (with each address's cause), even when the attempts' own timeouts come first.
+  Process extensions and the source-runtime fetch broker both pin each attempt to one locally checked address. Through the hub's upstream proxy, every CONNECT carries that numeric
+  address so the upstream has no hostname to resolve.
   Known limits: within a 15-second budget only the first eight addresses get an attempt (the ninth would start at 20 s; dialing one by one reached no further); and the process path
   bounds sockets per request, not in total: an extension's 128 pending requests can hold up to 512 attempts at once, with no cap across extensions.
-- **TCP connects but TLS stays silent** (#2745): direct CONNECT tunnels with several checked addresses keep the TCP race, then buffer a complete TLS ClientHello (up to 64 KiB). TLS on port 443 and other ports is recognized by its initial handshake record (`0x16`).
-  Each address gets 4 s to write the hello and return its first byte; a silent connection is closed and the hello is replayed to the remaining checked addresses, with each retry's TCP dial included in that budget.
-  Any server byte commits the connection, including a TLS alert: there is no switching after that, and TLS early application data is never replayed. When all addresses fail, the proxy logs the causes and closes the tunnel (CONNECT 200 has already been sent).
-  The responding address is preferred on the next CONNECT to that host:port, but only if it appears in the freshly checked DNS answer. This in-memory hint cache holds at most 1024 destinations.
-  Server-first protocols pass their banner through immediately. Clients get up to 1 s to send a complete hello; idle, incomplete, oversized or unrecognized input falls back to ordinary relay with its bytes preserved, without retries.
-  Single-address destinations, tunnels through an upstream proxy, plain HTTP, HTTP upgrades and the source-runtime fetch broker keep their existing behavior and timeouts. There is no new configuration.
+- **TCP connects but TLS stays silent** (#2745, #17802): CONNECT tunnels with several checked addresses buffer a complete TLS ClientHello (up to 64 KiB) after the initial address race.
+  TLS on any port is recognized by its initial handshake record (`0x16`). Each address gets 4 s to write the hello and return its first byte. A silent connection is closed and the
+  hello is replayed to the remaining checked addresses over the same route. Each retry's budget includes its TCP dial and any upstream CONNECT handshake.
+  Any server byte commits the connection, including a TLS alert. Early application data goes through ordinary relay after the connection commits. When all addresses fail,
+  the proxy logs the causes and closes the tunnel.
+  The responding address is preferred on the next CONNECT to the same host:port over the same route, provided it appears in the freshly checked DNS answer. The in-memory cache
+  holds at most 1024 hints, keyed by destination and either the direct route or the upstream proxy's TCP endpoint.
+  Server-first protocols pass their banner through immediately. Clients get up to 1 s to send a complete hello. Idle, incomplete, oversized or unrecognized input falls back to
+  ordinary relay with its bytes preserved. Single-address CONNECT tunnels go straight to relay. Plain HTTP and upgrades use the address race.
+  The source-runtime fetch broker uses the resolver's address preference because its HTTP transport handles TLS itself. A tunnel hint can come from a TLS alert, and the transport
+  cannot recover from a poor hint with tunnel failover.
 - Env vars: `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`, `ALL_PROXY`, `all_proxy` point at the proxy, and `NO_PROXY` is empty. Go, Python, curl and Node libraries that apply the proxy themselves honor them;
   old clients that only honor `HTTPS_PROXY` still can't get out from the sandbox, which is the intended effect.
   `NODE_USE_ENV_PROXY=1` is set as well (#15707): without it Node's own `fetch` and `WebSocket` ignore the proxy variables, dial straight out and fail inside the Linux sandbox with `ENETUNREACH` while the proxy counts nothing.
@@ -1637,6 +1653,39 @@ Exactly one of `archive` and `npm`; if this hub's platform has no `archive` entr
   Child processes the extension runs inherit `PATH` as usual. This applies only to extensions installed from a package: nothing is installed for `dir:` during development (`extension dev`), manager.json or built-in ones.
 - **No sudo, nothing global**: it writes only the hub's state directory; anything else the program needs (credentials, caches) goes in the extension's data directory, e.g. by pointing its config directory there with an env var.
 - `tools` in the list and details are the programs this version uses: `[{name, title?, version, reused}]`.
+
+### Read-only Integrations settings projection
+
+People managing connections for several assistants can open the settings of the assistant that owns each integration.
+The hub relays `GET /api/v1/assistant/integrations` and `GET /api/v1/assistant/integrations/{kind}/{id}` through its
+normal `X-Persona-Manager` routing. Use the selected assistant's `integrations_projection_v1` field in
+`GET /api/v1/managers` to opt in. Both reads require a full-access client, like the settings reads they compose.
+Clients use the existing settings routes for writes and for reading the settings inside each section.
+
+- The catalog returns `items`, `counts` and `availability`. Each row has a stable `ref {manager, kind, id}`
+  including the explicit default assistant id, a display name, `origin`, typed `capabilities` and
+  `availability {state, reason?}`. `counts.all` counts visible rows once. Each other count is the number of visible
+  rows that have that capability. One row may belong to several filters. Only the detail response carries sections.
+- Host registrations take precedence over extension contribution references. A legacy producer can use an exact id
+  match within a resource type and the same assistant when it has no explicit relationship of that type.
+  An independent row reports `relationship_issue` for ambiguous claims, a missing or unavailable owner, or a
+  subscription whose saved extension conflicts with the connector's current owner. Push sources use their own refs.
+- A failed read reports `unavailable` and `read_failed` for its source in `availability`. The catalog keeps successful
+  reads and their counts. A row can also have a `capability_availability` entry for a failed or unready related resource.
+  Detail returns 503 when the requested resource's source failed and the resource could not be resolved, and 404
+  when that source answered and the resource is absent.
+- The host reports `module.lark` and `module.mail` in the service entries of `availability`. A service whose
+  provider is off or excluded from the build is omitted from the catalog and counts. Its service detail can still
+  report `module_off` for an older settings link such as `service/mail`. A readable saved subscription can still
+  appear there. An installed Lark gateway extension has its own entry and follows its own settings.
+- Detail returns the canonical `item`, typed `sections` and source `availability`. Each section names its own
+  typed resource `ref` and `edit` mode. `settings` delegates actions to the existing settings workflow, including
+  its permission and confirmation checks. An addressable member resolves to its owning integration. Configuration
+  hints map to Connection, Conversation and Push, Inbox and Sync, or Extension Configuration. Missing and unknown
+  hints map to the general configuration group. The projection carries section descriptors and status codes.
+
+The wire contract is generated from `schema/wire/integrations-projection.schema.json`. The reads require no new
+setting or migration, and `integrations_v2` continues to control the client entry.
 
 ### Host CLI integrations
 
@@ -2389,7 +2438,9 @@ manifest can ask for four things. A hub from before them refuses the manifest, s
   only changed it would move everyone who never filled the field in without asking again (#6099).
   - Only that host and port, as written: no subdomain, no other port. A redirect to another host is refused like any
     host.
-  - https only (a CONNECT tunnel) unless the entry is `config:<field>:http`, which also takes plain http.
+  - https only (a CONNECT tunnel) unless the entry is `config:<field>:http`, which also takes plain http. A WebSocket
+    address counts as its HTTP one (#16264): `wss://` as https, `ws://` as plain http (so it too needs `:http` or a
+    loopback host).
   - The proxy resolves the name itself and dials the address it checked. It refuses the name when any answer is
     loopback, link-local (the usual cloud metadata address included), unspecified, multicast, a metadata address (`fd00:ec2::254`,
     `100.100.100.200`), or this machine's own address at the hub's or the proxy's port. Private network addresses are
@@ -2713,7 +2764,11 @@ The open-source repo ships no quota extension for any particular gateway.
 
 A usage extension (`usage`, #12402) turns a gateway's own usage answer into the rows of the subscription usage bars (`docs/server/usage-windows.md`), where the fixed `relay`, `relay_key` and `generic` source types do not fit. Like a quota extension it **never sees the launcher's key**.
 
-It is read as a usage source of `type: "extension"` in the manager's `manager.json` (`usage.sources[]`, with `extension`: the extension's id, and `launcher`: the launcher whose gateway it reads; no `url`, no `key`). Every poll cycle (`usage.poll_minutes`, default 5) the manager:
+**Direct sources (usage version 2).** A contribution with `direct: true` is discovered from installed, enabled extensions. The manager polls it with `usage.query {contribution, tz, lang}`; no launcher, `usage.http` session, or manager configuration entry is needed. The program uses its extension settings and normal sandbox network grants, and returns the same accounts as a launcher-backed source. Disabling the contribution or extension removes its rows. The manager's global usage switch and polling interval apply to both modes.
+
+A direct contribution can declare `remote_address` and `remote_key` naming its URI setting and fixed secret. Persona requires a saved HTTPS address before accepting the secret and clears that secret when the origin changes. Declare the relevant `permissions.network` hosts or settings separately. A direct contribution does not declare launcher `hosts` or require `launcher_keys`.
+
+**Launcher-backed sources.** A contribution without `direct` is read as a usage source of `type: "extension"` in the manager's `manager.json` (`usage.sources[]`, with `extension`: the extension's id, and `launcher`: the launcher whose gateway it reads; no `url`, no `key`). Every poll cycle (`usage.poll_minutes`, default 5) the manager:
 
 1. checks that the extension is enabled, running, granted `launcher_keys`, and that one of its `usage` items names the launcher's gateway host (no `hosts`: any);
 2. sends `usage.query {contribution, query_id, base_url, tz, lang}`: `base_url` is the gateway's root (with `/v1` removed), `tz` the user's time zone, `lang` the user's language (`en`, `zh-Hans`, `ja`), which the extension's text is written in;
@@ -2721,6 +2776,8 @@ It is read as a usage source of `type: "extension"` in the manager's `manager.js
 4. the extension answers `{accounts: [{id?, provider, name, plan?, headline?, notice?, sampled_at?, windows: [{label? or window_minutes, used_percent, resets_at?, model?, group?, title?, note?, protect_percent?}]}]}`.
 
 The manager checks and cuts the answer (`usagesource.FromExtension`): `provider` is `^[a-z0-9][a-z0-9_-]{0,31}$`; a window needs a length (`label` such as `5h`, `7d`, or `window_minutes`) and a number (clamped to 0–100); an account with no window needs a `headline` or a `notice`; at most 500 accounts and 32 windows each; text is plain, one line, cut to 80 (`name`), 40 (`plan`, `model`, `group`, `title`) and 200 characters (`headline`, `notice`, `note`). No colour or icon: the clients choose them. What does not fit is left out. `protect_percent` is the gateway's protection line for that window (the used percentage at which it stops sending work to the account; it can differ per account and per window): kept when it is a number from 0 to 100, otherwise dropped, and forwarded on the window in `GET /api/v1/usage/windows` so clients can mark it on the bar (`docs/server/usage-windows.md` ("Usage extensions")).
+
+A supplied account `id` keeps the sidebar row identity stable across polls when it is unique for that provider within the source. Rows with absent or duplicate IDs use their position. Use an opaque ID and keep it constant when the same account is read again.
 
 Rows from an extension are **not merged** with what the computers or other gateways report: they are drawn as sent, after the merged ones, in the extension's order. `group`, `title`, `note`, `headline` and `notice` are optional fields of the usage answer (`GET /api/v1/usage/windows`); a client that does not know them ignores them and draws the flat windows it always did. A failed query keeps the last answer, faded and marked, like any other source.
 
@@ -4967,7 +5024,12 @@ can set addresses, keys and switches; admin has a switch too:
 | `models`, `default_model` | As above; omitted live-dialect values read the service's model list |
 | `input_rate` | 16000 / 24000 |
 | `owner`, `notes` | What to call you, extra instructions for the voice assistant; supplied values override manager.json |
+| `tts_url` | Optional OpenAI-compatible streaming TTS endpoint (`http://` or `https://`, base URL such as `https://tts.example.com` or full `…/v1/audio/speech`; #17843). Empty keeps the realtime upstream's own audio; also accepted in manager.json |
+| `tts_model` | Optional TTS `model` value; empty sends `"default"`. Also accepted in manager.json |
+| `tts_default_voice` | Optional fallback voice id (`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`), always included and marked default in `GET /voices` while TTS is configured. Also accepted in manager.json |
+| `tts_sample_rate` | Optional fallback PCM sample rate (`8000`–`48000` Hz) when the TTS response omits a rate header. Also accepted in manager.json |
 | Secret `key` | API key sent as `Authorization: Bearer`; encrypted with `secret.key` in `plugin_secrets`, write-only, endpoint reports only "set" |
+| Secret `tts_key` | Optional Bearer key sent only to `tts_url`; write-only secret in `plugin_secrets` (never manager.json), bound to `tts_url`'s origin like `key` is to `url` (#17843) |
 
 `ssh`, `key_file`, `key_command`, an explicit `tools` and additional upstreams are manager.json-only (`key_command` executes on the hub machine). Additional upstreams do not fit the deliberately restricted entry-list shape or its current web-only editing support, so the form still exposes the one upstream above.
 The form's upstream has no `tools` switch, so it is auto: it declares the function tools and drops them only if the service refuses them (#1420). To keep them off, configure that upstream in manager.json with `"tools": false` instead.
@@ -4980,11 +5042,16 @@ The form's upstream has no `tools` switch, so it is auto: it declares the functi
   with a sentence such as "Real-time voice service address and key" in `needs_setup` (like `hubJSONWaitsForTriageModel`: running but needs configuration); the app only recognizes `running` voice extensions, so no voice entry appears.
 - **Keys are sent only to the address they were set for**: when config changes `url` to another origin (scheme + host + port; case, default port and path differences do not count),
   the hub **deletes the key before saving config**, responds with `secrets_cleared: ["key"]` and adds "Address changed; key cleared. Please enter it again" to `warnings`; clearing the address counts as a change too.
-  With an empty address, `PUT …/-/secrets/key` returns 400 `needs_url`. This prevents changing the address to an attacker's host and receiving the key as a Bearer token.
+  With an empty address, `PUT …/-/secrets/key` returns 400 `needs_url`. The optional `tts_key` follows `tts_url`'s origin independently under the same rule (`secrets_cleared: ["tts_key"]`, `PUT …/-/secrets/tts_key` returns 400 `needs_url` while `tts_url` is empty; #17843). This prevents changing an address to an attacker's host and receiving its Bearer token.
   - Implemented in the registry (`Registry.BoundSecrets` / `SecretNeeds`, hooks from `voice_extension.go`): applies to all `SetConfig` callers (assistant config changes, etc.), not just this endpoint;
     checking, key deletion, config save and key setting share one registry operation lock, so interleaved requests cannot pair a key with an address it was never set for.
   - **Prefer deletion on failure**: delete whether or not key-presence can be read (idempotent); unreadable presence still returns `secrets_cleared`. If deletion fails, save nothing, return 500 `secret_not_cleared`;
     if config save fails after deletion (database write failure, 409), the error also includes `secrets_cleared` and the old address remains. Invalid form config (400) changes nothing and keeps the key.
+- **The official package** (#16264): the official market's `voice` package may take this extension's row over
+  (catalog upgrade on a build with the module, adoption of the row on one without it), with the same settings, key and
+  default meeting transcription; the key keeps following the address there too (`isVoiceProvider`). A hub whose
+  built-in has a manager.json entry, a quota gateway's upstream or a call archive computer (`archive_machine`) is not
+  offered it and keeps the built-in; details in `docs/assistant/voice.md` ("Migration and rollback").
 - **Model fallback**: if the selected model's upstream disappears (address cleared, manager.json changed), no error/disconnect: use default model and voice, then send nonfatal `error{code: "model_unavailable"}` after connecting.
 - **`GET /info`**: `{"protocol": 2, "features": ["target", "runs", "asks", "resume", "suspend", "speak", "speech_gate", "meeting", "hold", "dictation"], "setup"?: "…", "warnings"?: ["…"]}`, without keys or upstream list. `protocol` is the highest voice-frame version this extension speaks (2 since #3502; clients not sending `protocol: 2` in `start` still use protocol 1 from this section); `features` lists only implemented capabilities (`docs/assistant/voice.md` ("Version negotiation")).
 - **`POST /speak`** (#5004, feature `speak`): `{"text", "model"?, "voice"?, "lang"?}` read aloud in its own upstream session (no tools, instructions to say the text exactly as written); answers `200` `audio/pcm` with `X-Persona-Audio-Rate` and the reply's PCM16 as it comes, or, before any audio, `{"error", "code"}` with `400 bad_request`, `403 forbidden` (not a full device), `503 no_upstream`, `502 upstream_forbidden`, `503 upstream_unavailable`, `502 upstream_failed` or `504 no_audio`. The iPhone says meeting answers with it outside a call; details in `docs/assistant/voice.md` ("Reading a text aloud").
@@ -4993,9 +5060,10 @@ The form's upstream has no `tools` switch, so it is auto: it declares the functi
 - **Meeting transcription** (#3862 phase 5): the manifest also contributes `transcription: [{"id": "gpt-live", "name": "GPT-Live"}]` beside its voice (its kind stays `voice`), with the same upstreams and key.
   It transcribes only through a GPT-Live (`live` dialect) upstream: the default model's when its upstream is one, else the first `live` upstream's default; with none,
   `GET /transcription/gpt-live/info` says `setup: "live_upstream"`. See "Transcription" above and [meeting-minutes.md](../assistant/meeting-minutes.md) "The built-in adapter".
-- **Extension env vars**: `PERSONA_EXTENSION_CONFIG` (form values with defaults), `PERSONA_EXTENSION_SECRETS` (`{"key": "…"}`, decrypted only in process environment),
+- **Extension env vars**: `PERSONA_EXTENSION_CONFIG` (form values with defaults), `PERSONA_EXTENSION_SECRETS` (`{"key": "…", "tts_key": "…"}`, decrypted only in process environment),
   `PERSONA_VOICE_HUB_CONFIG` (original `config` of the taken-over entry), entry `env`, and `PERSONA_HUB_URL` / `PERSONA_HUB_TOKEN` (manifest `hub_api`, as before);
   legacy `PERSONA_PLUGIN_*` names are also supplied and accepted.
+- **TTS voice list (#17843)**: while `tts_url` is configured, `GET /voices` reads the TTS endpoint's `GET …/v1/audio/voices` (sending `Authorization: Bearer` only when `tts_key` is set), caches good lists for 10 minutes, always includes `tts_default_voice` as default (else the endpoint's default, else the first), returns the last good list marked `stale: true` on failure, and falls back to `tts_default_voice` alone on `404` or when unreachable (`docs/assistant/voice.md` 5.10). Without `tts_url`, `GET /voices` behaves as before.
 
 ### Taking over manager.json entries
 

@@ -1071,6 +1071,9 @@ func (s *Service) sendRelay(ctx context.Context, machine, to string, msg relayMs
 	}
 	// A hand-over of the owner's words into a lead holds its writable plans from before the send (relay_lead_hold.go).
 	handed := s.holdForHandover(to, msg)
+	// Background, scheduled, supervision, and extension-event turns do not originate from a user's device;
+	// clear any previous human turn's origin device so it never leaks into this turn's connector calls.
+	s.clearConversationOriginDevice(to)
 	var res superviseRoundReply
 	if err := s.call(ctx, machine, DeviceAssistantSend, params, &res); err != nil {
 		if msg.Tool == superviseTool && !relayInDoubt(err) { // in doubt, drainRelays lets go once it knows it did not go in
@@ -1340,6 +1343,12 @@ func (s *Service) drainRelays(machine string, list []proto.Session) {
 			// reported blocked (#4332): ask the task once more right before it would interrupt. A node that cannot
 			// be reached is not an answer, so its notice stays queued for a later drain.
 			stale, keep := msg.Withdrawn || s.chatReplyStale(ctx, msg), false
+			if !stale && msg.standalonePermission() {
+				// A restored card gets a fresh route. An old wake must leave before its
+				// transcript lookup can delay the current wake behind it.
+				_, pending := s.pendingStandalonePermission(id, msg, time.Now())
+				stale = !pending
+			}
 			if !stale && msg.Tool == noticeTool && msg.State == "needs" {
 				// The loading read covers a hub restart whose first drain runs before the todos were read in:
 				// an unreadable todo is unknown, so the notice is delivered as without the recheck.
@@ -1385,6 +1394,17 @@ func (s *Service) drainRelays(machine string, list []proto.Session) {
 							retry = relayLookGap
 						}
 					}
+				}
+			}
+			if !stale && !keep && !landed && msg.Tool == prFollowupTool {
+				// Pre-upgrade queued follow-ups also become quiet. A delivery
+				// already in doubt was checked above under its original identity.
+				quiet := msg
+				quiet.OnceID = relayMsgID(id, original)
+				_, stale = s.keepRelayLater(id, quiet)
+				keep = !stale
+				if keep {
+					retry = relayRetryGap
 				}
 			}
 			if !stale && !keep && !landed {

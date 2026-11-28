@@ -134,8 +134,9 @@ Group-capable connectors submit each thread's new messages as a **batch awaiting
 - `track`: the calling conversation's track, its slug (`main` for the main track); absent when the hub cannot tell.
 - `track_kind`: the track's kind; absent when not known (the main track).
 - `categories`: the conversation's information categories (`health`, `finance`, `relationships`, `emotion`, `legal_id`; `docs/assistant/health.md` "Information categories"), `[]` for general. **Absent means not known** (an older hub, a turn not tagged yet): take it for sensitive.
+- `origin_device_id`: the hub-authenticated paired device ID (for example `dev_...`) that originated the current user turn; absent when the turn did not come from a paired user device (scheduled task, channel, extension, legacy master token, or an older hub). Set exclusively by the hub from verified credentials, never client-supplied, and updated or cleared on each turn so stale device identities never carry over.
 
-All three are optional and additive (no version change): a program that ignores them works as before. Whether the phone confirms a write stays the hub's decision, never the connector's. A connector built on `server/internal/connector/serve` reads them with `connector.CallContextOf(ctx)` inside `Call`, `Describe` and `Write`; an SDK program reads them from the params (`ConnectorCallParams`, `ConnectorDoParams`).
+All four are optional and additive (no version change): a program that ignores them works as before. Whether the phone confirms a write stays the hub's decision, never the connector's. A connector built on `server/internal/connector/serve` reads them with `connector.CallContextOf(ctx)` inside `Call`, `Describe` and `Write`; an SDK program reads them from the params (`ConnectorCallParams`, `ConnectorDoParams`).
 
 ### Guarded conditional auto-confirm
 
@@ -294,6 +295,7 @@ Connectors may give assistant a CLI (#1704; Telegram tg previously built into pe
   Codes follow hub / node categories in `mcp.call` `error_kind` / `retry_after` (`docs/protocol/protocol.md`), not wording. Gate denial, logged-out connector, `rate_limited` state / program error carry categories.
   Only old hub / node without category uses wording: The user declined / (`connector_gate`) do not allow → 5; is not available / Persona hub error → 3; `限流中，N 秒` / `限流，N 秒` / `还要 N 秒` (“rate limited, N seconds” / “N seconds remaining”) → 4, `retry_after` N. Rate-limited status without seconds also parses state.error this way.
 - `personad tool <tool> [<JSON args> | -]` calls directly, same restrictions / output. The one exception is an Agent's own tools (`task_spawn`, its to-do's `todo_decisions`, a task leader's `task_plan`, …): from an Agent's pane or Codex thread they go as that Agent's call, decided by the hub for it, never as the assistant's and never reaching a connector ([unified-entry.md](../assistant/unified-entry.md) ("Separate sessions within a supervised task (#5751)")).
+- How long a call waits (#14400): up to 30 minutes, for a write waiting for the owner on the phone. A tool that only reads (`ReadToolWaits` in `server/internal/assistantwire/read_tools.go`: the A2A, dispatch, resource and to-do reads) gets 30 seconds on top of what it waits by design (`dispatch_read`'s `wait_seconds`, at most 50), then fails as unavailable (exit 3) with an error naming the tool and what did not answer; a read changed nothing and can be made again. On macOS, a call started in a folder that does not answer moves to `/` after 2 seconds instead of waiting for the folder, as a Go program otherwise does before `main` (`server/internal/startdir`); `secret_store` and every other command still wait for their folder.
 
 ## Errors
 

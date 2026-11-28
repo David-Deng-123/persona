@@ -72,6 +72,7 @@ type runtimeHello struct {
 		Close        bool `json:"close"`
 		Rewind       bool `json:"rewind"`
 		Fork         bool `json:"fork"`
+		Input        bool `json:"input"` // session.input types one line into a particular waiting command
 		QueueEdit    bool `json:"queue_edit"`
 		QueueSendNow bool `json:"queue_send_now"`
 		// Assistant: its launcher may run the Persona assistant (assistant_runtime.go; docs/integrations/runtimes.md "Assistant").
@@ -162,13 +163,18 @@ type runtimeConn struct {
 	// session whose transcript holds a session's conversation (transcript: a runtime running Claude Code through its
 	// SDK, Paseo; runtimetranscript.go), and the Codex thread a session's conversation is (codex_thread: a runtime
 	// running Codex, Paseo; runtimecodex.go).
-	panes        map[string]string
-	resume       map[string][]string
-	transcripts  map[string]string
+	panes       map[string]string
+	resume      map[string][]string
+	transcripts map[string]string
+	// stopCauses are stop causes observed for runtime-owned sessions Persona did not start. They stay on this
+	// connection: such sessions have no node session record (see stateFile), and a reconnect loses this observation.
+	stopCauses   map[string]proto.StopCause
 	codexThreads map[string]string
 	// agyPaneBackground holds running tasks projected for a live terminal when the ACP row hides them.
 	agyPaneBackground map[string][]proto.BackgroundTask
 	agyPreviews       map[string]agyPreview
+	// inputWaits is bound to this connection, guarded by runtimeRegistry.mu.
+	inputWaits map[runtimeInputKey]*runtimeInputWait
 	// workspaces are its own workspaces, as its last runtime.workspaces said (caps.workspaces, runtimeworkspaces.go);
 	// workspacesSaid: it said them on this connection (a workspace missing from them is gone).
 	workspaces     []runtimeWorkspace
@@ -443,6 +449,28 @@ func (h *runtimeConn) row(id string) (proto.Session, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.rowLocked(id)
+}
+
+func (h *runtimeConn) setStopCause(id string, cause proto.StopCause) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stopCauses == nil {
+		h.stopCauses = map[string]proto.StopCause{}
+	}
+	h.stopCauses[id] = cause
+}
+
+func (h *runtimeConn) stopCause(id string) (proto.StopCause, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cause, ok := h.stopCauses[id]
+	return cause, ok
+}
+
+func (h *runtimeConn) clearStopCause(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.stopCauses, id)
 }
 
 // rowLocked looks up a session while the caller holds h.mu.

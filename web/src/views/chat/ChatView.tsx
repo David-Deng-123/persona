@@ -4,7 +4,7 @@ import { useAssistantTitle, useManagerOffline } from "../ManagerParts";
 import { defaultManager, LinkManager, useShownManager } from "../../lib/manager-choice";
 import { decisionLaterKey } from "../../lib/assistant-entries";
 import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, errorText, pastHub, sessionPath } from "../../lib/api";
+import { api, ApiError, errorText, sessionPath } from "../../lib/api";
 import { attentionReason, externalLink, failureReason, isStoppedAgent, resumeCommand, sessionCan, sessionCanRename, sessionCanRenameTitle, sessionDisplayTab, sessionMenuActions, sourceSubtitle, sessionTitle, sessionTitleDetail, shortPath, activityOf, stateOf, tabLabel, uuid, viewOf } from "../../lib/format";
 import { useHerdrTabName } from "../../lib/agents-display";
 import { conversationPage } from "../../lib/conversation-page";
@@ -13,18 +13,18 @@ import { canShowTerminal, composerSlot, otherView, terminalJump, terminalWaits, 
 import { invalidateOverviewPanel } from "../../lib/use-shortcuts";
 import { resumeInTerminal, terminalResume } from "../../lib/agent-resume";
 import { openLink } from "../../lib/links";
-import { getPanel, openPanel, togglePanel, usePanel, useSidePanelBack } from "../../lib/panel";
+import { closePanel, getPanel, openPanel, togglePanel, usePanel, useSidePanelBack, type Panel } from "../../lib/panel";
 import { backgroundPanelOf, isWorkflowsCommand, latestWorkflowRun, openBackgroundPanel, provideBackgroundChat, WORKFLOWS_COMMAND } from "../../lib/background-panel";
 import { machineWithHub } from "../../lib/mesh";
 import { sidebarRail, sidebarShown, useLayout } from "../../lib/layout";
 import { hasModes, isMuted, listedModesOf, toggleMute } from "../../lib/session-actions";
-import { flipPin } from "../../lib/agent-actions";
+import { canMarkAgentSeen, flipPin, interruptAgent } from "../../lib/agent-actions";
 import { isPinned } from "../../lib/pins";
 import { acknowledgeLaunch } from "../../lib/new-agent";
 import { useRuntimeSession } from "../../lib/runtime-session";
 import { SessionDetailNotice } from "../../ui/SessionDetailNotice";
-import { isBackgroundSupervisor } from "../../lib/background-supervisor";
-import { getSession, getState, hubHas, listenSession, refresh, refreshTodos, saveMutes, taskSessionLookup, upsertSession, useStore, viewSession } from "../../lib/store";
+import { asBackgroundSupervisorCard, isBackgroundSupervisor, isBackgroundSupervisorInteraction } from "../../lib/background-supervisor";
+import { canInterruptAgentRow, getSession, getState, hubHas, listenSession, markSeenLocally, refresh, refreshTodos, saveMutes, taskSessionLookup, upsertSession, useStore, viewSession } from "../../lib/store";
 import { useStoreRows } from "../../lib/store-rows";
 import { useCodexThread, waitsForFirstMessage } from "../../lib/codex-waiting";
 import { foldRows } from "../../lib/folded-rows";
@@ -38,7 +38,7 @@ import { AGENT_MESSAGE_HOLD_FEATURE, assertDelivered, isKept, keptBubble, showKe
 import { lazyPage } from "../../lib/lazy-page";
 import { acceptOutgoing, forgetOutgoing, inSendOrder, keepFailed, keepOutgoing, noteWritten, outboxKey, placeFailed, registerOutboxRecheck, relayNotice, restoreOutbox, retryOutbox, SENT_GRACE_MS, settleOutbox, type DeliveryReply } from "../../lib/outbox";
 import { apiOp } from "../../lib/ops";
-import { beginMessageSend, observeMessageItems, settleMessageEcho, stopMessageFeedback, useMessageFeedback } from "../../lib/message-send";
+import { beginMessageSend, observeMessageItems, settleMessageEcho, useMessageFeedback } from "../../lib/message-send";
 import { conversationKey, pickedLauncher, pickedModel, usePickedLauncher } from "../../lib/assistant-chat";
 import { splitSkillDraft } from "../../lib/skill-mentions";
 import { openAsk, unlinkAgentFromTodo, waitsForOwner } from "../../lib/todos";
@@ -49,7 +49,7 @@ import { sendDraft, type CommentImagePicker } from "../../lib/drafts";
 import { chatLines, freshWords, isUserInput, openRecap, parseUserText, segments, type ChatLine, type UserMessage } from "../../lib/turns";
 import { foldsBackgroundRounds, relayNeedsAttention } from "../../lib/background-fold";
 import type { Interaction, Item, Session, Subagent } from "../../lib/types";
-import { REVIEW_FEATURE } from "../../lib/types";
+import { REVIEW_FEATURE, SESSION_REVIEW_FEATURE } from "../../lib/types";
 import { orcaChatRenamesSpace } from "../../lib/host-abilities";
 import { anchoredScroll, followsAgain, isScrollbarPress, jumpLabel, leavesOnKey, leavesOnScrollbarDrag, leavesOnTouch, leavesOnWheel, followsAfterUnfold, UNFOLD_PAUSE, type ScrollAnchor } from "../../lib/disclosure";
 import { Button, copyText, cx, Dialog, IconButton, Loading, Menu, toast, useMenu, useNow, type MenuItem } from "../../ui/atoms";
@@ -114,6 +114,7 @@ import { DeleteSessionDialog, preloadSessionDialogs, RenameDialog, RenameSpaceDi
 import { PermissionPicker, usePlanMode } from "./PermissionPicker";
 import { permissionsCommand } from "../../lib/permissions-command";
 import { archiveCloseItems, closeItems } from "../AgentMenus";
+import { groupAgentMenu } from "../agent-menu-layout";
 import { ChatSidebarButton } from "../ShellSwitch";
 import { appArchiveDeps, offerSessionDelete, restoreAgent, useArchived } from "../../lib/agent-archives";
 import { UltracodeLostNote } from "./Ultracode";
@@ -149,9 +150,12 @@ import { usageLimitLabel } from "../../lib/usage-limit";
 import { displayLines, getFeedState, loadedFrom, loadFeed, loadToday, sendRouted, startOfDay, useFeed, type DisplayLine, type FeedItem } from "../../lib/feed";
 import { splitBackgroundActivity } from "../../lib/quiet-activity";
 import { CardConversation } from "../../ui/AssistantCard";
-import { SessionMark, sessionMarkName } from "../../ui/AgentMark";
+import { sessionMarkName } from "../../ui/AgentMark";
+import { CodingAgentAvatar } from "../../ui/CodingAgentAvatar";
+import { codingAgentAvatarLabel, resolveCodingAgentAvatar, resolveHostingEngine } from "../../lib/coding-agent-avatar";
 import { sessionAgentName } from "../../lib/agent-kind";
 import { AssistantActionBar, DayLine, FeedLineView, QuickResultCard, RouteChip } from "../assistant/Tasks";
+import { groupAssistantLines, HandoffFeedRun, HandoffGroupStateContext } from "../assistant/Handoff";
 import { decisionKey, taskDecisionCards, type DecisionCard } from "../../lib/decision-pager";
 import { t } from "../../i18n";
 import { lazyDialog, lazyOverlay } from "../LazyOverlay";
@@ -162,6 +166,7 @@ import { AssistantUpdateSlot } from "./AssistantUpdateSlot";
 // first switch does not slide in an empty layer.
 const loadTerminal = () => import("../session/TerminalPanel");
 // Sharing settings load on their first open, outside the first screen (docs/web/web.md "First screen").
+const renderSimplifiedFeedLine = (item: FeedItem) => <FeedLineView item={item} simplified />;
 const ChatSearch = lazyDialog(() => import("./ChatSearch").then((m) => m.ChatSearch));
 const DecisionSourceDialog = lazyDialog(() => import("./DecisionSourceDialog").then((m) => m.DecisionSourceDialog));
 const LinkTodoDialog = lazyDialog(() => import("../LinkTodoDialog").then((m) => m.LinkTodoDialog));
@@ -304,20 +309,30 @@ async function rewindTo(mid: string, sid: string, draftKey: string, items: Item[
   else if (!declared) toast(tr("rewind.input_kept"), "info");
 }
 
+/** A session's own pane can return to its chat. An independent Agent, task or link beside it stays open. */
+function panelBelongsToAgent(panel: Panel | null, mid: string, sid: string): boolean {
+  if (panel?.kind === "subagent") {
+    return (panel.parentMid ?? panel.mid) === mid && (panel.parentSid ?? splitSubagentLink(panel.sid)?.parent) === sid;
+  }
+  return Boolean(panel && panel.kind !== "agent" && "sid" in panel && panel.mid === mid && panel.sid === sid);
+}
+
 /** In a side panel (TaskPanel, AgentPanel; #3333, iOS #3255; opened while Agents open in the side panel, #5424): the
  *  chat's one-line header is the panel's only one. It closes the panel (× at its end), may stand for the task (its title,
- *  with `sub` in the title's tooltip), carries the panel's own rows at the top of ⋯ and, beside the title, what the panel
+ *  with `sub` in the title's tooltip), starts ⋯ with the panel's own actions and, beside the title, what the panel
  *  puts there (a task's ⌄ to switch between its agents); the same space's other agents are left out. With `page`, a chat
  *  bubble before × opens the Agent shown as its own page (`/s/…`, as from the Agents list) and the panel closes. */
-export interface PanelChrome {
+export type PanelChrome = {
   onClose: () => void;
   /** The page of the Agent the panel shows: the header's "Open Agent page" button. */
   page?: Route;
   title?: string;
   sub?: string;
-  items?: MenuItem[];
   beside?: React.ReactNode;
-}
+} & (
+  | { kind: "agent"; items?: [] | [MenuItem] }
+  | { kind: "task"; items?: MenuItem[] }
+);
 
 const DeletedConversation = lazy(() => import("../DeletedConversation").then((m) => ({ default: m.DeletedConversation })));
 
@@ -411,7 +426,8 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
   });
   const decisionDeferred = useFeed((s) => decisionTodo ? Boolean(s.later[decisionLaterKey(decisionTodo)]) : false);
   // The main conversation is always Persona (#1313): not its first message, the node's title for it.
-  const mainConversation = useStore((s) => s.assistant?.main);
+  const assistantInfo = useStore((s) => s.assistant);
+  const mainConversation = assistantInfo?.main;
   const isMain = Boolean(assistant && (mainCache || sid === mainConversation));
   // Full Agent pages and non-main Persona conversations may offer a way back; side panels, Team panels and the main chat do not.
   const backPage = Boolean(!embedded && !chrome && (inPage || (assistant && !isMain)));
@@ -475,12 +491,16 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
   const sideParent = session && isSide(session) ? session.folded_under : undefined;
   // the space's other agents, its child sessions folded into their parents (#5120: a child is never one of them)
   const siblings = useStore((s) => (session?.space_id ? foldRows(s.sessions[mid] ?? []).filter((x) => x.space_id === session.space_id && activityOf(x) !== "offline") : []));
+  const shownManager = useShownManager();
+  const skillManager = useStore((s) => session?.manager ?? s.machines.find((m) => m.id === mid)?.manager) ?? shownManager;
   // its own requests and those of the child sessions folded under it (#5120, including cross-machine children via
   // folded_under_machine_id): a child's are answered here, in the order they came, each saying which child asks; a
-  // side session's chat (#7944) takes the cards of the rows that belong to it
+  // side session's chat (#7944) takes the cards of the rows that belong to it; main chat also surfaces user-facing cards
+  // raised by the hidden background supervisor conversation
   const ownCard = (ix: Interaction) =>
     (ix.machine_id === mid && (ix.session_id === sid || ix.folded_side === sid)) ||
-    ((ix.folded_under_machine_id || ix.machine_id) === mid && ix.folded_under === sid);
+    ((ix.folded_under_machine_id || ix.machine_id) === mid && ix.folded_under === sid) ||
+    (isMain && !embedded && isBackgroundSupervisorInteraction(assistantInfo, ix, skillManager));
   const interactions = useStore((s) => s.interactions.filter(ownCard));
   const answered = useStore((s) => Object.values(s.answered).filter((a) => ownCard(a.ix)));
   const delegated = useStore((s) => Object.values(s.delegated).filter((d) => ownCard(d.ix)));
@@ -854,10 +874,8 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
     [draftKey, title, session?.manager, mainCache?.manager, canCompose, canFork, canRewind, detached, rewindCode, rewindDeclared, rewindLive, mid, sid, assistant, persona.name, forwardFrom, picker],
   );
   // the assistant works on any computer, so its @ menu offers workspaces too
-  const shownManager = useShownManager();
   const skillLauncher = usePickedLauncher(conversationKey(mid, sid));
   const assistantLauncher = useStore((s) => assistant ? s.assistant?.launcher : undefined);
-  const skillManager = useStore((s) => session?.manager ?? s.machines.find((m) => m.id === mid)?.manager) ?? shownManager;
   const skillEnvironment = JSON.stringify([session?.launcher, session?.model_pick, session?.pending_switch, session?.source_kind, assistantLauncher]);
   const mention = useMemo(() => ({ cwd: session?.cwd, self: draftKey, files: () => chatFiles(items.current), workspaces: Boolean(assistant),
     repositories: assistant ? skillManager : undefined,
@@ -1681,17 +1699,14 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
     setStopping(false);
   }, []);
   const interrupt = useCallback(async () => {
-    if (stopInFlight.current || !sessionCan(getSession(mid, sid), "interrupt")) return;
+    const current = getSession(mid, sid);
+    if (stopInFlight.current || !current || !canInterruptAgentRow(current, true)) return;
     stopInFlight.current = true;
     setStopping(true);
     const waited = awaitingNow.current;
     try {
-      // the hub gives the computer 90 s: past that the link is dead, and a request that never ends must not hold the block
-      const r = await apiOp<{ state?: string }>(`${sessionPath(mid, sid)}/interrupt`, { method: "POST", timeout: pastHub(90_000) });
-      // a repeat after a gap can read as a success: the hub lost track of the first try, so nothing says it stopped
-      if (r.state === "unknown") throw new Error(t("lib-new-agent.outcome_unknown"));
+      await interruptAgent(mid, sid);
       toast(t("chat-chatview.interrupted"));
-      stopMessageFeedback(mid, sid);
       if (waited) setStoppedInput({ chat: `${mid}/${sid}`, id: waited });
       stopTimer.current = window.setTimeout(stopDone, STOP_SETTLE_MS);
     } catch (e) {
@@ -1804,20 +1819,24 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
   const hasOwnPendingInteraction = (session?.pending_interactions ?? 0) > 0 ||
     interactions.some((ix) => ix.machine_id === mid && ix.session_id === sid);
   const waitingOnUser = !detached && (state === "needs_you" || hasOwnPendingInteraction);
+  const stateUnknown = !detached && state === "unknown" && !turnFailure;
   const allLines = useMemo(
-    () => stabilizeLines(lastLines.current, chatLines(earlier.liveItems, { live: lastLive && !outgoing, background: foldBackground, main: isMain, foldRoutineRelayReplies, latestReplyNeedsAttention, stale, needsYou: waitingOnUser })),
-    [earlier.liveItems, lastLive, outgoing, foldBackground, isMain, foldRoutineRelayReplies, latestReplyNeedsAttention, stale, waitingOnUser],
+    () => stabilizeLines(lastLines.current, chatLines(earlier.liveItems, { live: lastLive && !outgoing, background: foldBackground, main: isMain, foldRoutineRelayReplies, latestReplyNeedsAttention, stale, needsYou: waitingOnUser, statusUnknown: stateUnknown })),
+    [earlier.liveItems, lastLive, outgoing, foldBackground, isMain, foldRoutineRelayReplies, latestReplyNeedsAttention, stale, waitingOnUser, stateUnknown],
   );
   lastLines.current = allLines;
   // The timeline split and the assistant display use the same history boundary: one feed walk per items change.
   const historyFrom = useMemo(() => (tr.hasMore ? loadedFrom(tr.items) : undefined), [tr.hasMore, tr.items]);
+  // While an Assistant transcript is still loading its first page, tr.items is empty and historyFrom is undefined:
+  // hold unanchored timelineFeed cards until items arrive so they do not push the centered <Loading /> out of view.
+  const holdUnanchoredFeed = Boolean(assistant && tr.loading && !tr.items.length);
   // A canonical, completed silent round leaves no empty row or feed card in the main timeline. Its full projection is
   // retained for Background activity; running, legacy quiet and every promoted round keep their existing rendering.
   const quiet = useMemo(() => {
     const through = detached && Date.parse(tr.items.at(-1)?.ts ?? "");
-    const scoped = through === false ? feed : Number.isFinite(through) ? feed.filter((item) => Date.parse(item.at) <= through) : NO_FEED;
+    const scoped = holdUnanchoredFeed ? NO_FEED : through === false ? feed : Number.isFinite(through) ? feed.filter((item) => Date.parse(item.at) <= through) : NO_FEED;
     return splitBackgroundActivity(allLines, scoped, historyFrom);
-  }, [allLines, feed, historyFrom, detached, tr.items]);
+  }, [allLines, feed, historyFrom, detached, tr.items, holdUnanchoredFeed]);
   const lines = quiet.timeline;
   // a DayLine over the first line of each new calendar day (#8160); day-only keys keep them stable as pages and
   // midnight arrivals land. Days the earlier stretches already open with a divider are not repeated here.
@@ -1846,9 +1865,11 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
   );
   const feedFrom = assistant ? historyFrom : undefined;
   const assistantLines = useMemo(
-    () => (assistant ? displayLines(lines, quiet.timelineFeed, feedFrom) : NO_DISPLAY_LINES),
-    [assistant, lines, quiet.timelineFeed, feedFrom],
+    () => (assistant && !holdUnanchoredFeed ? displayLines(lines, quiet.timelineFeed, feedFrom) : NO_DISPLAY_LINES),
+    [assistant, holdUnanchoredFeed, lines, quiet.timelineFeed, feedFrom],
   );
+  const groupedAssistantLines = useMemo(() => (assistant ? groupAssistantLines(assistantLines) : NO_DISPLAY_LINES), [assistant, assistantLines]);
+  const handoffGroupState = useMemo(() => new Map<string, boolean>(), [mid, sid]);
   // the last exchange while the chat is at work, even while a message of yours on its way draws it finished (live needs
   // !outgoing above): its words get no reply bar until the work is over (#5314, SegmentView `busy`)
   const busySegment = useMemo(() => (lastLive ? lines.findLast((line) => line.kind === "segment")?.id : undefined), [lastLive, lines]);
@@ -2301,7 +2322,7 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
     await deliver(resolved.payload, uuid());
     return true;
   }, [deliver, mid, sid]);
-  const emptyAction = canCompose && !working && !waitingOnUser && !gate.blocked && !stoppedLine ? retryEmpty : undefined;
+  const emptyAction = canCompose && !working && !waitingOnUser && !stateUnknown && !gate.blocked && !stoppedLine ? retryEmpty : undefined;
   // the failure notice "Retry" was pressed on: kept here, not in the note, so it stays gone while the session goes through
   // needs-you and back before the hub clears it (iOS ChatView @State retried)
   const [retriedOn, setRetried] = useState<{ chat: string; reason?: string }>();
@@ -2529,7 +2550,7 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
   const sideNeeds = sides.some((w) => stateOf(w) === "needs_you") || (!kids.loaded && (hubSide?.needs_you ?? 0) > 0);
   const toggleSide = useCallback(() => toggleSides(mid, sid, Boolean(sidesPanelOf(getPanel(), mid, sid))), [mid, sid]);
   const sideControl = useMemo(() => (sideCount > 0 ? { count: sideCount, open: sidesOpen, needs: sideNeeds, onToggle: toggleSide } : undefined), [sideCount, sidesOpen, sideNeeds, toggleSide]);
-  const subagentPanel = panel?.kind === "subagent" && (panel.parentMid ?? panel.mid) === mid && (panel.parentSid ?? splitSubagentLink(panel.sid)?.parent) === sid ? panel : undefined;
+  const subagentPanel = panel?.kind === "subagent" && panelBelongsToAgent(panel, mid, sid) ? panel : undefined;
   const subagentShown = panelDrawn && subagentPanel ? { mid: subagentPanel.mid, sid: subagentPanel.sid } : undefined;
   const subagentMid = subagentShown?.mid;
   const subagentSid = subagentShown?.sid;
@@ -2540,8 +2561,10 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
   // a worker's or subagent's own cards in its conversation (embedded) are its own there, not "From subagent"
   const docked = useMemo(() => {
     const mine = interactions.filter((ix) => !elsewhere(ix));
-    return embedded ? mine.map((ix) => (ix.machine_id === mid && ix.session_id === sid && ix.folded_under ? asOwnCard(ix) : ix)) : mine;
-  }, [interactions, elsewhere, embedded, mid, sid]);
+    if (embedded) return mine.map((ix) => (ix.machine_id === mid && ix.session_id === sid && ix.folded_under ? asOwnCard(ix) : ix));
+    if (isMain) return mine.map((ix) => (isBackgroundSupervisorInteraction(assistantInfo, ix, skillManager) ? asBackgroundSupervisorCard(ix, sid, mid) : ix));
+    return mine;
+  }, [interactions, elsewhere, embedded, isMain, assistantInfo, skillManager, mid, sid]);
   // A card belongs to the visible child pane, To Decide, or the stack. A task request must not appear in two places.
   const turnSplit = useMemo(() => (assistant ? splitTurnAsks(docked, mid, sid) : { turn: [], rest: docked }), [assistant, docked, mid, sid]);
   const decisionPlans = useFeed((s) => assistant ? s.plans : undefined);
@@ -2832,12 +2855,15 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
               />
             )}
             <ChatContext.Provider value={ctx}>
+              <HandoffGroupStateContext.Provider value={handoffGroupState}>
               <CardConversation.Provider value={assistant ? sid : ""}>
               {earlier.host && <Suspense fallback={null}><EarlierStretches {...earlier.host} offscreen={offscreen} /></Suspense>}
               {assistant
-                ? assistantLines.flatMap((d) => [
+                ? groupedAssistantLines.flatMap((d) => [
                     ...failedBefore(d.kind === "chat" ? d.id : ""),
-                    d.kind === "feed" ? (
+                    d.kind === "handoff_run" ? (
+                      <HandoffFeedRun key={d.id} items={d.items} renderOther={renderSimplifiedFeedLine} />
+                    ) : d.kind === "feed" ? (
                       <FeedLineView key={d.id} item={d.item} simplified />
                     ) : d.kind === "quick" ? (
                       <QuickResultCard key={d.id} result={d.result} />
@@ -2892,6 +2918,7 @@ function ActiveChatView({ mid, sid, assistant, assistantManager, starting: launc
                 />
               )])}
               </CardConversation.Provider>
+              </HandoffGroupStateContext.Provider>
             </ChatContext.Provider>
             </LatestMessageTime.Provider>
             </LiveClockContext.Provider>
@@ -3442,8 +3469,17 @@ export const Header = memo(function Header({
   const others = chrome ? [] : siblings.filter((s) => s.session_id !== session?.session_id);
   // the session's files and Git open in the side panel (docs/web/web.md "Side panel"); the assistant has none. Its terminal is
   // the page's other view, switched in place (view / onView)
-  const here = (p: typeof panel, kind: string) => Boolean(p && p.kind === kind && "sid" in p && session && p.mid === session.machine_id && p.sid === session.session_id);
+  const ownPanel = session && panelBelongsToAgent(panel, session.machine_id, session.session_id);
+  const here = (kind: Panel["kind"]) => Boolean(ownPanel && panel?.kind === kind);
   const showTerminal = Boolean(view && onView);
+  const isAgentMenu = Boolean(session && !session.assistant && !assistant && !main && chrome?.kind !== "task");
+  const panelVisible = ownPanel && (!layout.maximized || narrow);
+  const terminalVisible = showTerminal && view === "term";
+  const backToChat = () => {
+    if (terminalVisible) onView?.("chat");
+    if (panelVisible) closePanel();
+    if (overview?.open) overview.toggle();
+  };
   // the side panel shows no terminal in place: its terminal button opens the agent's page in the terminal view, and the
   // panel closes, its chat being that page now (#7343)
   const jumpTerminal = !showTerminal && Boolean(onTerminal) && terminalJump(session, { inPanel: Boolean(chrome), assistant });
@@ -3514,6 +3550,12 @@ export const Header = memo(function Header({
   const tasksItem: MenuItem[] = tasks && phone ? [{ key: "conversation-tasks", label: t("sidepanel.conversation_tasks"), icon: "todo", checked: tasks.open, onSelect: tasks.onToggle }] : [];
   const own: MenuItem[] = session
     ? [
+        ...(isAgentMenu && !chrome && (panelVisible || terminalVisible || overview?.open)
+          ? [{ key: "back-to-chat", label: t("agentmenus.back_to_chat"), icon: "chat" as const, onSelect: backToChat }]
+          : []),
+        ...(isAgentMenu && canMarkAgentSeen(session, muted)
+          ? [{ key: "seen", label: t("agentmenus.mark_seen"), icon: "check" as const, onSelect: () => markSeenLocally(session.machine_id, session.session_id) }]
+          : []),
         // the space's other agents (#5421: in ⋯ at every width, as cindy's header has no such button)
         ...(others.length > 0 ? [spaceAgentsItem(others, () => tabs.openAt(menu.anchor))] : []),
         ...assistantItems,
@@ -3563,7 +3605,7 @@ export const Header = memo(function Header({
         ...(allowed.includes("attach") ? [{ key: "attach", label: t("chat-chatview.attach"), icon: "link" as const, onSelect: () => void attach() }] : []),
         // Panel entries already visible as right-toolbar buttons on desktop stay in ⋯ only on phone viewports.
         ...(sides && phone ? [{ key: "sides", label: t("chat-chatview.side_sessions_count", { count: sides.count }), icon: "sideSessions" as const, checked: sides.open, onSelect: sides.onToggle }] : []),
-        ...(showTerminal && phone ? [{ key: "terminal", label: t("lib-terminals.terminal"), icon: "terminal" as const, checked: view === "term", onSelect: flipView }] : []),
+        ...(showTerminal && phone && !(isAgentMenu && !chrome && terminalVisible) ? [{ key: "terminal", label: t("lib-terminals.terminal"), icon: "terminal" as const, checked: view === "term", onSelect: flipView }] : []),
         ...(jumpTerminal && phone ? [{ key: "terminal", label: t("lib-terminals.terminal"), icon: "terminal" as const, onSelect: openTerminalPage }] : []),
         ...(resumeOffer !== "hidden"
           ? [{ key: "resume-terminal", label: t("chat-chatview.resume_in_terminal"), icon: "play" as const, disabled: resumeOffer === "no_engine", detail: resumeOffer === "no_engine" ? t("chat-chatview.resume_no_engine", { computer: machineName }) : undefined, onSelect: resumeHere }]
@@ -3575,15 +3617,15 @@ export const Header = memo(function Header({
           ? [{ key: "takeover-continue", label: takeoverLabels.continueNew, icon: "compose" as const, disabled: takeoverBusy, onSelect: onContinueTakeover }]
           : []),
         ...(showFiles && phone ? [
-          { key: "files", label: t("chat-chatview.files"), icon: "folder" as const, checked: here(panel, "files"), onSelect: openFiles },
-          { key: "git", label: "Git", icon: "git" as const, checked: here(panel, "git"), onSelect: openGit },
+          { key: "files", label: t("chat-chatview.files"), icon: "folder" as const, checked: here("files"), onSelect: openFiles },
+          { key: "git", label: "Git", icon: "git" as const, checked: here("git"), onSelect: openGit },
         ] : []),
-        ...(showFiles && reviews ? [{ key: "review", label: t("chat-chatview.review_changes"), icon: "pullRequest" as const, checked: here(panel, "review"), onSelect: openReview }] : []),
+        ...(showFiles && reviews ? [{ key: "review", label: t("chat-chatview.review_changes"), icon: "pullRequest" as const, checked: here("review"), onSelect: openReview }] : []),
         ...tasksItem,
         ...sessionReviewItems,
         // a run of a comparison (#8916): back to its runs' page
         ...(compare ? [{ key: "compare", label: compare.label, icon: "branch" as const, onSelect: () => navigate({ name: "compare", id: compare.id }) }] : []),
-        ...(showFiles && previews ? [{ key: "preview", label: t("chat-chatview.preview"), icon: "web" as const, checked: here(panel, "preview"), onSelect: openPreview }] : []),
+        ...(showFiles && previews ? [{ key: "preview", label: t("chat-chatview.preview"), icon: "web" as const, checked: here("preview"), onSelect: openPreview }] : []),
         ...(allowed.includes("stop") ? [{ key: "stop", label: t("chat-chatview.interrupt"), icon: "stop" as const, hint: "Esc", onSelect: onInterrupt }] : []),
         ...(feishu ? [{ key: "feishu", label: t("chat-chatview.open_in_lark"), icon: "external" as const, onSelect: () => openLink(feishu) }] : []),
         ...(onActivity ? [{ key: "background-activity", label: t("chat-chatview.background_activity"), icon: "list" as const, onSelect: () => { void BackgroundActivity.preload().then(onActivity, onActivity); } }] : []),
@@ -3606,9 +3648,11 @@ export const Header = memo(function Header({
         ...(!archived && offerSessionDelete(session, features) ? [{ key: "delete", label: t("chat-chatview.delete_chat"), icon: "trash" as const, danger: true, onSelect: () => setDialog("delete") }] : []),
       ]
     : tasksItem;
-  // a side panel's own rows (Open in new window, Remove task…) at the top of ⋯
   const panelItems = chrome?.items ?? [];
-  const items: MenuItem[] = panelItems.length > 0 && own.length > 0 ? [...panelItems, { ...own[0], divider: true }, ...own.slice(1)] : [...panelItems, ...own];
+  const sessionItems = isAgentMenu ? groupAgentMenu(own) : own;
+  const items = panelItems.length && sessionItems.length
+    ? [...panelItems, { ...sessionItems[0], divider: true }, ...sessionItems.slice(1)]
+    : [...panelItems, ...sessionItems];
   // ⋯ sits at the right end of the header toolbar; on the main assistant page desktop uses the title pill on the left,
   // so ⋯ only appears on narrow screens when the shell switch hides the title.
   const assistantTitleMenu = Boolean(assistant && main);
@@ -3636,7 +3680,11 @@ export const Header = memo(function Header({
 
   return (
     <>
-      {menu.anchor && <SessionReviewMenuItem onItem={setSessionReviewItems} session={assistant ? undefined : session} busy={starting} ix={interactions} />}
+      {menu.anchor && session && !assistant && hubHas(features, SESSION_REVIEW_FEATURE) && (
+        <Suspense fallback={null}>
+          <SessionReviewMenuItem onItem={setSessionReviewItems} session={session} busy={starting} ix={interactions} />
+        </Suspense>
+      )}
       <header className="@container flex h-14 shrink-0 items-center gap-2 border-b border-line bg-page/85 px-3 backdrop-blur-md sm:px-4">
       <div className={headerSlot(Boolean(topCenter), "start")}>
         {onToggleSidebar && <ChatSidebarButton session={session} counted={!topCenter} onClick={onToggleSidebar} />}
@@ -3716,7 +3764,7 @@ export const Header = memo(function Header({
           {sides.needs && <span aria-hidden data-side-sessions-needs className="pointer-events-none absolute top-0.5 right-0.5 size-2 rounded-full bg-attention shadow-[0_0_0_2px_var(--page)]" />}
         </span>
       )}
-      {showFiles && <IconButton icon="folder" label={t("chat-chatview.files")} onClick={openFiles} active={here(panel, "files") || here(panel, "git")} className="hidden sm:flex" />}
+      {showFiles && <IconButton icon="folder" label={t("chat-chatview.files")} onClick={openFiles} active={here("files") || here("git")} className="hidden sm:flex" />}
       {/* the terminal: one button to the other view at every width (cindy's terminal is one of its right sidebar's tabs) */}
       {view && onView && (
         <span className="relative flex shrink-0">
@@ -3778,10 +3826,13 @@ export const Header = memo(function Header({
 export function AgentDeviceMark({ session, machineName }: { session: Session; machineName: string }) {
   const offline = useStore((s) => s.machines.find((m) => m.id === session.machine_id)?.online === false);
   const where = t(offline ? "chat-chatview.agent_device_offline" : "chat-chatview.agent_device", { device: machineName });
-  // the hover is cindy's sentence; the spoken name says which Agent too, as the mark alone did
+  const engine = resolveHostingEngine(session);
+  const agent = engine ? codingAgentAvatarLabel(resolveCodingAgentAvatar(session), engine) : sessionMarkName(session);
+  const title = engine ? `${agent} · ${where}` : where;
+  // the hover is cindy's sentence (with model/engine prefix when a host is present); the spoken name names all three
   return (
-    <span role="img" aria-label={t("chat-chatview.agent_device_label", { agent: sessionMarkName(session), where })} title={where} data-agent-device={offline ? "offline" : "online"} className={cx("mr-2 inline-flex shrink-0", offline && "opacity-75")}>
-      <SessionMark s={session} size={14} decorative remote className="text-ink-3" />
+    <span role="img" aria-label={t("chat-chatview.agent_device_label", { agent, where })} title={title} data-agent-device={offline ? "offline" : "online"} className={cx("mr-2 inline-flex shrink-0", offline && "opacity-75")}>
+      <CodingAgentAvatar session={session} size={28} ring="page" remote decorative />
     </span>
   );
 }

@@ -13,6 +13,7 @@ import (
 )
 
 func TestChannelRouteKeyPartialClassification(t *testing.T) {
+	var bindings threadBindingIndex
 	for _, tc := range []struct {
 		name              string
 		kind              channel.ChatKind
@@ -27,11 +28,11 @@ func TestChannelRouteKeyPartialClassification(t *testing.T) {
 	} {
 		for _, mode := range []channel.ThreadMode{channel.ThreadModePerTopic, channel.ThreadModePerGroupAndTopic} {
 			m := channel.Message{ChatKind: tc.kind, ChatID: tc.chat, TopicID: tc.topic, Thread: " legacy "}
-			if got := channelRouteKey(mode, m); got != tc.want {
+			if got := bindings.resolve("examplechat", m, mode, true).primary; got != tc.want {
 				t.Errorf("%s (%s): got %q, want %q", tc.name, mode, got, tc.want)
 			}
 			m.Thread = ""
-			if tc.want == "legacy" && channelRouteKey(mode, m) != "" {
+			if tc.want == "legacy" && bindings.resolve("examplechat", m, mode, true).primary != "" {
 				t.Errorf("%s (%s): incomplete route without a legacy thread must use the default target", tc.name, mode)
 			}
 		}
@@ -62,36 +63,59 @@ func TestChannelRoutingDefaultsAcrossManagers(t *testing.T) {
 			t.Fatalf("%s: target override %+v, want %q", s.id, d.TargetOverride, override)
 		}
 		msg := channel.Message{Thread: "legacy", ChatID: "chat", TopicID: "topic"}
-		if got := s.channelRoutingKeys(context.Background(), "examplechat", msg, on).primary; got != key {
-			t.Fatalf("%s: route %q, want %q", s.id, got, key)
+		binding, v, err := s.threadBindingForTest(context.Background(), "examplechat", msg)
+		if err != nil || binding.primary != key || binding.isThread(v) != (key != "") {
+			t.Fatalf("%s: route %q, want %q, err=%v", s.id, binding.primary, key, err)
 		}
 	}
-	setIntegrationsV2ViaHTTP(t, a, true, false)
 	topic := channelTopicRouteKey("chat", "topic")
 	check(a, true, channel.ThreadModePerTopic, channel.TargetOverrideTopics, topic, 0)
-	check(b, false, channel.ThreadModeChannelDefault, channel.TargetOverrideThreads, "legacy", 0)
+	check(b, true, channel.ThreadModePerTopic, channel.TargetOverrideTopics, topic, 0)
 	rec := channelAPIRequest(t, a, http.MethodPut, "/api/v1/channels/examplechat", "full", `{"thread_mode":"channel_default","thread_idle_hours":7}`)
 	if rec.Code != http.StatusOK {
 		t.Fatal(rec.Code, rec.Body.String())
 	}
-	setIntegrationsV2ViaHTTP(t, b, true, false)
 	setIntegrationsV2ViaHTTP(t, a, false, true)
 	check(a, false, channel.ThreadModeChannelDefault, channel.TargetOverrideThreads, "legacy", 7)
 	check(b, true, channel.ThreadModePerTopic, channel.TargetOverrideTopics, topic, 0)
 	a = New(Options{ID: a.id, Hub: hubA, Store: func() Store { return storeA }, Logf: testLogf(t)})
+	check(a, false, channel.ThreadModeChannelDefault, channel.TargetOverrideThreads, "legacy", 7)
 	setIntegrationsV2ViaHTTP(t, a, true, false)
 	check(a, true, channel.ThreadModeChannelDefault, "", "", 7)
+	check(b, true, channel.ThreadModePerTopic, channel.TargetOverrideTopics, topic, 0)
 }
 
 func TestIntegrationsV2PartialAssistantPUT(t *testing.T) {
-	s, _, _ := threadsChannelService(t, true)
-	setIntegrationsV2ViaHTTP(t, s, true, false)
-	for _, body := range []string{`{"notes":"updated"}`, `{"timezone":"UTC"}`, `{"todos_v2":true}`, `{"labs_seen":["todos_v2"]}`, `{"integrations_v2":null}`} {
-		w, state := permissionSettingsRequest(t, s, http.MethodPut, "/api/v1/assistant", s.managerIdentity(), "full", body)
-		if w.Code != http.StatusOK || !state.IntegrationsV2 {
-			t.Fatalf("PUT %s: %d %s", body, w.Code, w.Body.String())
-		}
-		assertIntegrationsV2Flag(t, s, true)
+	for _, tc := range []struct {
+		name   string
+		stored string
+		on     bool
+	}{
+		{name: "unset", on: true},
+		{name: "explicitly off", stored: "false", on: false},
+		{name: "explicitly on", stored: "true", on: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &memStore{}
+			s := newServiceOn(t, newFakeHub().withMachine(), st)
+			if tc.stored != "" {
+				setIntegrationsV2ViaHTTP(t, s, tc.on, true)
+			}
+			for _, body := range []string{`{"notes":"updated"}`, `{"timezone":"UTC"}`, `{"todos_v2":true}`, `{"labs_seen":["todos_v2"]}`, `{"integrations_v2":null}`} {
+				w, state := permissionSettingsRequest(t, s, http.MethodPut, "/api/v1/assistant", s.managerIdentity(), "full", body)
+				if w.Code != http.StatusOK || state.IntegrationsV2 != tc.on {
+					t.Fatalf("PUT %s: %d %s", body, w.Code, w.Body.String())
+				}
+				var settings map[string]json.RawMessage
+				if found, err := st.Setting(t.Context(), settingsKey, &settings); !found || err != nil {
+					t.Fatalf("read settings after PUT %s: found=%t err=%v", body, found, err)
+				}
+				if got := string(settings["integrations_v2"]); got != tc.stored {
+					t.Fatalf("PUT %s stored integrations_v2 as %q, want %q", body, got, tc.stored)
+				}
+			}
+			assertIntegrationsV2Flag(t, s, tc.on)
+		})
 	}
 }
 
@@ -121,7 +145,6 @@ func TestMentionChannelRoutingAndIdleHoursHTTP(t *testing.T) {
 	f.answerApp(AppChannels, ChannelsList, func(json.RawMessage) (any, error) {
 		return map[string]any{"channels": []channel.View{{ID: "mention", Kind: channel.KindMention, Source: channel.SourcePlugin, Installed: true, Capabilities: channel.Capabilities{Threads: true}}}}, nil
 	})
-	setIntegrationsV2ViaHTTP(t, s, true, false)
 	if d := getChannelDetail(t, s, "mention"); d.ThreadMode != channel.ThreadModePerTopic || d.Target == nil || d.Target.Kind != channel.TargetNew {
 		t.Fatal(d.View)
 	}
