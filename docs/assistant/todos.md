@@ -711,6 +711,12 @@ After a task dispatched from assistant chat (nonempty `origin`) completes—manu
 assistant checks every minute (`assistant/tasks_close.go`, reading hub's App-facing session list through `sessions.list`); once task completion, Agent inactivity and owner inactivity all reach 10 minutes (`taskCloseIdle`, measured from the latest of completion time, Agent activity, owner activity and when the pass first saw the Agent running), it asks node to stop it (`session.stop_if_idle` with `retire`, `node/retire.go`):
 the Agent process quits (Ctrl+C twice, up to three rounds, until the engine no longer shows the Agent in its pane) and **its terminal stays** unless the owner enabled `close_ended_terminals` (#10355): the guarded request then closes the idle Agent and its terminal, rechecking input and cancellation before the first interrupt and the final close. An already exited Agent may only lose its marked, idle Herdr shell, with the same final activity check. With the setting off, the tab keeps the shell the Agent ran in, ending with Claude's "Resume this session with: …". Stopping never closes it (#4754); the node closes the terminal itself only once it has sat unchanged for the grace period (#10111, `docs/integrations/engines.md` "Agents run in a terminal"); an Agent that does not quit is reported (`not_stopped`) and left running, never closed to make it go.
 
+An idle runtime-backed task session (such as Antigravity's) is released through the same opt-in path when it is
+exclusive to the task, declares `capabilities.close`, has no terminal, and is not an assistant conversation. The hub
+calls `closeEndedTerminal`, which asks the node for `session.retire` with `close_terminal`/`after_exit`; the node uses
+the runtime's own close and answers `closed`. It never falls back to `session.close`. An older node's refusal means
+"not closed" and leaves the session open; a runtime that declares a terminal stays refused.
+
 **Owner activity protects the conversation** (#6819): `task_review` acceptance/cancellation and automatic completion
 refuse to close an open task while the owner has viewed or messaged a still-linked Agent within ten minutes, or an
 app with a full credential still has its conversation or terminal open. The refusal explains why and asks the supervisor to retry later;
