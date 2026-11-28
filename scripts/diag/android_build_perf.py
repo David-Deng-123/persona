@@ -13,8 +13,9 @@ COLD=<n> also times n cold starts of each package with `am start -W`; a start th
 dropped. Every package must be paired already.
 RUNS (10), SWIPE_MS (180) and SETTLE_S (0.9) override the round count, swipe duration and idle delay; ONLY=agents,chat
 limits the scenarios."""
+import argparse
 from functools import partial
-import json, os, re, statistics, sys, time
+import json, os, re, statistics, time
 
 from android_perf_capture import adb_command, frame_counts, write_report
 
@@ -95,12 +96,25 @@ def scenarios(chat, only):
 
 
 def main():
-    serial, out = sys.argv[1:3]
-    packages = [arg.split("=", 1) for arg in sys.argv[3:]]
+    parser = argparse.ArgumentParser(description="Compare Android builds installed side by side on one device.")
+    parser.add_argument("serial")
+    parser.add_argument("out")
+    parser.add_argument("packages", nargs="+", metavar="label=package")
+    args = parser.parse_args()
+    packages = []
+    labels = set()
+    for spec in args.packages:
+        label, _, package = spec.partition("=")
+        if not label.strip() or not package.strip() or "=" in package:
+            parser.error("each build must be specified as label=package")
+        if label in labels:
+            parser.error("build labels must be unique")
+        labels.add(label)
+        packages.append((label, package))
     only = os.environ["ONLY"].split(",") if os.environ.get("ONLY") else None
     links = scenarios(os.environ.get("CHAT"), only)
 
-    adb = partial(adb_command, serial, timeout=90)
+    adb = partial(adb_command, args.serial, timeout=90)
 
     w, h = map(int, re.findall(r"(\d+)x(\d+)", adb("shell", "wm", "size", capture=True))[-1])
 
@@ -133,7 +147,7 @@ def main():
         for label, values in cold.items():
             if values:
                 result[label + "/cold_start_ms"] = stats(values)
-        write_report(out, result)
+        write_report(args.out, result)
 
     for i in range(COLD):
         for label, package in ordered(packages, i):

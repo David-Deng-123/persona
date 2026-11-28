@@ -64,6 +64,25 @@ class AndroidBuildPerfTest(unittest.TestCase):
         self.assertEqual(perf.ordered(packages, 1), [["release", "b"], ["debug", "a"]])
         self.assertEqual(perf.ordered(packages, 2), packages)
 
+    def test_invalid_package_specs_leave_report_and_device_untouched(self):
+        cases = ([], ["debug"], ["=test.app"], ["debug="], ["debug=test=app"],
+                 ["debug=test.app", "debug=test.release"])
+        with tempfile.TemporaryDirectory() as directory:
+            out = pathlib.Path(directory) / "out.json"
+            original = b'{"previous":true}\n'
+            out.write_bytes(original)
+            for specs in cases:
+                with self.subTest(specs=specs):
+                    argv = ["android_build_perf", "synthetic", str(out), *specs]
+                    with (patch.object(sys, "argv", argv), patch.dict(os.environ, {"CHAT": "", "ONLY": "agents"}),
+                          patch.object(subprocess, "run") as adb, patch.object(sys, "stderr", io.StringIO()) as stderr):
+                        with self.assertRaises(SystemExit) as failure:
+                            perf.main()
+                    self.assertEqual(failure.exception.code, 2)
+                    self.assertIn("usage:", stderr.getvalue())
+                    adb.assert_not_called()
+                    self.assertEqual(out.read_bytes(), original)
+
     def test_only_a_cold_start_is_timed(self):
         self.assertEqual(perf.cold_start_ms("LaunchState: COLD\nTotalTime: 557\nWaitTime: 560"), 557)
         self.assertIsNone(perf.cold_start_ms("LaunchState: WARM\nTotalTime: 120"))
